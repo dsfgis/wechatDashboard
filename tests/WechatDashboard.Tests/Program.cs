@@ -1,9 +1,11 @@
 using WechatDashboard.Application.Classification;
+using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
+using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Persistence;
 
 var tests = new (string Name, Func<Task> Run)[]
@@ -12,7 +14,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Project classifier uses chat and keyword rules", TestProjectClassifierAsync),
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
-    ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync)
+    ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
+    ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
+    ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync)
 };
 
 var failures = new List<string>();
@@ -157,6 +161,87 @@ static async Task TestSqliteRoundTripAsync()
     AssertTrue(savedTodo.Id > 0, "Saved todo should get a database id.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should round-trip.");
     AssertEqual("@张三 请今天处理线上故障", recentMessages.Single().Content, "Recent message content should round-trip.");
+}
+
+static async Task TestJsonlDirectoryCaptureAdapterAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var filePath = Path.Combine(root, "wechat.jsonl");
+    await File.WriteAllLinesAsync(filePath, new[]
+    {
+        """{"id":"wx-1","platform":"WeChat","chatId":"crm","chatName":"CRM项目群","senderName":"王经理","content":"@张三 今天处理线上故障","sentAt":"2026-06-03T10:00:00+08:00","messageType":"Text"}""",
+        """{"id":"wx-2","platform":"WeChat","chatId":"crm","chatName":"CRM项目群","senderName":"李工","content":"同步一下接口变更","sentAt":"2026-06-03T10:05:00+08:00","messageType":"Text"}"""
+    }, CancellationToken.None);
+
+    var adapter = new JsonlDirectoryCaptureAdapter("WeChat", root);
+    var firstBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+    var secondBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
+    {
+        [adapter.Name] = firstBatch.NextOffset
+    }), CancellationToken.None);
+    await File.AppendAllLinesAsync(filePath, new[]
+    {
+        """{"id":"wx-3","platform":"WeChat","chatId":"pay","chatName":"支付项目群","senderName":"赵经理","content":"@张三 支付联调今天反馈","sentAt":"2026-06-03T10:10:00+08:00","messageType":"Text"}"""
+    }, CancellationToken.None);
+    var appendBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
+    {
+        [adapter.Name] = firstBatch.NextOffset
+    }), CancellationToken.None);
+
+    AssertEqual("WeChat.JsonlDirectory", adapter.Name, "Adapter name should include the source platform.");
+    AssertEqual(2, firstBatch.Messages.Count, "First capture should read both messages.");
+    AssertEqual(0, secondBatch.Messages.Count, "Second capture with offset should not reread messages.");
+    AssertEqual(1, appendBatch.Messages.Count, "Appended capture should read only the new line.");
+    AssertEqual("WeChat:wx-3", appendBatch.Messages[0].SourceMessageKey, "Appended message should preserve identity.");
+    AssertEqual("WeChat", firstBatch.Messages[0].Source, "Message source should come from platform.");
+    AssertEqual("WeChat:wx-1", firstBatch.Messages[0].SourceMessageKey, "Source key should be globally namespaced.");
+    AssertEqual("CRM项目群", firstBatch.Messages[0].ChatName, "Chat name should round-trip.");
+}
+
+static async Task TestCapturePipelineAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var inputRoot = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(inputRoot);
+    await File.WriteAllLinesAsync(Path.Combine(inputRoot, "wechat.jsonl"), new[]
+    {
+        """{"id":"wx-mention","platform":"WeChat","chatId":"crm","chatName":"CRM项目群","senderName":"王经理","content":"@张三 紧急，今天处理线上故障","sentAt":"2026-06-03T10:00:00+08:00","messageType":"Text"}""",
+        """{"id":"wx-normal","platform":"WeChat","chatId":"pay","chatName":"支付项目群","senderName":"赵经理","content":"支付联调今天继续推进","sentAt":"2026-06-03T10:10:00+08:00","messageType":"Text"}"""
+    }, CancellationToken.None);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
+    var pipeline = new MessageCapturePipeline(
+        adapters: new IMessageCaptureAdapter[] { new JsonlDirectoryCaptureAdapter("WeChat", inputRoot) },
+        messageRepository,
+        todoRepository,
+        offsetRepository,
+        new MentionDetector(new[] { "张三", "zhangsan" }),
+        new ProjectClassifier(new[]
+        {
+            new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
+            new ProjectRule(2, "支付平台", ProjectRuleType.Keyword, "支付", 80)
+        }),
+        new UrgencyRanker(priorityContacts: new[] { "王经理" }, priorityProjectIds: new[] { 1L }));
+
+    var firstRun = await pipeline.RunOnceAsync(CancellationToken.None);
+    var secondRun = await pipeline.RunOnceAsync(CancellationToken.None);
+    var recentMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
+    var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+
+    AssertEqual(2, firstRun.CapturedCount, "First pipeline run should capture two messages.");
+    AssertEqual(1, firstRun.CreatedTodoCount, "Only the mention should create a todo.");
+    AssertEqual(0, secondRun.CapturedCount, "Offset should prevent duplicate capture.");
+    AssertEqual(2, recentMessages.Count, "Two messages should be persisted.");
+    AssertEqual(1, pendingTodos.Count, "One pending todo should be persisted.");
+    AssertTrue(pendingTodos.Single().Title.Contains("@张三"), "Todo title should come from mention message.");
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)

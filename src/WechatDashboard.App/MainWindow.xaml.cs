@@ -3,12 +3,14 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
+using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Persistence;
 
 namespace WechatDashboard.App;
@@ -19,6 +21,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteDatabaseInitializer _databaseInitializer;
     private readonly SqliteMessageRepository _messageRepository;
     private readonly SqliteTodoRepository _todoRepository;
+    private readonly SqliteProcessingOffsetRepository _offsetRepository;
+    private readonly string _captureInboxPath;
 
     private string _summaryText = "加载中";
     private int _todayMessageCount;
@@ -38,14 +42,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _databaseInitializer = new SqliteDatabaseInitializer(_databasePath);
         _messageRepository = new SqliteMessageRepository(_databasePath);
         _todoRepository = new SqliteTodoRepository(_databasePath);
+        _offsetRepository = new SqliteProcessingOffsetRepository(_databasePath);
+        _captureInboxPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "WechatDashboard",
+            "capture-inbox");
 
         DatabasePath = _databasePath;
+        CaptureInboxPath = _captureInboxPath;
         DataContext = this;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public string DatabasePath { get; }
+
+    public string CaptureInboxPath { get; }
 
     public string SummaryText
     {
@@ -101,6 +113,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await RefreshAsync();
     }
 
+    private async void CaptureButton_Click(object sender, RoutedEventArgs e)
+    {
+        await _databaseInitializer.InitializeAsync(CancellationToken.None);
+        Directory.CreateDirectory(_captureInboxPath);
+        var pipeline = CreateCapturePipeline();
+        var result = await pipeline.RunOnceAsync(CancellationToken.None);
+        SummaryText = $"本次采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
+        await RefreshAsync();
+    }
+
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
     {
         await _databaseInitializer.InitializeAsync(CancellationToken.None);
@@ -146,6 +168,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(Diagnostics, new[]
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
+            new DiagnosticRow("WeChat.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), _captureInboxPath),
+            new DiagnosticRow("Feishu.JsonlDirectory", "可扩展", "-", "新增飞书 Adapter 后接入同一采集流水线"),
+            new DiagnosticRow("Shihuatong.JsonlDirectory", "可扩展", "-", "新增石化通 Adapter 后接入同一采集流水线"),
+            new DiagnosticRow("DingTalk.JsonlDirectory", "可扩展", "-", "新增钉钉 Adapter 后接入同一采集流水线"),
             new DiagnosticRow("WeChatUiaAdapter", "未启用", "-", "待接入 Windows UI Automation"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
@@ -189,6 +215,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 await _todoRepository.SaveAsync(TodoService.CreateFromMention(saved, classification, urgency), CancellationToken.None);
             }
         }
+    }
+
+    private MessageCapturePipeline CreateCapturePipeline()
+    {
+        return new MessageCapturePipeline(
+            adapters: new IMessageCaptureAdapter[]
+            {
+                new JsonlDirectoryCaptureAdapter("WeChat", _captureInboxPath)
+            },
+            _messageRepository,
+            _todoRepository,
+            _offsetRepository,
+            new MentionDetector(new[] { "张三", "zhangsan" }),
+            new ProjectClassifier(new[]
+            {
+                new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
+                new ProjectRule(2, "支付平台", ProjectRuleType.Keyword, "支付", 80),
+                new ProjectRule(3, "数据中台", ProjectRuleType.Keyword, "数据", 70)
+            }),
+            new UrgencyRanker(
+                priorityContacts: new[] { "王经理", "赵经理" },
+                priorityProjectIds: new[] { 1L, 2L }));
     }
 
     private static Message CreateSampleMessage(string key, string chatName, string senderName, string content, int minutesOffset)

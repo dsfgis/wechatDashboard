@@ -1,10 +1,11 @@
 using Microsoft.Data.Sqlite;
+using WechatDashboard.Application.Capture;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 
-public sealed class SqliteTodoRepository
+public sealed class SqliteTodoRepository : ITodoRepository
 {
     private readonly string _databasePath;
 

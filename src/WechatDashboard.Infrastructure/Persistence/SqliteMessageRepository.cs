@@ -1,10 +1,11 @@
 using Microsoft.Data.Sqlite;
+using WechatDashboard.Application.Capture;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 
-public sealed class SqliteMessageRepository
+public sealed class SqliteMessageRepository : IMessageRepository
 {
     private readonly string _databasePath;
 
@@ -53,6 +54,22 @@ public sealed class SqliteMessageRepository
         var id = (long)(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
         return message with { Id = id };
+    }
+
+    public async Task<bool> ExistsAsync(string source, string sourceMessageKey, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1
+            FROM messages
+            WHERE source = $source AND source_message_key = $sourceMessageKey
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$source", source);
+        command.Parameters.AddWithValue("$sourceMessageKey", sourceMessageKey);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is not null;
     }
 
     public async Task<IReadOnlyList<Message>> GetRecentAsync(int limit, CancellationToken cancellationToken)
