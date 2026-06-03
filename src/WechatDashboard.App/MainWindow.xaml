@@ -1,0 +1,158 @@
+<Window x:Class="WechatDashboard.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="微信项目消息看板"
+        Height="760"
+        Width="1180"
+        MinHeight="640"
+        MinWidth="980"
+        Loaded="MainWindow_Loaded">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Microsoft YaHei UI" />
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+        </Style>
+        <Style TargetType="DataGrid">
+            <Setter Property="AutoGenerateColumns" Value="False" />
+            <Setter Property="CanUserAddRows" Value="False" />
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="GridLinesVisibility" Value="Horizontal" />
+            <Setter Property="HeadersVisibility" Value="Column" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="#F4F6F8">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Background="#1F2937" Padding="18">
+            <DockPanel LastChildFill="True">
+                <TextBlock DockPanel.Dock="Top"
+                           Text="WeChat Dashboard"
+                           Foreground="White"
+                           FontSize="19"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,24" />
+                <StackPanel DockPanel.Dock="Top">
+                    <TextBlock Text="待办理" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
+                    <TextBlock Text="消息流" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
+                    <TextBlock Text="项目" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
+                    <TextBlock Text="看板" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
+                    <TextBlock Text="规则" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
+                    <TextBlock Text="采集诊断" Foreground="#E5E7EB" FontSize="15" />
+                </StackPanel>
+                <TextBlock DockPanel.Dock="Bottom"
+                           Text="{Binding DatabasePath}"
+                           Foreground="#9CA3AF"
+                           TextWrapping="Wrap"
+                           FontSize="11" />
+            </DockPanel>
+        </Border>
+
+        <Grid Grid.Column="1" Margin="22">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <DockPanel Grid.Row="0" Margin="0,0,0,16">
+                <StackPanel DockPanel.Dock="Left">
+                    <TextBlock Text="微信项目消息看板" FontSize="24" FontWeight="SemiBold" Foreground="#111827" />
+                    <TextBlock Text="{Binding SummaryText}" Margin="0,6,0,0" Foreground="#4B5563" />
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="刷新" Click="RefreshButton_Click" />
+                    <Button Content="写入示例消息" Click="SeedButton_Click" />
+                </StackPanel>
+            </DockPanel>
+
+            <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,16">
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16" Margin="0,0,12,0">
+                    <StackPanel>
+                        <TextBlock Text="今日消息" Foreground="#6B7280" />
+                        <TextBlock Text="{Binding TodayMessageCount}" FontSize="26" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16" Margin="0,0,12,0">
+                    <StackPanel>
+                        <TextBlock Text="@我" Foreground="#6B7280" />
+                        <TextBlock Text="{Binding MentionCount}" FontSize="26" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16" Margin="0,0,12,0">
+                    <StackPanel>
+                        <TextBlock Text="待办理" Foreground="#6B7280" />
+                        <TextBlock Text="{Binding PendingTodoCount}" FontSize="26" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16">
+                    <StackPanel>
+                        <TextBlock Text="P0/P1" Foreground="#6B7280" />
+                        <TextBlock Text="{Binding HighPriorityTodoCount}" FontSize="26" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+            </UniformGrid>
+
+            <TabControl Grid.Row="2">
+                <TabItem Header="待办理">
+                    <DataGrid ItemsSource="{Binding Todos}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
+                            <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
+                            <DataGridTextColumn Header="项目" Binding="{Binding Project}" Width="140" />
+                            <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" />
+                            <DataGridTextColumn Header="来源消息" Binding="{Binding SourceMessageId}" Width="100" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </TabItem>
+                <TabItem Header="消息流">
+                    <DataGrid ItemsSource="{Binding Messages}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="170" />
+                            <DataGridTextColumn Header="群聊" Binding="{Binding ChatName}" Width="160" />
+                            <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
+                            <DataGridTextColumn Header="@我" Binding="{Binding IsMentionMe}" Width="70" />
+                            <DataGridTextColumn Header="内容" Binding="{Binding Content}" Width="*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </TabItem>
+                <TabItem Header="项目看板">
+                    <DataGrid ItemsSource="{Binding ProjectSummaries}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="项目" Binding="{Binding Project}" Width="180" />
+                            <DataGridTextColumn Header="待办理" Binding="{Binding PendingTodos}" Width="100" />
+                            <DataGridTextColumn Header="P0/P1" Binding="{Binding HighPriorityTodos}" Width="100" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </TabItem>
+                <TabItem Header="规则">
+                    <Border Background="White" Padding="16">
+                        <StackPanel>
+                            <TextBlock Text="别名：张三、zhangsan" FontSize="15" Margin="0,0,0,10" />
+                            <TextBlock Text="项目规则：CRM项目群 => CRM升级；支付 => 支付平台" FontSize="15" Margin="0,0,0,10" />
+                            <TextBlock Text="紧急度：@我、紧急词、今天/下班前、线上故障、重点联系人、重点项目" FontSize="15" />
+                        </StackPanel>
+                    </Border>
+                </TabItem>
+                <TabItem Header="采集诊断">
+                    <Border Background="White" Padding="16">
+                        <DataGrid ItemsSource="{Binding Diagnostics}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="适配器" Binding="{Binding Adapter}" Width="180" />
+                                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="120" />
+                                <DataGridTextColumn Header="最近成功" Binding="{Binding LastSuccessAt}" Width="180" />
+                                <DataGridTextColumn Header="摘要" Binding="{Binding Detail}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+                </TabItem>
+            </TabControl>
+        </Grid>
+    </Grid>
+</Window>
