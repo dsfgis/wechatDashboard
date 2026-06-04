@@ -26,7 +26,7 @@ public sealed class WindowsOcrWindowTextSnapshotProvider : IWindowTextSnapshotPr
             var ocrText = window.NativeWindowHandle == 0
                 ? ""
                 : await _ocrReader.ReadWindowTextAsync(window.NativeWindowHandle, cancellationToken);
-            var combinedText = CombineText(automationText, ocrText);
+            var combinedText = CombineText(ocrText, automationText);
 
             snapshots.Add(new WindowTextSnapshot(
                 WindowTitle: window.Name,

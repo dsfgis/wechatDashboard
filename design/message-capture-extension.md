@@ -108,7 +108,7 @@ CRM项目群
 
 `WindowsUiAutomationSnapshotProvider` 和 `SystemWindowsAutomationReader` 已实现，可以通过 Windows UI Automation 枚举顶层窗口并聚合子元素文本。`SystemWindowsAutomationReader` 默认使用 Raw View 遍历，以便尽量读取微信自定义控件树中的文本。
 
-实际验证发现，当前微信桌面端可能只向 UIA 暴露窗口标题和按钮文本，例如 `微信 Weixin 微信 最小化 最大化 ...`，不暴露聊天正文。因此 WPF 默认采集入口已经改为 `WindowsOcrWindowTextSnapshotProvider`，它会把 UIA 文本和 Windows OCR 识别出的当前可见窗口文字合并后交给 `WindowTextCaptureAdapter` 解析。
+实际验证发现，当前微信桌面端可能只向 UIA 暴露窗口标题和按钮文本，例如 `微信 Weixin 微信 最小化 最大化 ...`，不暴露聊天正文。因此 WPF 默认采集入口已经改为 `WindowsOcrWindowTextSnapshotProvider`，它会把 Windows OCR 识别出的当前可见窗口文字放在快照前部，再附加 UIA 文本，并交给 `WindowTextCaptureAdapter` 解析。
 
 当前真实采集边界是“微信桌面端当前可见窗口文本”，不是微信全量历史数据库读取。后续验证重点是：
 

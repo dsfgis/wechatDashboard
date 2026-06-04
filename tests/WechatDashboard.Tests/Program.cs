@@ -401,6 +401,7 @@ static async Task TestWindowsOcrSnapshotProviderAsync()
 
     AssertEqual(1, snapshots.Count, "OCR provider should return only matching WeChat windows.");
     AssertEqual("微信", snapshots[0].WindowTitle, "OCR snapshot should keep the source window title.");
+    AssertTrue(snapshots[0].Text.StartsWith("数字石化（二期）", StringComparison.Ordinal), "OCR chat text should be prioritized before UIA window chrome.");
     AssertTrue(snapshots[0].Text.Contains("数字石化（二期）"), "OCR snapshot should contain visible chat title.");
     AssertTrue(snapshots[0].Text.Contains("@白驹过隙"), "OCR snapshot should contain visible @ mention text.");
     AssertEqual(capturedAt, snapshots[0].CapturedAt, "OCR snapshot should preserve automation read timestamp.");
