@@ -23,8 +23,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteTodoRepository _todoRepository;
     private readonly SqliteProcessingOffsetRepository _offsetRepository;
     private readonly string _captureInboxPath;
+    private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
+    private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
+
+    private CancellationTokenSource? _liveCaptureCts;
+    private Task? _liveCaptureTask;
 
     private string _summaryText = "加载中";
+    private string _listenerStatusText = "微信监听未启动";
     private int _todayMessageCount;
     private int _mentionCount;
     private int _pendingTodoCount;
@@ -58,6 +64,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string DatabasePath { get; }
 
     public string CaptureInboxPath { get; }
+
+    public string ListenerStatusText
+    {
+        get => _listenerStatusText;
+        private set => SetField(ref _listenerStatusText, value);
+    }
 
     public string SummaryText
     {
@@ -117,18 +129,32 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void CaptureButton_Click(object sender, RoutedEventArgs e)
     {
-        await _databaseInitializer.InitializeAsync(CancellationToken.None);
-        Directory.CreateDirectory(_captureInboxPath);
-        var pipeline = CreateCapturePipeline();
-        var result = await pipeline.RunOnceAsync(CancellationToken.None);
+        var result = await RunCaptureOnceAsync(CancellationToken.None);
         SummaryText = $"本次采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
         await RefreshAsync();
     }
 
+    private void StartWeChatListenerButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_liveCaptureTask is { IsCompleted: false })
+        {
+            ListenerStatusText = "微信监听已在运行";
+            return;
+        }
+
+        _liveCaptureCts = new CancellationTokenSource();
+        _liveCaptureTask = RunLiveCaptureLoopAsync(_liveCaptureCts.Token);
+        ListenerStatusText = $"微信监听运行中，间隔 {_liveCaptureInterval.TotalSeconds:0} 秒";
+    }
+
+    private async void StopWeChatListenerButton_Click(object sender, RoutedEventArgs e)
+    {
+        await StopLiveCaptureAsync();
+    }
+
     private async void ScanWeChatWindowsButton_Click(object sender, RoutedEventArgs e)
     {
-        var service = new WindowCaptureDiagnosticsService(
-            new WindowsUiAutomationSnapshotProvider(new SystemWindowsAutomationReader()));
+        var service = new WindowCaptureDiagnosticsService(CreateWindowTextSnapshotProvider());
         var rows = await service.ScanAsync(
             new WindowTextCaptureOptions(
                 Source: "WeChat",
@@ -145,6 +171,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             row.Preview)));
 
         SummaryText = $"扫描到 {rows.Count} 个微信可见窗口快照";
+    }
+
+    private async void MainWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        await StopLiveCaptureAsync();
     }
 
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
@@ -196,7 +227,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new DiagnosticRow("Feishu.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Feishu")),
             new DiagnosticRow("Shihuatong.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Shihuatong")),
             new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),
-            new DiagnosticRow("WeChatUiaAdapter", "未启用", "-", "待接入 Windows UI Automation"),
+            new DiagnosticRow("WeChat.WindowText", "启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "通过 Windows UI Automation 读取微信可见窗口文本"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
 
@@ -244,7 +275,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private MessageCapturePipeline CreateCapturePipeline()
     {
         return new MessageCapturePipeline(
-            adapters: CaptureAdapterFactory.CreateAdapters(CaptureAdapterFactory.CreateDefaultJsonlSources(_captureInboxPath)),
+            adapters: CaptureAdapterFactory.CreateAdapters(
+                CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath),
+                CreateWindowTextSnapshotProvider()),
             _messageRepository,
             _todoRepository,
             _offsetRepository,
@@ -258,6 +291,109 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new UrgencyRanker(
                 priorityContacts: new[] { "王经理", "赵经理" },
                 priorityProjectIds: new[] { 1L, 2L }));
+    }
+
+    private async Task<CaptureRunResult> RunCaptureOnceAsync(CancellationToken cancellationToken)
+    {
+        await _captureSemaphore.WaitAsync(cancellationToken);
+        try
+        {
+            await _databaseInitializer.InitializeAsync(cancellationToken);
+            Directory.CreateDirectory(_captureInboxPath);
+            var pipeline = CreateCapturePipeline();
+            return await pipeline.RunOnceAsync(cancellationToken);
+        }
+        finally
+        {
+            _captureSemaphore.Release();
+        }
+    }
+
+    private async Task RunLiveCaptureLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await RunCaptureOnceAsync(cancellationToken);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    ListenerStatusText = $"微信监听运行中，最近采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，待办 {result.CreatedTodoCount} 条";
+                    SummaryText = $"监听采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
+                });
+
+                if (result.PersistedCount > 0 || result.CreatedTodoCount > 0)
+                {
+                    await RefreshOnUiThreadAsync();
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    ListenerStatusText = $"微信监听异常：{ex.Message}";
+                    SummaryText = $"微信监听异常：{ex.Message}";
+                });
+            }
+
+            try
+            {
+                await Task.Delay(_liveCaptureInterval, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+    }
+
+    private async Task StopLiveCaptureAsync()
+    {
+        if (_liveCaptureCts is null)
+        {
+            ListenerStatusText = "微信监听未启动";
+            return;
+        }
+
+        _liveCaptureCts.Cancel();
+        try
+        {
+            if (_liveCaptureTask is not null)
+            {
+                await _liveCaptureTask;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            _liveCaptureCts.Dispose();
+            _liveCaptureCts = null;
+            _liveCaptureTask = null;
+            ListenerStatusText = "微信监听已停止";
+        }
+    }
+
+    private async Task RefreshOnUiThreadAsync()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            await RefreshAsync();
+            return;
+        }
+
+        var refreshTask = await Dispatcher.InvokeAsync(RefreshAsync);
+        await refreshTask;
+    }
+
+    private static IWindowTextSnapshotProvider CreateWindowTextSnapshotProvider()
+    {
+        return new WindowsUiAutomationSnapshotProvider(new SystemWindowsAutomationReader());
     }
 
     private static Message CreateSampleMessage(string key, string chatName, string senderName, string content, int minutesOffset)

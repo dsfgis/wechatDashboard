@@ -15,6 +15,11 @@ public sealed class SystemWindowsAutomationReader : IWindowAutomationReader
 
     public Task<WindowAutomationReadResult> ReadTopLevelWindowsAsync(CancellationToken cancellationToken)
     {
+        return Task.Run(() => ReadTopLevelWindows(cancellationToken), cancellationToken);
+    }
+
+    private WindowAutomationReadResult ReadTopLevelWindows(CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         var capturedAt = DateTimeOffset.Now;
         var root = AutomationElement.RootElement;
@@ -25,7 +30,7 @@ public sealed class SystemWindowsAutomationReader : IWindowAutomationReader
             .Where(element => !string.IsNullOrWhiteSpace(element.Name))
             .ToArray();
 
-        return Task.FromResult(new WindowAutomationReadResult(windows, capturedAt));
+        return new WindowAutomationReadResult(windows, capturedAt);
     }
 
     private WindowAutomationElement ReadElement(AutomationElement element, int depth, CancellationToken cancellationToken)

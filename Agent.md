@@ -21,7 +21,10 @@ design/                              Design, extension, and development plan doc
 - Adapters return `CaptureBatch` containing `CapturedMessage` records.
 - `MessageCapturePipeline` owns deduplication, persistence, `@我` detection, project classification, urgency ranking, Todo creation, and offset saving.
 - `WindowTextCaptureAdapter` parses visible-window text snapshots.
-- `WindowsUiAutomationSnapshotProvider` plus `SystemWindowsAutomationReader` can read Windows UI Automation top-level windows, but the WeChat source remains disabled until validated against the actual desktop app.
+- `WindowsUiAutomationSnapshotProvider` plus `SystemWindowsAutomationReader` can read Windows UI Automation top-level windows.
+- `CaptureAdapterFactory.CreateDefaultLiveSources(...)` enables `WeChat.WindowText` while preserving JSONL sources for WeChat, Feishu, Shihuatong, and DingTalk.
+- WPF "采集一次" uses the live source set, so it runs JSONL import and WeChat visible-window UIA capture together.
+- WPF "开始微信监听" / "停止监听" runs the same capture pipeline on a 5-second polling loop.
 - WPF capture diagnostics includes a "扫描微信窗口" action that previews UIA window text without persisting messages.
 - SQLite is accessed through repository classes in `Infrastructure/Persistence`.
 - WPF should call application/infrastructure services and avoid embedding platform-specific capture code.
@@ -77,4 +80,4 @@ Each `.jsonl` line is one message:
 
 Follow `design/2026-06-04-development-plan.md`.
 
-Immediate next step: validate `SystemWindowsAutomationReader` against the actual WeChat desktop window, record the observed UIA text format, tune parsing if needed, and keep the WeChat window-text source disabled until validation passes.
+Immediate next step: validate `SystemWindowsAutomationReader` against the actual WeChat desktop window, record the observed UIA text format, and tune parsing if the preview differs from the supported single-line or split-block formats. Current WeChat capture only reads visible UIA text; it does not read hidden chats, encrypted databases, or full historical messages.

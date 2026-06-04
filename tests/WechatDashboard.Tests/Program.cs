@@ -16,11 +16,14 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
+    ("Capture adapter factory creates live WeChat visible-window adapters", TestLiveCaptureAdapterFactoryAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
+    ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
     ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
     ("Window capture diagnostics service summarizes matching snapshots", TestWindowCaptureDiagnosticsServiceAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
-    ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync)
+    ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
+    ("Capture pipeline persists live WeChat visible-window messages", TestLiveWeChatWindowCapturePipelineAsync)
 };
 
 var failures = new List<string>();
@@ -207,6 +210,26 @@ static Task TestCaptureAdapterFactoryAsync()
     return Task.CompletedTask;
 }
 
+static Task TestLiveCaptureAdapterFactoryAsync()
+{
+    var captureRoot = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    var definitions = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot);
+
+    AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep WeChat JSONL import.");
+    AssertTrue(definitions.Any(source => source.Source == "Feishu" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep future Feishu JSONL import.");
+    AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText && source.IsEnabled), "Live capture should enable WeChat visible-window source.");
+
+    var adapters = CaptureAdapterFactory.CreateAdapters(
+        definitions,
+        new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
+
+    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.WindowText"), "Live adapters should include WeChat visible-window adapter.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "Live adapters should still include WeChat JSONL adapter.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
+
+    return Task.CompletedTask;
+}
+
 static async Task TestWindowTextCaptureAdapterAsync()
 {
     var capturedAt = new DateTimeOffset(2026, 6, 4, 9, 30, 0, TimeSpan.FromHours(8));
@@ -249,6 +272,43 @@ static async Task TestWindowTextCaptureAdapterAsync()
     AssertEqual("王经理", firstBatch.Messages[0].SenderName, "Sender should be parsed from visible text.");
     AssertEqual("@张三 今天下班前处理线上故障", firstBatch.Messages[0].Content, "Content should be normalized from visible text.");
     AssertEqual(new DateTimeOffset(2026, 6, 4, 9, 20, 0, TimeSpan.FromHours(8)), firstBatch.Messages[0].SentAt, "Visible HH:mm time should use snapshot date.");
+}
+
+static async Task TestWindowTextCaptureAdapterSplitBlocksAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 6, 4, 9, 30, 0, TimeSpan.FromHours(8));
+    var provider = new StaticWindowTextSnapshotProvider(new[]
+    {
+        new WindowTextSnapshot(
+            WindowTitle: "微信",
+            Text: """
+                  CRM项目群
+                  09:20
+                  王经理
+                  @张三 今天下班前处理线上故障
+                  09:21
+                  李工
+                  同步一下接口变更
+                  """,
+            CapturedAt: capturedAt)
+    });
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "微信可见窗口",
+        WindowTitleContains: "微信",
+        ChatId: "visible-window",
+        ChatName: "微信可见窗口");
+    var adapter = new WindowTextCaptureAdapter(options, provider);
+
+    var batch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+
+    AssertEqual(2, batch.Messages.Count, "Split UIA blocks should be parsed as visible messages.");
+    AssertEqual("王经理", batch.Messages[0].SenderName, "Sender should come from the split block.");
+    AssertEqual("@张三 今天下班前处理线上故障", batch.Messages[0].Content, "Content should come from the line after sender.");
+    AssertEqual("CRM项目群", batch.Messages[0].ChatName, "Chat name should be inferred from the first visible title line when the window title is generic.");
+    AssertEqual(new DateTimeOffset(2026, 6, 4, 9, 20, 0, TimeSpan.FromHours(8)), batch.Messages[0].SentAt, "Split block time should use snapshot date.");
+    AssertEqual("李工", batch.Messages[1].SenderName, "Second sender should be parsed from the next block.");
+    AssertEqual("同步一下接口变更", batch.Messages[1].Content, "Second content should be parsed from the next block.");
 }
 
 static async Task TestWindowsUiAutomationSnapshotProviderAsync()
@@ -397,6 +457,58 @@ static async Task TestCapturePipelineAsync()
     AssertEqual(2, recentMessages.Count, "Two messages should be persisted.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should be persisted.");
     AssertTrue(pendingTodos.Single().Title.Contains("@张三"), "Todo title should come from mention message.");
+}
+
+static async Task TestLiveWeChatWindowCapturePipelineAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var captureRoot = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    var capturedAt = new DateTimeOffset(2026, 6, 4, 11, 0, 0, TimeSpan.FromHours(8));
+    var provider = new StaticWindowTextSnapshotProvider(new[]
+    {
+        new WindowTextSnapshot(
+            WindowTitle: "微信",
+            Text: """
+                  CRM项目群
+                  10:58
+                  王经理
+                  @张三 紧急，今天处理线上故障
+                  """,
+            CapturedAt: capturedAt)
+    });
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
+    var pipeline = new MessageCapturePipeline(
+        adapters: CaptureAdapterFactory.CreateAdapters(CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot), provider),
+        messageRepository,
+        todoRepository,
+        offsetRepository,
+        new MentionDetector(new[] { "张三", "zhangsan" }),
+        new ProjectClassifier(new[]
+        {
+            new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100)
+        }),
+        new UrgencyRanker(priorityContacts: new[] { "王经理" }, priorityProjectIds: new[] { 1L }));
+
+    var firstRun = await pipeline.RunOnceAsync(CancellationToken.None);
+    var secondRun = await pipeline.RunOnceAsync(CancellationToken.None);
+    var recentMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
+    var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+
+    AssertEqual(1, firstRun.CapturedCount, "Live WeChat window source should capture the visible mention.");
+    AssertEqual(1, firstRun.PersistedCount, "Visible mention should be persisted.");
+    AssertEqual(1, firstRun.CreatedTodoCount, "Visible mention should create a todo.");
+    AssertEqual(0, secondRun.CapturedCount, "Live WeChat offset should prevent unchanged visible-window duplicates.");
+    AssertEqual("WeChat", recentMessages.Single().Source, "Persisted live message should keep WeChat source.");
+    AssertEqual("CRM项目群", recentMessages.Single().ChatName, "Persisted live message should use inferred chat name.");
+    AssertEqual(1, pendingTodos.Count, "One pending todo should be created from @我.");
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)

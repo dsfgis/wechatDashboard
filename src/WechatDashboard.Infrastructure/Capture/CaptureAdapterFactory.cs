@@ -16,6 +16,13 @@ public static class CaptureAdapterFactory
         };
     }
 
+    public static IReadOnlyList<CaptureSourceDefinition> CreateDefaultLiveSources(string captureRootPath)
+    {
+        return CreateDefaultJsonlSources(captureRootPath)
+            .Concat(new[] { CreateWeChatWindowTextSource() with { IsEnabled = true } })
+            .ToArray();
+    }
+
     public static IReadOnlyList<IMessageCaptureAdapter> CreateAdapters(IEnumerable<CaptureSourceDefinition> sources)
     {
         return CreateAdapters(sources, null);

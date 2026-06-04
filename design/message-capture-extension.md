@@ -2,7 +2,7 @@
 
 ## 当前实现
 
-当前版本已经实现通用采集流水线和一个本地 JSONL 目录采集器。
+当前版本已经实现通用采集流水线、本地 JSONL 目录采集器，以及微信桌面端可见窗口的 UI Automation 轮询采集。
 
 采集目录：
 
@@ -10,7 +10,7 @@
 %LOCALAPPDATA%\WechatDashboard\capture-inbox
 ```
 
-WPF 界面点击“采集一次”后，会读取该目录下按来源划分的子目录，把新消息写入 SQLite，并对命中 `@我` 的消息自动创建待办理 Todo。
+WPF 界面点击“采集一次”后，会同时运行默认 JSONL 目录采集源和 `WeChat.WindowText` 可见窗口采集源，把新消息写入 SQLite，并对命中 `@我` 的消息自动创建待办理 Todo。点击“开始微信监听”后，应用会按固定间隔重复运行同一条采集流水线。
 
 默认来源目录：
 
@@ -66,7 +66,11 @@ Adapter 输出 `CapturedMessage`，由 `MessageCapturePipeline` 统一完成：
 7. 自动 Todo 创建。
 8. offset 保存。
 
-来源注册由 `CaptureSourceDefinition` 描述，当前 `CaptureAdapterFactory.CreateDefaultJsonlSources(...)` 会为微信、飞书、石化通、钉钉创建 JSONL 目录采集来源。后续真实监听器应继续使用同一来源定义和 `IMessageCaptureAdapter`。
+来源注册由 `CaptureSourceDefinition` 描述：
+
+1. `CaptureAdapterFactory.CreateDefaultJsonlSources(...)` 会为微信、飞书、石化通、钉钉创建 JSONL 目录采集来源。
+2. `CaptureAdapterFactory.CreateDefaultLiveSources(...)` 会在 JSONL 来源之外启用 `WeChat.WindowText`，用于桌面端微信可见窗口实时采集。
+3. 后续飞书、石化通、钉钉真实监听器应继续使用同一来源定义和 `IMessageCaptureAdapter`。
 
 ## 可见窗口文本采集
 
@@ -79,24 +83,38 @@ Adapter 输出 `CapturedMessage`，由 `MessageCapturePipeline` 统一完成：
 
 的文本行，输出标准 `CapturedMessage`。
 
+同时支持 UIA 常见的分行结构：
+
+```text
+CRM项目群
+09:20
+王经理
+@张三 今天下班前处理线上故障
+09:21
+李工
+同步一下接口变更
+```
+
 已实现能力：
 
 1. 按窗口标题关键字过滤快照。
 2. 从 `HH:mm 发送人: 内容` 或 `HH:mm 发送人：内容` 解析发送人、内容和发送时间。
-3. 从窗口标题推断会话名，例如 `CRM项目群 - 微信` 推断为 `CRM项目群`。
-4. 使用窗口标题和规范化文本行生成稳定 `SourceMessageKey`。
-5. 使用快照 fingerprint 作为 offset，避免重复处理完全相同的窗口文本。
+3. 从 `时间 / 发送人 / 内容` 或 `发送人 / 时间 / 内容` 分行块解析 UIA 可见消息。
+4. 从窗口标题或首个可见标题行推断会话名，例如 `CRM项目群 - 微信` 或窗口正文首行 `CRM项目群` 推断为 `CRM项目群`。
+5. 使用窗口标题、会话名和规范化消息内容生成稳定 `SourceMessageKey`。
+6. 使用快照 fingerprint 作为 offset，避免重复处理完全相同的窗口文本。
 
-`CaptureAdapterFactory.CreateWeChatWindowTextSource()` 已提供微信可见窗口来源定义，但默认 `IsEnabled = false`。
+`CaptureAdapterFactory.CreateWeChatWindowTextSource()` 仍返回默认禁用的单独来源定义，供设置页或测试按需启用。WPF 默认实时采集入口使用 `CreateDefaultLiveSources(...)`，会启用微信可见窗口来源。
 
-`WindowsUiAutomationSnapshotProvider` 和 `SystemWindowsAutomationReader` 已实现，可以通过 Windows UI Automation 枚举顶层窗口并聚合子元素文本。该 provider 仍需要在实际微信桌面窗口上人工验证后再启用，验证重点是：
+`WindowsUiAutomationSnapshotProvider` 和 `SystemWindowsAutomationReader` 已实现，可以通过 Windows UI Automation 枚举顶层窗口并聚合子元素文本。当前真实采集边界是“微信桌面端当前可见窗口文本”，不是微信全量历史数据库读取。后续验证重点是：
 
 1. 微信窗口标题是否稳定包含“微信”。
 2. UIA 子元素是否暴露群名、发送人、时间和消息正文。
 3. 实际文本格式是否符合 `WindowTextCaptureAdapter` 的解析规则。
 4. 轮询是否会带来明显桌面卡顿。
+5. 未打开或未展示在 UIA 树中的会话不会被采集。
 
-WPF 的“采集诊断”页提供“扫描微信窗口”按钮。该按钮只读取并展示 UIA 可见文本快照预览，不会写入 SQLite，也不会创建 Todo。它用于验证真实微信窗口的 UIA 文本格式。
+WPF 的“采集诊断”页提供“扫描微信窗口”按钮。该按钮只读取并展示 UIA 可见文本快照预览，不会写入 SQLite，也不会创建 Todo。它用于验证真实微信窗口的 UIA 文本格式。当“采集一次”或“开始微信监听”没有采集到消息时，应先查看这里的快照预览，再按真实文本格式扩展解析规则。
 
 ## 后续接入建议
 

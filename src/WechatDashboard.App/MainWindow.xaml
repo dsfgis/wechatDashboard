@@ -6,7 +6,8 @@
         Width="1180"
         MinHeight="640"
         MinWidth="980"
-        Loaded="MainWindow_Loaded">
+        Loaded="MainWindow_Loaded"
+        Closing="MainWindow_Closing">
     <Window.Resources>
         <Style TargetType="TextBlock">
             <Setter Property="FontFamily" Value="Microsoft YaHei UI" />
@@ -65,10 +66,13 @@
                 <StackPanel DockPanel.Dock="Left">
                     <TextBlock Text="微信项目消息看板" FontSize="24" FontWeight="SemiBold" Foreground="#111827" />
                     <TextBlock Text="{Binding SummaryText}" Margin="0,6,0,0" Foreground="#4B5563" />
+                    <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button Content="刷新" Click="RefreshButton_Click" />
                     <Button Content="采集一次" Click="CaptureButton_Click" />
+                    <Button Content="开始微信监听" Click="StartWeChatListenerButton_Click" />
+                    <Button Content="停止监听" Click="StopWeChatListenerButton_Click" />
                     <Button Content="写入示例消息" Click="SeedButton_Click" />
                 </StackPanel>
             </DockPanel>

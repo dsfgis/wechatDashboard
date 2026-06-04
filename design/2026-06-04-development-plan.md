@@ -27,13 +27,18 @@ Completed:
 - `WindowsUiAutomationSnapshotProvider` and `SystemWindowsAutomationReader` for reading Windows UI Automation top-level window snapshots.
 - WPF capture diagnostics can scan WeChat visible windows and show UIA text previews without persisting messages.
 - Disabled WeChat window-text source profile through `CaptureAdapterFactory.CreateWeChatWindowTextSource()`.
+- Default live capture source registration through `CaptureAdapterFactory.CreateDefaultLiveSources(...)`, enabling `WeChat.WindowText` while preserving JSONL sources for WeChat, Feishu, Shihuatong, and DingTalk.
+- WPF "采集一次" now runs the live capture source set, including WeChat visible-window UI Automation capture.
+- WPF "开始微信监听" and "停止监听" run the same capture pipeline on a 5-second polling interval.
+- `WindowTextCaptureAdapter` supports both single-line `HH:mm Sender: Content` rows and UIA split blocks such as `HH:mm / Sender / Content`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
-- Tests covering core rules, SQLite round-trip, JSONL capture, and capture pipeline.
+- Tests covering core rules, SQLite round-trip, JSONL capture, visible-window capture, live WeChat source registration, and capture pipeline.
 - Project targets .NET 10 to match the installed desktop runtime.
 
 Known gaps:
 
-- Real Windows UI Automation snapshot provider exists, but has not yet been validated against the actual WeChat desktop window.
+- Real Windows UI Automation snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
+- Current WeChat capture is limited to visible UIA text. It does not read hidden chats, encrypted message databases, or full historical WeChat data.
 - Windows notification listener is not implemented.
 - Feishu, Shihuatong, and DingTalk adapters are not implemented.
 - Project rules are hardcoded.
@@ -73,9 +78,30 @@ Purpose: capture user-visible WeChat desktop text without process injection or d
 - [x] Step 1: Add tests around text normalization and stable source keys using injected window text snapshots.
 - [x] Step 2: Implement a generic visible-window text adapter behind `IMessageCaptureAdapter`.
 - [x] Step 3: Add a WeChat profile that matches WeChat window titles and emits `Source = "WeChat"`.
-- [x] Step 4: Keep the adapter disabled by default until tested on the real desktop app.
+- [x] Step 4: Keep the standalone source profile disabled by default, while enabling it only through the explicit WPF live source set.
 
-Note: this milestone implements the testable visible-window adapter core and a disabled WeChat profile. The actual Windows UI Automation snapshot provider remains a separate follow-up because it must be verified against the real desktop app window.
+Note: this milestone now includes the testable visible-window adapter core, Windows UI Automation snapshot provider, and WPF live capture entry. The remaining work is real-desktop validation and parser tuning using actual WeChat UIA snapshots.
+
+## Milestone 2.1: WeChat Live Capture Wiring
+
+Purpose: make the existing WeChat visible-window adapter usable from WPF without breaking future multi-source expansion.
+
+**Files:**
+
+- Modify: `src/WechatDashboard.Infrastructure/Capture/CaptureAdapterFactory.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/WindowTextCaptureAdapter.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/SystemWindowsAutomationReader.cs`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
+- Modify: `tests/WechatDashboard.Tests/Program.cs`
+- Modify: `design/message-capture-extension.md`
+- Modify: `Agent.md`
+
+- [x] Step 1: Add failing tests proving live source registration includes enabled `WeChat.WindowText`.
+- [x] Step 2: Add failing tests proving UIA split message blocks can be parsed and persisted through the pipeline.
+- [x] Step 3: Add `CreateDefaultLiveSources(...)` and wire WPF one-shot capture to live sources.
+- [x] Step 4: Add WPF start/stop listener buttons using the same capture pipeline on a 5-second polling interval.
+- [x] Step 5: Run tests and full solution build.
 
 ## Milestone 3: Capture Source Settings UI
 
@@ -149,4 +175,6 @@ Expected result:
 
 ## Immediate Next Work
 
-Milestones 1 and 2 have been completed at the framework level. The app now has a capture diagnostics button for scanning WeChat visible-window UIA text previews. The next executable milestone is to run that diagnostic against the real WeChat desktop app, document the observed UIA text format, tune parsing rules if needed, and only then expose an enable switch in capture settings.
+Milestones 1, 2, and 2.1 have been completed at the framework level. The app now runs WeChat visible-window UIA capture from "采集一次" and supports 5-second polling from "开始微信监听".
+
+The next executable milestone is still real-desktop validation: open the target WeChat chat window, run "扫描微信窗口", document the observed UIA text preview, and tune parsing if the preview format differs from the currently supported single-line or split-block formats. After validation, continue with Milestone 3 so capture sources can be enabled and disabled from persisted settings instead of code defaults.
