@@ -83,7 +83,17 @@ public static class CaptureAdapterFactory
                 DisplayName: source.DisplayName,
                 WindowTitleContains: source.Location,
                 ChatId: source.Source,
-                ChatName: source.DisplayName),
+                ChatName: source.DisplayName)
+            {
+                IgnoreWindowTitleContains = CreateDefaultIgnoredWindowTitles(source.Source)
+            },
             windowTextSnapshotProvider);
+    }
+
+    private static IReadOnlyList<string> CreateDefaultIgnoredWindowTitles(string source)
+    {
+        return string.Equals(source, "WeChat", StringComparison.OrdinalIgnoreCase)
+            ? new[] { "微信项目消息看板", "WeChat Dashboard" }
+            : Array.Empty<string>();
     }
 }

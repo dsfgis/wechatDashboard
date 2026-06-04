@@ -62,9 +62,16 @@ public sealed class WindowsScreenOcrReader : IScreenOcrReader
             return null;
         }
 
-        var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        var crop = WindowOcrCropCalculator.CalculateWeChatChatPanel(width, height);
+        var bitmap = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppArgb);
         using var graphics = Graphics.FromImage(bitmap);
-        graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+        graphics.CopyFromScreen(
+            rect.Left + crop.X,
+            rect.Top + crop.Y,
+            0,
+            0,
+            new Size(crop.Width, crop.Height),
+            CopyPixelOperation.SourceCopy);
         return bitmap;
     }
 

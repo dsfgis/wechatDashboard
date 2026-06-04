@@ -21,6 +21,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
     ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
+    ("WeChat OCR crop calculator focuses the chat panel", TestWeChatOcrCropCalculatorAsync),
     ("Windows OCR snapshot provider reads WeChat text when UIA exposes only chrome", TestWindowsOcrSnapshotProviderAsync),
     ("Window capture diagnostics service summarizes matching snapshots", TestWindowCaptureDiagnosticsServiceAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
@@ -364,6 +365,20 @@ static async Task TestWindowsUiAutomationSnapshotProviderAsync()
     AssertEqual(capturedAt, snapshots[0].CapturedAt, "Reader timestamp should be preserved.");
 }
 
+static Task TestWeChatOcrCropCalculatorAsync()
+{
+    var crop = WindowOcrCropCalculator.CalculateWeChatChatPanel(1552, 1000);
+    var smallWindowCrop = WindowOcrCropCalculator.CalculateWeChatChatPanel(500, 300);
+
+    AssertTrue(crop.X >= 400 && crop.X <= 480, "WeChat crop should skip the left navigation and conversation list.");
+    AssertTrue(crop.Y >= 40 && crop.Y <= 80, "WeChat crop should skip the window title bar.");
+    AssertTrue(crop.Width < 1200, "WeChat crop width should be smaller than the full window width.");
+    AssertTrue(crop.Height > 850, "WeChat crop should keep most of the chat area height.");
+    AssertEqual(new WindowOcrCropRectangle(0, 0, 500, 300), smallWindowCrop, "Small windows should fall back to full-window OCR.");
+
+    return Task.CompletedTask;
+}
+
 static async Task TestWindowsOcrSnapshotProviderAsync()
 {
     var capturedAt = new DateTimeOffset(2026, 6, 4, 21, 29, 0, TimeSpan.FromHours(8));
@@ -374,6 +389,11 @@ static async Task TestWindowsOcrSnapshotProviderAsync()
             Text: "微信 Weixin 微信 最小化 最大化 上下文帮助 关闭",
             Children: Array.Empty<WindowAutomationElement>(),
             NativeWindowHandle: 1001),
+        new WindowAutomationElement(
+            Name: "微信项目消息看板",
+            Text: "微信项目消息看板",
+            Children: Array.Empty<WindowAutomationElement>(),
+            NativeWindowHandle: 1003),
         new WindowAutomationElement(
             Name: "无关窗口",
             Text: "不应 OCR",
@@ -387,7 +407,8 @@ static async Task TestWindowsOcrSnapshotProviderAsync()
                  18:38
                  国科 王建辉
                  @白驹过隙
-                 """
+                 """,
+        [1003] = "不应采集本应用窗口"
     });
     var provider = new WindowsOcrWindowTextSnapshotProvider(reader, ocrReader);
     var options = new WindowTextCaptureOptions(
@@ -395,7 +416,10 @@ static async Task TestWindowsOcrSnapshotProviderAsync()
         DisplayName: "微信可见窗口",
         WindowTitleContains: "微信",
         ChatId: "visible-window",
-        ChatName: "微信可见窗口");
+        ChatName: "微信可见窗口")
+    {
+        IgnoreWindowTitleContains = new[] { "微信项目消息看板" }
+    };
 
     var snapshots = await provider.GetSnapshotsAsync(options, CancellationToken.None);
 
@@ -404,6 +428,7 @@ static async Task TestWindowsOcrSnapshotProviderAsync()
     AssertTrue(snapshots[0].Text.StartsWith("数字石化（二期）", StringComparison.Ordinal), "OCR chat text should be prioritized before UIA window chrome.");
     AssertTrue(snapshots[0].Text.Contains("数字石化（二期）"), "OCR snapshot should contain visible chat title.");
     AssertTrue(snapshots[0].Text.Contains("@白驹过隙"), "OCR snapshot should contain visible @ mention text.");
+    AssertFalse(snapshots[0].Text.Contains("不应采集本应用窗口"), "OCR snapshot should exclude this dashboard window.");
     AssertEqual(capturedAt, snapshots[0].CapturedAt, "OCR snapshot should preserve automation read timestamp.");
 }
 

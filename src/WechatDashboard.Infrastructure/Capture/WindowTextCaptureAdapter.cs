@@ -24,6 +24,8 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         var matchedSnapshots = snapshots
             .Where(snapshot => string.IsNullOrWhiteSpace(_options.WindowTitleContains) ||
                                snapshot.WindowTitle.Contains(_options.WindowTitleContains, StringComparison.OrdinalIgnoreCase))
+            .Where(snapshot => !_options.IgnoreWindowTitleContains.Any(ignored =>
+                snapshot.WindowTitle.Contains(ignored, StringComparison.OrdinalIgnoreCase)))
             .ToArray();
 
         var normalizedSnapshot = string.Join("\n", matchedSnapshots.Select(snapshot => snapshot.WindowTitle + "\n" + NormalizeLine(snapshot.Text)));

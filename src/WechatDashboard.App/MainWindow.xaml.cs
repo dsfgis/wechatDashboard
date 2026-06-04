@@ -156,12 +156,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         var service = new WindowCaptureDiagnosticsService(CreateWindowTextSnapshotProvider());
         var rows = await service.ScanAsync(
-            new WindowTextCaptureOptions(
-                Source: "WeChat",
-                DisplayName: "微信可见窗口",
-                WindowTitleContains: "微信",
-                ChatId: "visible-window",
-                ChatName: "微信可见窗口"),
+            CreateWeChatWindowTextOptions(),
             CancellationToken.None);
 
         Replace(WindowSnapshots, rows.Select(row => new WindowSnapshotRow(
@@ -396,6 +391,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return new WindowsOcrWindowTextSnapshotProvider(
             new SystemWindowsAutomationReader(),
             new WindowsScreenOcrReader());
+    }
+
+    private static WindowTextCaptureOptions CreateWeChatWindowTextOptions()
+    {
+        return new WindowTextCaptureOptions(
+            Source: "WeChat",
+            DisplayName: "微信可见窗口",
+            WindowTitleContains: "微信",
+            ChatId: "visible-window",
+            ChatName: "微信可见窗口")
+        {
+            IgnoreWindowTitleContains = new[] { "微信项目消息看板", "WeChat Dashboard" }
+        };
     }
 
     private static Message CreateSampleMessage(string key, string chatName, string senderName, string content, int minutesOffset)

@@ -33,6 +33,8 @@ Completed:
 - `WindowTextCaptureAdapter` supports both single-line `HH:mm Sender: Content` rows and UIA split blocks such as `HH:mm / Sender / Content`.
 - `SystemWindowsAutomationReader` now uses UIA Raw View traversal by default.
 - `WindowsOcrWindowTextSnapshotProvider` and `WindowsScreenOcrReader` add a Windows OCR fallback for WeChat windows that expose only window chrome through UIA.
+- `WindowOcrCropCalculator` crops WeChat OCR to the right-side chat panel and skips the left navigation/conversation list.
+- WeChat capture options ignore this application's own window title, `微信项目消息看板`, so diagnostics and capture do not ingest dashboard text.
 - `DefaultMentionAliases` sets the current user's aliases to `白驹过隙` and `戴少峰`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
 - Tests covering core rules, SQLite round-trip, JSONL capture, visible-window capture, OCR snapshot fallback, live WeChat source registration, and capture pipeline.
@@ -116,8 +118,10 @@ Purpose: handle current WeChat desktop windows where UI Automation exposes only 
 - Create: `src/WechatDashboard.Infrastructure/Capture/IScreenOcrReader.cs`
 - Create: `src/WechatDashboard.Infrastructure/Capture/WindowsOcrWindowTextSnapshotProvider.cs`
 - Create: `src/WechatDashboard.Infrastructure/Capture/WindowsScreenOcrReader.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WindowOcrCropCalculator.cs`
 - Modify: `src/WechatDashboard.Infrastructure/Capture/SystemWindowsAutomationReader.cs`
 - Modify: `src/WechatDashboard.Infrastructure/Capture/WindowAutomationElement.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/WindowTextCaptureOptions.cs`
 - Modify: `src/WechatDashboard.App/MainWindow.xaml`
 - Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
@@ -128,6 +132,7 @@ Purpose: handle current WeChat desktop windows where UI Automation exposes only 
 - [x] Step 4: Add OCR snapshot provider and screen OCR reader.
 - [x] Step 5: Wire WPF capture and diagnostics to UIA + OCR snapshots.
 - [x] Step 6: Run tests and full solution build.
+- [x] Step 7: Prioritize OCR chat text, crop OCR to the chat panel, and exclude the dashboard window from WeChat capture.
 
 ## Milestone 3: Capture Source Settings UI
 

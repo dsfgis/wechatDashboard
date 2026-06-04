@@ -8,4 +8,6 @@ public sealed record WindowTextCaptureOptions(
     string ChatName)
 {
     public IReadOnlyList<string> IgnoreLinePrefixes { get; init; } = Array.Empty<string>();
+
+    public IReadOnlyList<string> IgnoreWindowTitleContains { get; init; } = Array.Empty<string>();
 }

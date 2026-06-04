@@ -25,8 +25,10 @@ public sealed class WindowsUiAutomationSnapshotProvider : IWindowTextSnapshotPro
 
     private static bool MatchesWindow(WindowAutomationElement window, WindowTextCaptureOptions options)
     {
-        return string.IsNullOrWhiteSpace(options.WindowTitleContains) ||
-               window.Name.Contains(options.WindowTitleContains, StringComparison.OrdinalIgnoreCase);
+        return (string.IsNullOrWhiteSpace(options.WindowTitleContains) ||
+                window.Name.Contains(options.WindowTitleContains, StringComparison.OrdinalIgnoreCase)) &&
+               !options.IgnoreWindowTitleContains.Any(ignored =>
+                   window.Name.Contains(ignored, StringComparison.OrdinalIgnoreCase));
     }
 
     private static IEnumerable<string> FlattenText(WindowAutomationElement element)
