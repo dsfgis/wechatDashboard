@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.IO;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 

@@ -87,7 +87,14 @@ Adapter 输出 `CapturedMessage`，由 `MessageCapturePipeline` 统一完成：
 4. 使用窗口标题和规范化文本行生成稳定 `SourceMessageKey`。
 5. 使用快照 fingerprint 作为 offset，避免重复处理完全相同的窗口文本。
 
-`CaptureAdapterFactory.CreateWeChatWindowTextSource()` 已提供微信可见窗口来源定义，但默认 `IsEnabled = false`。真实 Windows UI Automation provider 需要在实际微信桌面窗口上验证后再启用。
+`CaptureAdapterFactory.CreateWeChatWindowTextSource()` 已提供微信可见窗口来源定义，但默认 `IsEnabled = false`。
+
+`WindowsUiAutomationSnapshotProvider` 和 `SystemWindowsAutomationReader` 已实现，可以通过 Windows UI Automation 枚举顶层窗口并聚合子元素文本。该 provider 仍需要在实际微信桌面窗口上人工验证后再启用，验证重点是：
+
+1. 微信窗口标题是否稳定包含“微信”。
+2. UIA 子元素是否暴露群名、发送人、时间和消息正文。
+3. 实际文本格式是否符合 `WindowTextCaptureAdapter` 的解析规则。
+4. 轮询是否会带来明显桌面卡顿。
 
 ## 后续接入建议
 

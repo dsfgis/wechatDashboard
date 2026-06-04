@@ -1,4 +1,5 @@
 using WechatDashboard.Application.Capture;
+using System.IO;
 
 namespace WechatDashboard.Infrastructure.Capture;
 

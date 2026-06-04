@@ -20,7 +20,8 @@ design/                              Design, extension, and development plan doc
 - Message capture must go through `IMessageCaptureAdapter`.
 - Adapters return `CaptureBatch` containing `CapturedMessage` records.
 - `MessageCapturePipeline` owns deduplication, persistence, `@我` detection, project classification, urgency ranking, Todo creation, and offset saving.
-- `WindowTextCaptureAdapter` parses injected visible-window text snapshots; a real Windows UI Automation snapshot provider is still pending and must be validated against the actual desktop app.
+- `WindowTextCaptureAdapter` parses visible-window text snapshots.
+- `WindowsUiAutomationSnapshotProvider` plus `SystemWindowsAutomationReader` can read Windows UI Automation top-level windows, but the WeChat source remains disabled until validated against the actual desktop app.
 - SQLite is accessed through repository classes in `Infrastructure/Persistence`.
 - WPF should call application/infrastructure services and avoid embedding platform-specific capture code.
 
@@ -75,4 +76,4 @@ Each `.jsonl` line is one message:
 
 Follow `design/2026-06-04-development-plan.md`.
 
-Immediate next step: implement a Windows UI Automation snapshot provider for `WindowTextCaptureAdapter`, validate it against the actual WeChat desktop window, and keep it disabled until real-window validation passes.
+Immediate next step: validate `SystemWindowsAutomationReader` against the actual WeChat desktop window, record the observed UIA text format, tune parsing if needed, and keep the WeChat window-text source disabled until validation passes.

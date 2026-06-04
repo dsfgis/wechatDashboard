@@ -17,6 +17,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
+    ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync)
 };
@@ -195,6 +196,12 @@ static Task TestCaptureAdapterFactoryAsync()
     AssertEqual(CaptureSourceKind.WindowText, wechatWindowSource.Kind, "WeChat visible-window source should use window text capture.");
     AssertFalse(wechatWindowSource.IsEnabled, "WeChat visible-window source should stay disabled until validated on the real app.");
     AssertEqual(0, CaptureAdapterFactory.CreateAdapters(new[] { wechatWindowSource }).Count, "Disabled window text source should be skipped.");
+    var enabledWindowSource = wechatWindowSource with { IsEnabled = true };
+    var windowAdapters = CaptureAdapterFactory.CreateAdapters(
+        new[] { enabledWindowSource },
+        new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
+    AssertEqual(1, windowAdapters.Count, "Enabled window text source with provider should create one adapter.");
+    AssertEqual("WeChat.WindowText", windowAdapters[0].Name, "Enabled WeChat window source should create a window text adapter.");
 
     return Task.CompletedTask;
 }
@@ -241,6 +248,46 @@ static async Task TestWindowTextCaptureAdapterAsync()
     AssertEqual("王经理", firstBatch.Messages[0].SenderName, "Sender should be parsed from visible text.");
     AssertEqual("@张三 今天下班前处理线上故障", firstBatch.Messages[0].Content, "Content should be normalized from visible text.");
     AssertEqual(new DateTimeOffset(2026, 6, 4, 9, 20, 0, TimeSpan.FromHours(8)), firstBatch.Messages[0].SentAt, "Visible HH:mm time should use snapshot date.");
+}
+
+static async Task TestWindowsUiAutomationSnapshotProviderAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 6, 4, 10, 0, 0, TimeSpan.FromHours(8));
+    var reader = new FakeWindowAutomationReader(new[]
+    {
+        new WindowAutomationElement(
+            Name: "CRM项目群 - 微信",
+            Text: "",
+            Children: new[]
+            {
+                new WindowAutomationElement("标题", "CRM项目群", Array.Empty<WindowAutomationElement>()),
+                new WindowAutomationElement("消息1", "09:20 王经理: @张三 今天处理线上故障", Array.Empty<WindowAutomationElement>()),
+                new WindowAutomationElement("消息2", "09:21 李工：同步接口变更", Array.Empty<WindowAutomationElement>())
+            }),
+        new WindowAutomationElement(
+            Name: "无关窗口",
+            Text: "",
+            Children: new[]
+            {
+                new WindowAutomationElement("消息", "09:30 路人: 不应采集", Array.Empty<WindowAutomationElement>())
+            })
+    }, capturedAt);
+    var provider = new WindowsUiAutomationSnapshotProvider(reader);
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "微信可见窗口",
+        WindowTitleContains: "微信",
+        ChatId: "visible-window",
+        ChatName: "微信可见窗口");
+
+    var snapshots = await provider.GetSnapshotsAsync(options, CancellationToken.None);
+
+    AssertEqual(1, snapshots.Count, "Only matching WeChat windows should be returned.");
+    AssertEqual("CRM项目群 - 微信", snapshots[0].WindowTitle, "Window title should round-trip.");
+    AssertTrue(snapshots[0].Text.Contains("CRM项目群"), "Aggregated text should include child text.");
+    AssertTrue(snapshots[0].Text.Contains("09:20 王经理: @张三 今天处理线上故障"), "Aggregated text should include message lines.");
+    AssertFalse(snapshots[0].Text.Contains("不应采集"), "Unmatched windows should not leak into snapshot text.");
+    AssertEqual(capturedAt, snapshots[0].CapturedAt, "Reader timestamp should be preserved.");
 }
 
 static async Task TestJsonlDirectoryCaptureAdapterAsync()
@@ -376,5 +423,22 @@ public sealed class StaticWindowTextSnapshotProvider : IWindowTextSnapshotProvid
     public Task<IReadOnlyList<WindowTextSnapshot>> GetSnapshotsAsync(WindowTextCaptureOptions options, CancellationToken cancellationToken)
     {
         return Task.FromResult(_snapshots);
+    }
+}
+
+public sealed class FakeWindowAutomationReader : IWindowAutomationReader
+{
+    private readonly IReadOnlyList<WindowAutomationElement> _windows;
+    private readonly DateTimeOffset _capturedAt;
+
+    public FakeWindowAutomationReader(IReadOnlyList<WindowAutomationElement> windows, DateTimeOffset capturedAt)
+    {
+        _windows = windows;
+        _capturedAt = capturedAt;
+    }
+
+    public Task<WindowAutomationReadResult> ReadTopLevelWindowsAsync(CancellationToken cancellationToken)
+    {
+        return Task.FromResult(new WindowAutomationReadResult(_windows, _capturedAt));
     }
 }
