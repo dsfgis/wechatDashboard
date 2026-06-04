@@ -6,7 +6,7 @@
 
 **Architecture:** Keep message ingestion behind `IMessageCaptureAdapter`. All adapters emit `CapturedMessage`, and `MessageCapturePipeline` performs deduplication, persistence, `@我` detection, project classification, urgency ranking, Todo creation, and offset updates. WPF consumes repositories and pipeline services rather than embedding platform-specific capture logic.
 
-**Tech Stack:** .NET 9, WPF, SQLite via `Microsoft.Data.Sqlite`, C# records/services, console test runner.
+**Tech Stack:** .NET 10, WPF, SQLite via `Microsoft.Data.Sqlite`, C# records/services, console test runner.
 
 ---
 
@@ -21,16 +21,19 @@ Completed:
 - Generic capture contracts: `IMessageCaptureAdapter`, `CaptureContext`, `CaptureBatch`, `CapturedMessage`.
 - `MessageCapturePipeline` that processes captured messages end to end.
 - `JsonlDirectoryCaptureAdapter` for local JSONL ingestion with offset handling and append-safe reads.
+- `CaptureSourceDefinition`, `CaptureSourceKind`, and `CaptureAdapterFactory` for multi-source registration.
+- Default JSONL source registration for WeChat, Feishu, Shihuatong, and DingTalk.
+- `WindowTextCaptureAdapter` core for parsing injected visible-window text snapshots.
+- Disabled WeChat window-text source profile through `CaptureAdapterFactory.CreateWeChatWindowTextSource()`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
 - Tests covering core rules, SQLite round-trip, JSONL capture, and capture pipeline.
-- GitHub remote `origin` configured and pushed through commit `524687f`.
+- Project targets .NET 10 to match the installed desktop runtime.
 
 Known gaps:
 
-- Real WeChat UI Automation capture is not implemented.
+- Real Windows UI Automation snapshot provider for WeChat is not implemented.
 - Windows notification listener is not implemented.
 - Feishu, Shihuatong, and DingTalk adapters are not implemented.
-- Capture sources are still wired directly in WPF instead of being configured through a source registry.
 - Project rules are hardcoded.
 - Statistics are basic counts, not full charted dashboards.
 - No installer, tray app, or background service mode yet.
@@ -65,10 +68,12 @@ Purpose: capture user-visible WeChat desktop text without process injection or d
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
 - Modify: `design/message-capture-extension.md`
 
-- [ ] Step 1: Add tests around text normalization and stable source keys using injected window text snapshots.
-- [ ] Step 2: Implement a generic visible-window text adapter behind `IMessageCaptureAdapter`.
-- [ ] Step 3: Add a WeChat profile that matches WeChat window titles and emits `Source = "WeChat"`.
-- [ ] Step 4: Keep the adapter disabled by default until tested on the real desktop app.
+- [x] Step 1: Add tests around text normalization and stable source keys using injected window text snapshots.
+- [x] Step 2: Implement a generic visible-window text adapter behind `IMessageCaptureAdapter`.
+- [x] Step 3: Add a WeChat profile that matches WeChat window titles and emits `Source = "WeChat"`.
+- [x] Step 4: Keep the adapter disabled by default until tested on the real desktop app.
+
+Note: this milestone implements the testable visible-window adapter core and a disabled WeChat profile. The actual Windows UI Automation snapshot provider remains a separate follow-up because it must be verified against the real desktop app window.
 
 ## Milestone 3: Capture Source Settings UI
 
@@ -142,4 +147,4 @@ Expected result:
 
 ## Immediate Next Work
 
-Milestone 1 has been completed. The next executable milestone is Milestone 2: add a generic visible-window text adapter and then specialize it for WeChat UI Automation while keeping the adapter disabled by default until validated on the real desktop app.
+Milestones 1 and 2 have been completed at the framework level. The next executable milestone is to add a Windows UI Automation snapshot provider for the visible-window adapter, validate it against the real WeChat desktop app, and only then expose an enable switch in capture settings.

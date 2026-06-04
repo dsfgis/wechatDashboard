@@ -2,7 +2,7 @@
 
 ## Project
 
-WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard.
+WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
 ## Repository Layout
 
@@ -20,6 +20,7 @@ design/                              Design, extension, and development plan doc
 - Message capture must go through `IMessageCaptureAdapter`.
 - Adapters return `CaptureBatch` containing `CapturedMessage` records.
 - `MessageCapturePipeline` owns deduplication, persistence, `@我` detection, project classification, urgency ranking, Todo creation, and offset saving.
+- `WindowTextCaptureAdapter` parses injected visible-window text snapshots; a real Windows UI Automation snapshot provider is still pending and must be validated against the actual desktop app.
 - SQLite is accessed through repository classes in `Infrastructure/Persistence`.
 - WPF should call application/infrastructure services and avoid embedding platform-specific capture code.
 
@@ -74,4 +75,4 @@ Each `.jsonl` line is one message:
 
 Follow `design/2026-06-04-development-plan.md`.
 
-Immediate next step: implement capture source registration so WeChat, Feishu, Shihuatong, and DingTalk can be represented as configured sources and mapped to adapters without changing the pipeline.
+Immediate next step: implement a Windows UI Automation snapshot provider for `WindowTextCaptureAdapter`, validate it against the actual WeChat desktop window, and keep it disabled until real-window validation passes.

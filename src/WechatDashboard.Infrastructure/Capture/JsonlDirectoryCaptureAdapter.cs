@@ -95,10 +95,10 @@ public sealed class JsonlDirectoryCaptureAdapter : IMessageCaptureAdapter
         using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var reader = new StreamReader(stream);
 
-        while (!reader.EndOfStream)
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            yield return await reader.ReadLineAsync(cancellationToken) ?? "";
+            yield return line;
         }
     }
 

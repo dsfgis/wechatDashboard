@@ -68,6 +68,27 @@ Adapter 输出 `CapturedMessage`，由 `MessageCapturePipeline` 统一完成：
 
 来源注册由 `CaptureSourceDefinition` 描述，当前 `CaptureAdapterFactory.CreateDefaultJsonlSources(...)` 会为微信、飞书、石化通、钉钉创建 JSONL 目录采集来源。后续真实监听器应继续使用同一来源定义和 `IMessageCaptureAdapter`。
 
+## 可见窗口文本采集
+
+当前版本还提供了 `WindowTextCaptureAdapter` 的可测试核心。它通过 `IWindowTextSnapshotProvider` 获取用户可见窗口文本快照，再解析形如：
+
+```text
+09:20 王经理: @张三 今天下班前处理线上故障
+09:21 李工：同步一下接口变更
+```
+
+的文本行，输出标准 `CapturedMessage`。
+
+已实现能力：
+
+1. 按窗口标题关键字过滤快照。
+2. 从 `HH:mm 发送人: 内容` 或 `HH:mm 发送人：内容` 解析发送人、内容和发送时间。
+3. 从窗口标题推断会话名，例如 `CRM项目群 - 微信` 推断为 `CRM项目群`。
+4. 使用窗口标题和规范化文本行生成稳定 `SourceMessageKey`。
+5. 使用快照 fingerprint 作为 offset，避免重复处理完全相同的窗口文本。
+
+`CaptureAdapterFactory.CreateWeChatWindowTextSource()` 已提供微信可见窗口来源定义，但默认 `IsEnabled = false`。真实 Windows UI Automation provider 需要在实际微信桌面窗口上验证后再启用。
+
 ## 后续接入建议
 
 | 来源 | 建议 Adapter | 说明 |

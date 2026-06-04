@@ -16,6 +16,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
+    ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync)
 };
@@ -190,7 +191,56 @@ static Task TestCaptureAdapterFactoryAsync()
     AssertEqual(3, enabledAdapters.Length, "Disabled sources should not create adapters.");
     AssertFalse(enabledAdapters.Any(adapter => adapter.Name == "Feishu.JsonlDirectory"), "Disabled Feishu source should be skipped.");
 
+    var wechatWindowSource = CaptureAdapterFactory.CreateWeChatWindowTextSource();
+    AssertEqual(CaptureSourceKind.WindowText, wechatWindowSource.Kind, "WeChat visible-window source should use window text capture.");
+    AssertFalse(wechatWindowSource.IsEnabled, "WeChat visible-window source should stay disabled until validated on the real app.");
+    AssertEqual(0, CaptureAdapterFactory.CreateAdapters(new[] { wechatWindowSource }).Count, "Disabled window text source should be skipped.");
+
     return Task.CompletedTask;
+}
+
+static async Task TestWindowTextCaptureAdapterAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 6, 4, 9, 30, 0, TimeSpan.FromHours(8));
+    var provider = new StaticWindowTextSnapshotProvider(new[]
+    {
+        new WindowTextSnapshot(
+            WindowTitle: "CRM项目群 - 微信",
+            Text: """
+                  CRM项目群
+                  09:20 王经理: @张三 今天下班前处理线上故障
+                  09:21 李工：同步一下接口变更
+                  """,
+            CapturedAt: capturedAt),
+        new WindowTextSnapshot(
+            WindowTitle: "无关窗口",
+            Text: "09:25 路人: 不应采集",
+            CapturedAt: capturedAt)
+    });
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "微信可见窗口",
+        WindowTitleContains: "微信",
+        ChatId: "visible-window",
+        ChatName: "微信可见窗口");
+    var adapter = new WindowTextCaptureAdapter(options, provider);
+
+    var firstBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+    var secondBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
+    {
+        [adapter.Name] = firstBatch.NextOffset
+    }), CancellationToken.None);
+    var replayBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+
+    AssertEqual("WeChat.WindowText", adapter.Name, "Adapter name should identify source and capture kind.");
+    AssertEqual(2, firstBatch.Messages.Count, "Only chat message lines from matching windows should be captured.");
+    AssertEqual(0, secondBatch.Messages.Count, "Identical snapshots should be skipped by offset.");
+    AssertEqual(firstBatch.Messages[0].SourceMessageKey, replayBatch.Messages[0].SourceMessageKey, "Source keys should be stable across captures.");
+    AssertEqual("WeChat", firstBatch.Messages[0].Source, "Captured source should follow options.");
+    AssertEqual("CRM项目群", firstBatch.Messages[0].ChatName, "Chat name should be inferred from the window title.");
+    AssertEqual("王经理", firstBatch.Messages[0].SenderName, "Sender should be parsed from visible text.");
+    AssertEqual("@张三 今天下班前处理线上故障", firstBatch.Messages[0].Content, "Content should be normalized from visible text.");
+    AssertEqual(new DateTimeOffset(2026, 6, 4, 9, 20, 0, TimeSpan.FromHours(8)), firstBatch.Messages[0].SentAt, "Visible HH:mm time should use snapshot date.");
 }
 
 static async Task TestJsonlDirectoryCaptureAdapterAsync()
@@ -311,5 +361,20 @@ static void AssertEqual<T>(T expected, T actual, string message)
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
     {
         throw new InvalidOperationException($"{message} Expected '{expected}', got '{actual}'.");
+    }
+}
+
+public sealed class StaticWindowTextSnapshotProvider : IWindowTextSnapshotProvider
+{
+    private readonly IReadOnlyList<WindowTextSnapshot> _snapshots;
+
+    public StaticWindowTextSnapshotProvider(IReadOnlyList<WindowTextSnapshot> snapshots)
+    {
+        _snapshots = snapshots;
+    }
+
+    public Task<IReadOnlyList<WindowTextSnapshot>> GetSnapshotsAsync(WindowTextCaptureOptions options, CancellationToken cancellationToken)
+    {
+        return Task.FromResult(_snapshots);
     }
 }
