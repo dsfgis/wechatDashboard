@@ -15,6 +15,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
+    ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync)
 };
@@ -161,6 +162,35 @@ static async Task TestSqliteRoundTripAsync()
     AssertTrue(savedTodo.Id > 0, "Saved todo should get a database id.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should round-trip.");
     AssertEqual("@张三 请今天处理线上故障", recentMessages.Single().Content, "Recent message content should round-trip.");
+}
+
+static Task TestCaptureAdapterFactoryAsync()
+{
+    var captureRoot = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    var definitions = CaptureAdapterFactory.CreateDefaultJsonlSources(captureRoot);
+
+    AssertEqual(4, definitions.Count, "Default capture sources should cover four collaboration apps.");
+    AssertTrue(definitions.Any(source => source.Source == "WeChat"), "WeChat should be a default source.");
+    AssertTrue(definitions.Any(source => source.Source == "Feishu"), "Feishu should be a default source.");
+    AssertTrue(definitions.Any(source => source.Source == "Shihuatong"), "Shihuatong should be a default source.");
+    AssertTrue(definitions.Any(source => source.Source == "DingTalk"), "DingTalk should be a default source.");
+    AssertTrue(definitions.All(source => source.Kind == CaptureSourceKind.JsonlDirectory), "Initial defaults should use JSONL directory capture.");
+
+    var adapters = CaptureAdapterFactory.CreateAdapters(definitions).ToArray();
+    AssertEqual(4, adapters.Length, "Enabled sources should create adapters.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "WeChat adapter should be created.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "Feishu.JsonlDirectory"), "Feishu adapter should be created.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.JsonlDirectory"), "Shihuatong adapter should be created.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "DingTalk adapter should be created.");
+
+    var disabledFeishu = definitions
+        .Select(source => source.Source == "Feishu" ? source with { IsEnabled = false } : source)
+        .ToArray();
+    var enabledAdapters = CaptureAdapterFactory.CreateAdapters(disabledFeishu).ToArray();
+    AssertEqual(3, enabledAdapters.Length, "Disabled sources should not create adapters.");
+    AssertFalse(enabledAdapters.Any(adapter => adapter.Name == "Feishu.JsonlDirectory"), "Disabled Feishu source should be skipped.");
+
+    return Task.CompletedTask;
 }
 
 static async Task TestJsonlDirectoryCaptureAdapterAsync()

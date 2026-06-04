@@ -168,10 +168,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(Diagnostics, new[]
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
-            new DiagnosticRow("WeChat.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), _captureInboxPath),
-            new DiagnosticRow("Feishu.JsonlDirectory", "可扩展", "-", "新增飞书 Adapter 后接入同一采集流水线"),
-            new DiagnosticRow("Shihuatong.JsonlDirectory", "可扩展", "-", "新增石化通 Adapter 后接入同一采集流水线"),
-            new DiagnosticRow("DingTalk.JsonlDirectory", "可扩展", "-", "新增钉钉 Adapter 后接入同一采集流水线"),
+            new DiagnosticRow("WeChat.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "WeChat")),
+            new DiagnosticRow("Feishu.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Feishu")),
+            new DiagnosticRow("Shihuatong.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Shihuatong")),
+            new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),
             new DiagnosticRow("WeChatUiaAdapter", "未启用", "-", "待接入 Windows UI Automation"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
@@ -220,10 +220,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private MessageCapturePipeline CreateCapturePipeline()
     {
         return new MessageCapturePipeline(
-            adapters: new IMessageCaptureAdapter[]
-            {
-                new JsonlDirectoryCaptureAdapter("WeChat", _captureInboxPath)
-            },
+            adapters: CaptureAdapterFactory.CreateAdapters(CaptureAdapterFactory.CreateDefaultJsonlSources(_captureInboxPath)),
             _messageRepository,
             _todoRepository,
             _offsetRepository,

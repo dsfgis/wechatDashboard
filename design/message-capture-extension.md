@@ -10,7 +10,16 @@
 %LOCALAPPDATA%\WechatDashboard\capture-inbox
 ```
 
-WPF 界面点击“采集一次”后，会读取该目录下的 `*.jsonl` 文件，把新消息写入 SQLite，并对命中 `@我` 的消息自动创建待办理 Todo。
+WPF 界面点击“采集一次”后，会读取该目录下按来源划分的子目录，把新消息写入 SQLite，并对命中 `@我` 的消息自动创建待办理 Todo。
+
+默认来源目录：
+
+```text
+%LOCALAPPDATA%\WechatDashboard\capture-inbox\WeChat
+%LOCALAPPDATA%\WechatDashboard\capture-inbox\Feishu
+%LOCALAPPDATA%\WechatDashboard\capture-inbox\Shihuatong
+%LOCALAPPDATA%\WechatDashboard\capture-inbox\DingTalk
+```
 
 ## JSONL 消息格式
 
@@ -56,6 +65,8 @@ Adapter 输出 `CapturedMessage`，由 `MessageCapturePipeline` 统一完成：
 6. 紧急度评分。
 7. 自动 Todo 创建。
 8. offset 保存。
+
+来源注册由 `CaptureSourceDefinition` 描述，当前 `CaptureAdapterFactory.CreateDefaultJsonlSources(...)` 会为微信、飞书、石化通、钉钉创建 JSONL 目录采集来源。后续真实监听器应继续使用同一来源定义和 `IMessageCaptureAdapter`。
 
 ## 后续接入建议
 
