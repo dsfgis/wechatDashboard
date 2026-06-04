@@ -31,13 +31,16 @@ Completed:
 - WPF "采集一次" now runs the live capture source set, including WeChat visible-window UI Automation capture.
 - WPF "开始微信监听" and "停止监听" run the same capture pipeline on a 5-second polling interval.
 - `WindowTextCaptureAdapter` supports both single-line `HH:mm Sender: Content` rows and UIA split blocks such as `HH:mm / Sender / Content`.
+- `SystemWindowsAutomationReader` now uses UIA Raw View traversal by default.
+- `WindowsOcrWindowTextSnapshotProvider` and `WindowsScreenOcrReader` add a Windows OCR fallback for WeChat windows that expose only window chrome through UIA.
+- `DefaultMentionAliases` sets the current user's aliases to `白驹过隙` and `戴少峰`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
-- Tests covering core rules, SQLite round-trip, JSONL capture, visible-window capture, live WeChat source registration, and capture pipeline.
+- Tests covering core rules, SQLite round-trip, JSONL capture, visible-window capture, OCR snapshot fallback, live WeChat source registration, and capture pipeline.
 - Project targets .NET 10 to match the installed desktop runtime.
 
 Known gaps:
 
-- Real Windows UI Automation snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
+- Real Windows UI Automation + OCR snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
 - Current WeChat capture is limited to visible UIA text. It does not read hidden chats, encrypted message databases, or full historical WeChat data.
 - Windows notification listener is not implemented.
 - Feishu, Shihuatong, and DingTalk adapters are not implemented.
@@ -102,6 +105,29 @@ Purpose: make the existing WeChat visible-window adapter usable from WPF without
 - [x] Step 3: Add `CreateDefaultLiveSources(...)` and wire WPF one-shot capture to live sources.
 - [x] Step 4: Add WPF start/stop listener buttons using the same capture pipeline on a 5-second polling interval.
 - [x] Step 5: Run tests and full solution build.
+
+## Milestone 2.2: WeChat OCR Fallback
+
+Purpose: handle current WeChat desktop windows where UI Automation exposes only window chrome instead of chat message text.
+
+**Files:**
+
+- Create: `src/WechatDashboard.Application/Mentions/DefaultMentionAliases.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/IScreenOcrReader.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WindowsOcrWindowTextSnapshotProvider.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WindowsScreenOcrReader.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/SystemWindowsAutomationReader.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/WindowAutomationElement.cs`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
+- Modify: `tests/WechatDashboard.Tests/Program.cs`
+
+- [x] Step 1: Add failing tests for real user aliases `白驹过隙` and `戴少峰`.
+- [x] Step 2: Add failing tests for an OCR snapshot provider when UIA exposes only `微信 Weixin ...` window chrome.
+- [x] Step 3: Preserve native window handles and use UIA Raw View traversal.
+- [x] Step 4: Add OCR snapshot provider and screen OCR reader.
+- [x] Step 5: Wire WPF capture and diagnostics to UIA + OCR snapshots.
+- [x] Step 6: Run tests and full solution build.
 
 ## Milestone 3: Capture Source Settings UI
 
@@ -175,6 +201,6 @@ Expected result:
 
 ## Immediate Next Work
 
-Milestones 1, 2, and 2.1 have been completed at the framework level. The app now runs WeChat visible-window UIA capture from "采集一次" and supports 5-second polling from "开始微信监听".
+Milestones 1, 2, 2.1, and 2.2 have been completed at the framework level. The app now runs WeChat visible-window UIA + OCR capture from "采集一次" and supports 5-second polling from "开始微信监听".
 
-The next executable milestone is still real-desktop validation: open the target WeChat chat window, run "扫描微信窗口", document the observed UIA text preview, and tune parsing if the preview format differs from the currently supported single-line or split-block formats. After validation, continue with Milestone 3 so capture sources can be enabled and disabled from persisted settings instead of code defaults.
+The next executable milestone is still real-desktop validation: restart the app, open the target WeChat chat window, run "扫描微信窗口", document the observed UIA + OCR text preview, and tune parsing if the OCR line order differs from the currently supported single-line or split-block formats. After validation, continue with Milestone 3 so capture sources can be enabled and disabled from persisted settings instead of code defaults.

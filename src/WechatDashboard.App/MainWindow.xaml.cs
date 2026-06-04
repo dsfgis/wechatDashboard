@@ -227,7 +227,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new DiagnosticRow("Feishu.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Feishu")),
             new DiagnosticRow("Shihuatong.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Shihuatong")),
             new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),
-            new DiagnosticRow("WeChat.WindowText", "启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "通过 Windows UI Automation 读取微信可见窗口文本"),
+            new DiagnosticRow("WeChat.WindowText", "启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "通过 Windows UI Automation + OCR 读取微信可见窗口文本"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
 
@@ -240,7 +240,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task SeedSampleMessagesAsync()
     {
-        var mentionDetector = new MentionDetector(new[] { "张三", "zhangsan" });
+        var mentionDetector = new MentionDetector(DefaultMentionAliases.All);
         var classifier = new ProjectClassifier(new[]
         {
             new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
@@ -253,8 +253,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         var samples = new[]
         {
-            CreateSampleMessage("sample-crm-urgent", "CRM项目群", "王经理", "@张三 紧急，今天下班前处理线上故障", -45),
-            CreateSampleMessage("sample-payment-question", "支付项目群", "赵经理", "@zhangsan 请今天给出支付联调问题反馈", -25),
+            CreateSampleMessage("sample-crm-urgent", "CRM项目群", "王经理", "@白驹过隙 紧急，今天下班前处理线上故障", -45),
+            CreateSampleMessage("sample-payment-question", "支付项目群", "赵经理", "@戴少峰 请今天给出支付联调问题反馈", -25),
             CreateSampleMessage("sample-data-fyi", "数据中台群", "李工", "同步一下数据看板口径变更，明早评审", -10)
         };
 
@@ -281,7 +281,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _messageRepository,
             _todoRepository,
             _offsetRepository,
-            new MentionDetector(new[] { "张三", "zhangsan" }),
+            new MentionDetector(DefaultMentionAliases.All),
             new ProjectClassifier(new[]
             {
                 new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
@@ -393,7 +393,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private static IWindowTextSnapshotProvider CreateWindowTextSnapshotProvider()
     {
-        return new WindowsUiAutomationSnapshotProvider(new SystemWindowsAutomationReader());
+        return new WindowsOcrWindowTextSnapshotProvider(
+            new SystemWindowsAutomationReader(),
+            new WindowsScreenOcrReader());
     }
 
     private static Message CreateSampleMessage(string key, string chatName, string senderName, string content, int minutesOffset)

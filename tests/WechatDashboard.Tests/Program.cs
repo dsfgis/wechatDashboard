@@ -15,11 +15,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
+    ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("Capture adapter factory creates live WeChat visible-window adapters", TestLiveCaptureAdapterFactoryAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
     ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
+    ("Windows OCR snapshot provider reads WeChat text when UIA exposes only chrome", TestWindowsOcrSnapshotProviderAsync),
     ("Window capture diagnostics service summarizes matching snapshots", TestWindowCaptureDiagnosticsServiceAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
@@ -65,6 +67,17 @@ static Task TestMentionDetectorAsync()
     AssertTrue(detector.IsMentioned("@张三 今天下班前处理线上故障"), "Chinese alias should be detected.");
     AssertTrue(detector.IsMentioned("有人@我 请确认接口变更", hasWechatMentionHint: true), "WeChat mention hint should be detected.");
     AssertFalse(detector.IsMentioned("@李四 帮忙看一下"), "Other people's mentions should not match.");
+
+    return Task.CompletedTask;
+}
+
+static Task TestDefaultMentionAliasesAsync()
+{
+    var detector = new MentionDetector(DefaultMentionAliases.All);
+
+    AssertTrue(detector.IsMentioned("@白驹过隙 这个问题需要你确认"), "WeChat display name should be treated as current user.");
+    AssertTrue(detector.IsMentioned("@戴少峰 这个问题需要你确认"), "Chinese name should be treated as current user.");
+    AssertFalse(detector.IsMentioned("@张三 今天下班前处理线上故障"), "Other people's mentions should not match default aliases.");
 
     return Task.CompletedTask;
 }
@@ -351,6 +364,48 @@ static async Task TestWindowsUiAutomationSnapshotProviderAsync()
     AssertEqual(capturedAt, snapshots[0].CapturedAt, "Reader timestamp should be preserved.");
 }
 
+static async Task TestWindowsOcrSnapshotProviderAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 6, 4, 21, 29, 0, TimeSpan.FromHours(8));
+    var reader = new FakeWindowAutomationReader(new[]
+    {
+        new WindowAutomationElement(
+            Name: "微信",
+            Text: "微信 Weixin 微信 最小化 最大化 上下文帮助 关闭",
+            Children: Array.Empty<WindowAutomationElement>(),
+            NativeWindowHandle: 1001),
+        new WindowAutomationElement(
+            Name: "无关窗口",
+            Text: "不应 OCR",
+            Children: Array.Empty<WindowAutomationElement>(),
+            NativeWindowHandle: 1002)
+    }, capturedAt);
+    var ocrReader = new FakeScreenOcrReader(new Dictionary<int, string>
+    {
+        [1001] = """
+                 数字石化（二期） 盈科国科沟通(34)
+                 18:38
+                 国科 王建辉
+                 @白驹过隙
+                 """
+    });
+    var provider = new WindowsOcrWindowTextSnapshotProvider(reader, ocrReader);
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "微信可见窗口",
+        WindowTitleContains: "微信",
+        ChatId: "visible-window",
+        ChatName: "微信可见窗口");
+
+    var snapshots = await provider.GetSnapshotsAsync(options, CancellationToken.None);
+
+    AssertEqual(1, snapshots.Count, "OCR provider should return only matching WeChat windows.");
+    AssertEqual("微信", snapshots[0].WindowTitle, "OCR snapshot should keep the source window title.");
+    AssertTrue(snapshots[0].Text.Contains("数字石化（二期）"), "OCR snapshot should contain visible chat title.");
+    AssertTrue(snapshots[0].Text.Contains("@白驹过隙"), "OCR snapshot should contain visible @ mention text.");
+    AssertEqual(capturedAt, snapshots[0].CapturedAt, "OCR snapshot should preserve automation read timestamp.");
+}
+
 static async Task TestWindowCaptureDiagnosticsServiceAsync()
 {
     var capturedAt = new DateTimeOffset(2026, 6, 4, 10, 30, 0, TimeSpan.FromHours(8));
@@ -580,5 +635,20 @@ public sealed class FakeWindowAutomationReader : IWindowAutomationReader
     public Task<WindowAutomationReadResult> ReadTopLevelWindowsAsync(CancellationToken cancellationToken)
     {
         return Task.FromResult(new WindowAutomationReadResult(_windows, _capturedAt));
+    }
+}
+
+public sealed class FakeScreenOcrReader : IScreenOcrReader
+{
+    private readonly IReadOnlyDictionary<int, string> _textByWindowHandle;
+
+    public FakeScreenOcrReader(IReadOnlyDictionary<int, string> textByWindowHandle)
+    {
+        _textByWindowHandle = textByWindowHandle;
+    }
+
+    public Task<string> ReadWindowTextAsync(int nativeWindowHandle, CancellationToken cancellationToken)
+    {
+        return Task.FromResult(_textByWindowHandle.TryGetValue(nativeWindowHandle, out var text) ? text : "");
     }
 }

@@ -139,7 +139,7 @@
                 <TabItem Header="规则">
                     <Border Background="White" Padding="16">
                     <StackPanel>
-                        <TextBlock Text="别名：张三、zhangsan" FontSize="15" Margin="0,0,0,10" />
+                        <TextBlock Text="别名：白驹过隙、戴少峰" FontSize="15" Margin="0,0,0,10" />
                         <TextBlock Text="项目规则：CRM项目群 => CRM升级；支付 => 支付平台" FontSize="15" Margin="0,0,0,10" />
                         <TextBlock Text="紧急度：@我、紧急词、今天/下班前、线上故障、重点联系人、重点项目" FontSize="15" />
                         <TextBlock Text="{Binding CaptureInboxPath, StringFormat=采集目录：{0}}" FontSize="15" Margin="0,10,0,0" TextWrapping="Wrap" />

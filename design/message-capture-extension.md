@@ -2,7 +2,7 @@
 
 ## 当前实现
 
-当前版本已经实现通用采集流水线、本地 JSONL 目录采集器，以及微信桌面端可见窗口的 UI Automation 轮询采集。
+当前版本已经实现通用采集流水线、本地 JSONL 目录采集器，以及微信桌面端可见窗口的 UI Automation + OCR 轮询采集。
 
 采集目录：
 
@@ -10,7 +10,7 @@
 %LOCALAPPDATA%\WechatDashboard\capture-inbox
 ```
 
-WPF 界面点击“采集一次”后，会同时运行默认 JSONL 目录采集源和 `WeChat.WindowText` 可见窗口采集源，把新消息写入 SQLite，并对命中 `@我` 的消息自动创建待办理 Todo。点击“开始微信监听”后，应用会按固定间隔重复运行同一条采集流水线。
+WPF 界面点击“采集一次”后，会同时运行默认 JSONL 目录采集源和 `WeChat.WindowText` 可见窗口采集源，把新消息写入 SQLite，并对命中 `@我` 的消息自动创建待办理 Todo。点击“开始微信监听”后，应用会按固定间隔重复运行同一条采集流水线。当前默认 `@我` 别名为 `白驹过隙` 和 `戴少峰`。
 
 默认来源目录：
 
@@ -106,15 +106,20 @@ CRM项目群
 
 `CaptureAdapterFactory.CreateWeChatWindowTextSource()` 仍返回默认禁用的单独来源定义，供设置页或测试按需启用。WPF 默认实时采集入口使用 `CreateDefaultLiveSources(...)`，会启用微信可见窗口来源。
 
-`WindowsUiAutomationSnapshotProvider` 和 `SystemWindowsAutomationReader` 已实现，可以通过 Windows UI Automation 枚举顶层窗口并聚合子元素文本。当前真实采集边界是“微信桌面端当前可见窗口文本”，不是微信全量历史数据库读取。后续验证重点是：
+`WindowsUiAutomationSnapshotProvider` 和 `SystemWindowsAutomationReader` 已实现，可以通过 Windows UI Automation 枚举顶层窗口并聚合子元素文本。`SystemWindowsAutomationReader` 默认使用 Raw View 遍历，以便尽量读取微信自定义控件树中的文本。
+
+实际验证发现，当前微信桌面端可能只向 UIA 暴露窗口标题和按钮文本，例如 `微信 Weixin 微信 最小化 最大化 ...`，不暴露聊天正文。因此 WPF 默认采集入口已经改为 `WindowsOcrWindowTextSnapshotProvider`，它会把 UIA 文本和 Windows OCR 识别出的当前可见窗口文字合并后交给 `WindowTextCaptureAdapter` 解析。
+
+当前真实采集边界是“微信桌面端当前可见窗口文本”，不是微信全量历史数据库读取。后续验证重点是：
 
 1. 微信窗口标题是否稳定包含“微信”。
 2. UIA 子元素是否暴露群名、发送人、时间和消息正文。
 3. 实际文本格式是否符合 `WindowTextCaptureAdapter` 的解析规则。
 4. 轮询是否会带来明显桌面卡顿。
-5. 未打开或未展示在 UIA 树中的会话不会被采集。
+5. OCR 识别出的消息行顺序是否适配当前解析规则。
+6. 未打开或不在屏幕可见区域的会话不会被采集。
 
-WPF 的“采集诊断”页提供“扫描微信窗口”按钮。该按钮只读取并展示 UIA 可见文本快照预览，不会写入 SQLite，也不会创建 Todo。它用于验证真实微信窗口的 UIA 文本格式。当“采集一次”或“开始微信监听”没有采集到消息时，应先查看这里的快照预览，再按真实文本格式扩展解析规则。
+WPF 的“采集诊断”页提供“扫描微信窗口”按钮。该按钮只读取并展示 UIA + OCR 可见文本快照预览，不会写入 SQLite，也不会创建 Todo。它用于验证真实微信窗口的文本格式。当“采集一次”或“开始微信监听”没有采集到消息时，应先查看这里的快照预览，再按真实文本格式扩展解析规则。
 
 ## 后续接入建议
 
