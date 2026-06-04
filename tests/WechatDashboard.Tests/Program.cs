@@ -18,6 +18,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
+    ("Window capture diagnostics service summarizes matching snapshots", TestWindowCaptureDiagnosticsServiceAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync)
 };
@@ -288,6 +289,33 @@ static async Task TestWindowsUiAutomationSnapshotProviderAsync()
     AssertTrue(snapshots[0].Text.Contains("09:20 王经理: @张三 今天处理线上故障"), "Aggregated text should include message lines.");
     AssertFalse(snapshots[0].Text.Contains("不应采集"), "Unmatched windows should not leak into snapshot text.");
     AssertEqual(capturedAt, snapshots[0].CapturedAt, "Reader timestamp should be preserved.");
+}
+
+static async Task TestWindowCaptureDiagnosticsServiceAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 6, 4, 10, 30, 0, TimeSpan.FromHours(8));
+    var longLine = new string('测', 160);
+    var provider = new StaticWindowTextSnapshotProvider(new[]
+    {
+        new WindowTextSnapshot("CRM项目群 - 微信", $"CRM项目群\n09:20 王经理: {longLine}", capturedAt),
+        new WindowTextSnapshot("无关窗口", "09:21 路人: 不应显示", capturedAt)
+    });
+    var service = new WindowCaptureDiagnosticsService(provider);
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "微信可见窗口",
+        WindowTitleContains: "微信",
+        ChatId: "visible-window",
+        ChatName: "微信可见窗口");
+
+    var rows = await service.ScanAsync(options, CancellationToken.None);
+
+    AssertEqual(1, rows.Count, "Diagnostics should include only matching snapshots.");
+    AssertEqual("CRM项目群 - 微信", rows[0].WindowTitle, "Diagnostics should keep the title.");
+    AssertEqual(capturedAt, rows[0].CapturedAt, "Diagnostics should keep capture time.");
+    AssertTrue(rows[0].Preview.Contains("CRM项目群"), "Preview should include visible text.");
+    AssertTrue(rows[0].Preview.Length <= 123, "Preview should be truncated for UI display.");
+    AssertFalse(rows[0].Preview.Contains("不应显示"), "Preview should not include unmatched windows.");
 }
 
 static async Task TestJsonlDirectoryCaptureAdapterAsync()

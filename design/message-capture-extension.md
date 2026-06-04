@@ -96,6 +96,8 @@ Adapter 输出 `CapturedMessage`，由 `MessageCapturePipeline` 统一完成：
 3. 实际文本格式是否符合 `WindowTextCaptureAdapter` 的解析规则。
 4. 轮询是否会带来明显桌面卡顿。
 
+WPF 的“采集诊断”页提供“扫描微信窗口”按钮。该按钮只读取并展示 UIA 可见文本快照预览，不会写入 SQLite，也不会创建 Todo。它用于验证真实微信窗口的 UIA 文本格式。
+
 ## 后续接入建议
 
 | 来源 | 建议 Adapter | 说明 |

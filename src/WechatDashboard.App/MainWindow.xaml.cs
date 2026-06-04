@@ -97,6 +97,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
 
+    public ObservableCollection<WindowSnapshotRow> WindowSnapshots { get; } = new();
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await InitializeAndRefreshAsync(seedIfEmpty: true);
@@ -121,6 +123,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var result = await pipeline.RunOnceAsync(CancellationToken.None);
         SummaryText = $"本次采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
         await RefreshAsync();
+    }
+
+    private async void ScanWeChatWindowsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var service = new WindowCaptureDiagnosticsService(
+            new WindowsUiAutomationSnapshotProvider(new SystemWindowsAutomationReader()));
+        var rows = await service.ScanAsync(
+            new WindowTextCaptureOptions(
+                Source: "WeChat",
+                DisplayName: "微信可见窗口",
+                WindowTitleContains: "微信",
+                ChatId: "visible-window",
+                ChatName: "微信可见窗口"),
+            CancellationToken.None);
+
+        Replace(WindowSnapshots, rows.Select(row => new WindowSnapshotRow(
+            row.WindowTitle,
+            row.CapturedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss"),
+            row.TextLength,
+            row.Preview)));
+
+        SummaryText = $"扫描到 {rows.Count} 个微信可见窗口快照";
     }
 
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
@@ -292,3 +316,5 @@ public sealed record MessageRow(string SentAt, string ChatName, string SenderNam
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
 
 public sealed record DiagnosticRow(string Adapter, string Status, string LastSuccessAt, string Detail);
+
+public sealed record WindowSnapshotRow(string WindowTitle, string CapturedAt, int TextLength, string Preview);

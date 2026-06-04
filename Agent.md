@@ -22,6 +22,7 @@ design/                              Design, extension, and development plan doc
 - `MessageCapturePipeline` owns deduplication, persistence, `@我` detection, project classification, urgency ranking, Todo creation, and offset saving.
 - `WindowTextCaptureAdapter` parses visible-window text snapshots.
 - `WindowsUiAutomationSnapshotProvider` plus `SystemWindowsAutomationReader` can read Windows UI Automation top-level windows, but the WeChat source remains disabled until validated against the actual desktop app.
+- WPF capture diagnostics includes a "扫描微信窗口" action that previews UIA window text without persisting messages.
 - SQLite is accessed through repository classes in `Infrastructure/Persistence`.
 - WPF should call application/infrastructure services and avoid embedding platform-specific capture code.
 

@@ -25,6 +25,7 @@ Completed:
 - Default JSONL source registration for WeChat, Feishu, Shihuatong, and DingTalk.
 - `WindowTextCaptureAdapter` core for parsing injected visible-window text snapshots.
 - `WindowsUiAutomationSnapshotProvider` and `SystemWindowsAutomationReader` for reading Windows UI Automation top-level window snapshots.
+- WPF capture diagnostics can scan WeChat visible windows and show UIA text previews without persisting messages.
 - Disabled WeChat window-text source profile through `CaptureAdapterFactory.CreateWeChatWindowTextSource()`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
 - Tests covering core rules, SQLite round-trip, JSONL capture, and capture pipeline.
@@ -148,4 +149,4 @@ Expected result:
 
 ## Immediate Next Work
 
-Milestones 1 and 2 have been completed at the framework level. The next executable milestone is to validate `SystemWindowsAutomationReader` against the real WeChat desktop app, document the observed UIA text format, tune parsing rules if needed, and only then expose an enable switch in capture settings.
+Milestones 1 and 2 have been completed at the framework level. The app now has a capture diagnostics button for scanning WeChat visible-window UIA text previews. The next executable milestone is to run that diagnostic against the real WeChat desktop app, document the observed UIA text format, tune parsing rules if needed, and only then expose an enable switch in capture settings.

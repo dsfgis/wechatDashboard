@@ -144,14 +144,34 @@
                 </TabItem>
                 <TabItem Header="采集诊断">
                     <Border Background="White" Padding="16">
-                        <DataGrid ItemsSource="{Binding Diagnostics}">
-                            <DataGrid.Columns>
-                                <DataGridTextColumn Header="适配器" Binding="{Binding Adapter}" Width="180" />
-                                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="120" />
-                                <DataGridTextColumn Header="最近成功" Binding="{Binding LastSuccessAt}" Width="180" />
-                                <DataGridTextColumn Header="摘要" Binding="{Binding Detail}" Width="*" />
-                            </DataGrid.Columns>
-                        </DataGrid>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="2*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="3*" />
+                            </Grid.RowDefinitions>
+                            <DataGrid Grid.Row="1" ItemsSource="{Binding Diagnostics}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="适配器" Binding="{Binding Adapter}" Width="180" />
+                                    <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="120" />
+                                    <DataGridTextColumn Header="最近成功" Binding="{Binding LastSuccessAt}" Width="180" />
+                                    <DataGridTextColumn Header="摘要" Binding="{Binding Detail}" Width="*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <DockPanel Grid.Row="2" Margin="0,14,0,8">
+                                <TextBlock Text="可见窗口快照" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <Button DockPanel.Dock="Right" Content="扫描微信窗口" Click="ScanWeChatWindowsButton_Click" />
+                            </DockPanel>
+                            <DataGrid Grid.Row="3" ItemsSource="{Binding WindowSnapshots}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="窗口标题" Binding="{Binding WindowTitle}" Width="220" />
+                                    <DataGridTextColumn Header="采集时间" Binding="{Binding CapturedAt}" Width="170" />
+                                    <DataGridTextColumn Header="文本长度" Binding="{Binding TextLength}" Width="90" />
+                                    <DataGridTextColumn Header="预览" Binding="{Binding Preview}" Width="*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
                     </Border>
                 </TabItem>
             </TabControl>
