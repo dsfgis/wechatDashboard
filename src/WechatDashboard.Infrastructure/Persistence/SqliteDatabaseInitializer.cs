@@ -129,6 +129,18 @@ public sealed class SqliteDatabaseInitializer
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS capture_source_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            location TEXT NOT NULL,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source, kind)
+        );
+
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,

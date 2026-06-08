@@ -22,7 +22,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteMessageRepository _messageRepository;
     private readonly SqliteTodoRepository _todoRepository;
     private readonly SqliteProcessingOffsetRepository _offsetRepository;
+    private readonly SqliteCaptureSourceSettingsRepository _settingsRepository;
     private readonly string _captureInboxPath;
+    private readonly WeChatLocalReaderService _readerService;
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
     private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
 
@@ -49,10 +51,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _messageRepository = new SqliteMessageRepository(_databasePath);
         _todoRepository = new SqliteTodoRepository(_databasePath);
         _offsetRepository = new SqliteProcessingOffsetRepository(_databasePath);
+        _settingsRepository = new SqliteCaptureSourceSettingsRepository(_databasePath);
         _captureInboxPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "WechatDashboard",
             "capture-inbox");
+        _readerService = new WeChatLocalReaderService();
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;
@@ -111,9 +115,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public ObservableCollection<WindowSnapshotRow> WindowSnapshots { get; } = new();
 
+    public ObservableCollection<CaptureSourceSettingRow> CaptureSourceSettings { get; } = new();
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await InitializeAndRefreshAsync(seedIfEmpty: true);
+        await LoadCaptureSourceSettingsAsync();
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
@@ -129,9 +136,54 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void CaptureButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!_readerService.IsInitialized && _readerService.IsAvailable)
+        {
+            SummaryText = "正在初始化微信本地数据库读取器...";
+            var initSuccess = await _readerService.InitializeAsync(CancellationToken.None);
+            if (initSuccess)
+            {
+                SummaryText = "本地数据库初始化成功，重新加载采集源...";
+                await LoadCaptureSourceSettingsAsync();
+            }
+            else
+            {
+                SummaryText = $"本地数据库初始化失败：{_readerService.LastError ?? "未知错误"}，将使用可见窗口采集";
+            }
+        }
+
         var result = await RunCaptureOnceAsync(CancellationToken.None);
         SummaryText = $"本次采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
         await RefreshAsync();
+    }
+
+    private async void InitLocalDatabaseButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_readerService.IsAvailable)
+        {
+            SummaryText = "微信本地读取器未安装。请将 wechat-local-reader 放置到工具目录。";
+            return;
+        }
+
+        SummaryText = "正在初始化微信本地数据库读取器...";
+        InitLocalDatabaseButton.IsEnabled = false;
+        try
+        {
+            var success = await _readerService.InitializeAsync(CancellationToken.None);
+            if (success)
+            {
+                SummaryText = "本地数据库初始化成功！点击\"采集一次\"即可读取微信消息。";
+                await LoadCaptureSourceSettingsAsync();
+                await RefreshAsync();
+            }
+            else
+            {
+                SummaryText = $"初始化失败：{_readerService.LastError ?? "未知错误"}";
+            }
+        }
+        finally
+        {
+            InitLocalDatabaseButton.IsEnabled = true;
+        }
     }
 
     private void StartWeChatListenerButton_Click(object sender, RoutedEventArgs e)
@@ -192,6 +244,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         var recentMessages = await _messageRepository.GetRecentAsync(100, CancellationToken.None);
         var pendingTodos = await _todoRepository.GetPendingAsync(CancellationToken.None);
+        var localDatabaseSource = CaptureAdapterFactory.CreateWeChatLocalDatabaseSource(_readerService);
+        var localDatabaseConfigPath = CaptureAdapterFactory.GetWeChatLocalDatabaseConfigPath();
+        var dataDir = WeChatDataDirectoryLocator.Locate();
+        var localDbStatus = localDatabaseSource.IsEnabled ? "已就绪"
+            : _readerService.IsAvailable ? (_readerService.LastError ?? "等待初始化")
+            : "未安装";
 
         Replace(Messages, recentMessages.Select(message => new MessageRow(
             message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
@@ -219,10 +277,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
             new DiagnosticRow("WeChat.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "WeChat")),
+            new DiagnosticRow("WeChat.LocalExport", "启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "WeChatLocalExport")),
+            new DiagnosticRow(
+                "WeChat.LocalDatabase",
+                localDbStatus,
+                localDatabaseSource.IsEnabled ? DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm") : "-",
+                localDatabaseSource.IsEnabled
+                    ? localDatabaseConfigPath
+                    : dataDir is not null
+                        ? $"数据目录已检测: {dataDir}，点击\"初始化本地库\"按钮完成设置"
+                        : _readerService.IsAvailable ? "未检测到微信数据目录，请确认微信正在运行" : localDatabaseSource.Location),
             new DiagnosticRow("Feishu.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Feishu")),
             new DiagnosticRow("Shihuatong.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Shihuatong")),
             new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),
-            new DiagnosticRow("WeChat.WindowText", "启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "通过 Windows UI Automation + OCR 读取微信可见窗口文本"),
+            new DiagnosticRow("WeChat.WindowText", "已启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "UIA+OCR 读取可见微信窗口，实时采集，窗口最小化后不可用"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
 
@@ -267,11 +335,63 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private async Task LoadCaptureSourceSettingsAsync()
+    {
+        var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
+        _readerService.ResetInitializationState();
+        var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
+
+        var rows = new List<CaptureSourceSettingRow>();
+        foreach (var source in defaultSources)
+        {
+            var saved = savedSettings.FirstOrDefault(s =>
+                s.Source == source.Source && s.Kind == source.Kind.ToString());
+
+            rows.Add(new CaptureSourceSettingRow
+            {
+                Source = source.Source,
+                DisplayName = source.DisplayName,
+                Kind = source.Kind.ToString(),
+                Location = source.Location,
+                IsEnabled = saved?.IsEnabled ?? source.IsEnabled
+            });
+        }
+
+        Replace(CaptureSourceSettings, rows);
+    }
+
+    private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var now = DateTimeOffset.Now;
+        var settings = CaptureSourceSettings.Select(row => new CaptureSourceSettings(
+            Id: 0,
+            Source: row.Source,
+            DisplayName: row.DisplayName,
+            Kind: row.Kind,
+            Location: row.Location,
+            IsEnabled: row.IsEnabled,
+            CreatedAt: now,
+            UpdatedAt: now)).ToList();
+
+        await _settingsRepository.DeleteAllAsync(CancellationToken.None);
+        await _settingsRepository.SaveAllAsync(settings, CancellationToken.None);
+        SummaryText = $"采集源设置已保存，共 {settings.Count} 个源";
+    }
+
     private MessageCapturePipeline CreateCapturePipeline()
     {
+        _readerService.ResetInitializationState();
+        var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
+        var effectiveSources = defaultSources.Select(source =>
+        {
+            var saved = CaptureSourceSettings.FirstOrDefault(row =>
+                row.Source == source.Source && row.Kind == source.Kind.ToString());
+            return saved is null ? source : source with { IsEnabled = saved.IsEnabled };
+        }).ToArray();
+
         return new MessageCapturePipeline(
             adapters: CaptureAdapterFactory.CreateAdapters(
-                CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath),
+                effectiveSources,
                 CreateWindowTextSnapshotProvider()),
             _messageRepository,
             _todoRepository,
@@ -464,3 +584,12 @@ public sealed record ProjectSummaryRow(string Project, int PendingTodos, int Hig
 public sealed record DiagnosticRow(string Adapter, string Status, string LastSuccessAt, string Detail);
 
 public sealed record WindowSnapshotRow(string WindowTitle, string CapturedAt, int TextLength, string Preview);
+
+public sealed record CaptureSourceSettingRow
+{
+    public string Source { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public string Location { get; set; } = "";
+    public bool IsEnabled { get; set; }
+}

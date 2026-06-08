@@ -25,8 +25,12 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Windows OCR snapshot provider reads WeChat text when UIA exposes only chrome", TestWindowsOcrSnapshotProviderAsync),
     ("Window capture diagnostics service summarizes matching snapshots", TestWindowCaptureDiagnosticsServiceAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
+    ("WeChat local export adapter captures local database export messages incrementally", TestWeChatLocalExportCaptureAdapterAsync),
+    ("WeChat local command adapter captures structured messages and passes offsets", TestWeChatLocalCommandCaptureAdapterAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
-    ("Capture pipeline persists live WeChat visible-window messages", TestLiveWeChatWindowCapturePipelineAsync)
+    ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
+    ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
+    ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync)
 };
 
 var failures = new List<string>();
@@ -212,11 +216,9 @@ static Task TestCaptureAdapterFactoryAsync()
 
     var wechatWindowSource = CaptureAdapterFactory.CreateWeChatWindowTextSource();
     AssertEqual(CaptureSourceKind.WindowText, wechatWindowSource.Kind, "WeChat visible-window source should use window text capture.");
-    AssertFalse(wechatWindowSource.IsEnabled, "WeChat visible-window source should stay disabled until validated on the real app.");
-    AssertEqual(0, CaptureAdapterFactory.CreateAdapters(new[] { wechatWindowSource }).Count, "Disabled window text source should be skipped.");
-    var enabledWindowSource = wechatWindowSource with { IsEnabled = true };
+    AssertTrue(wechatWindowSource.IsEnabled, "WeChat visible-window source should be enabled by default.");
     var windowAdapters = CaptureAdapterFactory.CreateAdapters(
-        new[] { enabledWindowSource },
+        new[] { wechatWindowSource },
         new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
     AssertEqual(1, windowAdapters.Count, "Enabled window text source with provider should create one adapter.");
     AssertEqual("WeChat.WindowText", windowAdapters[0].Name, "Enabled WeChat window source should create a window text adapter.");
@@ -231,13 +233,15 @@ static Task TestLiveCaptureAdapterFactoryAsync()
 
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep WeChat JSONL import.");
     AssertTrue(definitions.Any(source => source.Source == "Feishu" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep future Feishu JSONL import.");
-    AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText && source.IsEnabled), "Live capture should enable WeChat visible-window source.");
+    AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WeChatLocalExport && source.IsEnabled), "Live capture should enable WeChat local export source.");
+    AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText && source.IsEnabled), "Live capture should enable visible-window source by default.");
 
     var adapters = CaptureAdapterFactory.CreateAdapters(
         definitions,
         new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
 
-    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.WindowText"), "Live adapters should include WeChat visible-window adapter.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.LocalExport"), "Live adapters should include WeChat local export adapter.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.WindowText"), "Live adapters should include WeChat visible-window adapter when provider is available.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "Live adapters should still include WeChat JSONL adapter.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
 
@@ -495,6 +499,84 @@ static async Task TestJsonlDirectoryCaptureAdapterAsync()
     AssertEqual("CRM项目群", firstBatch.Messages[0].ChatName, "Chat name should round-trip.");
 }
 
+static async Task TestWeChatLocalExportCaptureAdapterAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var filePath = Path.Combine(root, "wechat-local-export.jsonl");
+    await File.WriteAllLinesAsync(filePath, new[]
+    {
+        """{"msgId":"10001","chatId":"room-digital","chatName":"数字石化（二期）","senderName":"国科 王建辉","content":"@戴少峰 请确认域名配置","createTime":"2026-06-05T09:10:00+08:00","msgType":"Text"}""",
+        """{"msgId":"10002","talker":"room-digital","roomName":"数字石化（二期）","sender":"梁大鹏","message":"接口域名还有点问题","timestamp":1780614900,"type":"Text"}"""
+    }, CancellationToken.None);
+
+    var adapter = new WeChatLocalExportCaptureAdapter(new WeChatLocalExportOptions(root));
+    var firstBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+    var secondBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
+    {
+        [adapter.Name] = firstBatch.NextOffset
+    }), CancellationToken.None);
+    await File.AppendAllLinesAsync(filePath, new[]
+    {
+        """{"msgId":"10003","chatId":"room-digital","chatName":"数字石化（二期）","senderName":"刘荐辉","content":"@白驹过隙 今天下班前反馈","createTime":"2026-06-05T09:20:00+08:00","msgType":"Text"}"""
+    }, CancellationToken.None);
+    var appendBatch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
+    {
+        [adapter.Name] = firstBatch.NextOffset
+    }), CancellationToken.None);
+
+    AssertEqual("WeChat.LocalExport", adapter.Name, "Adapter name should reflect the local export source.");
+    AssertEqual(2, firstBatch.Messages.Count, "First capture should read exported local messages.");
+    AssertEqual(0, secondBatch.Messages.Count, "Offset should prevent rereading exported local messages.");
+    AssertEqual(1, appendBatch.Messages.Count, "Appended capture should read only the new exported row.");
+    AssertEqual("WeChat", firstBatch.Messages[0].Source, "Local export should normalize source to WeChat.");
+    AssertEqual("WeChat:local:10001", firstBatch.Messages[0].SourceMessageKey, "Source key should use local message identity.");
+    AssertEqual("room-digital", firstBatch.Messages[0].ChatId, "Chat id should come from local export fields.");
+    AssertEqual("数字石化（二期）", firstBatch.Messages[0].ChatName, "Chat name should come from local export fields.");
+    AssertEqual("国科 王建辉", firstBatch.Messages[0].SenderName, "Sender should come from local export fields.");
+    AssertEqual("@戴少峰 请确认域名配置", firstBatch.Messages[0].Content, "Content should come from local export fields.");
+    AssertEqual("WeChat:local:10003", appendBatch.Messages[0].SourceMessageKey, "Appended message should preserve local message identity.");
+}
+
+static async Task TestWeChatLocalCommandCaptureAdapterAsync()
+{
+    var runner = new FakeExternalCommandRunner(new ExternalCommandResult(
+        ExitCode: 0,
+        StandardOutput: """
+                        {
+                          "nextOffset": "1700000000:10003",
+                          "messages": [
+                            {
+                              "id": "10003",
+                              "chatId": "room-digital",
+                              "chatName": "数字石化（二期）",
+                              "senderName": "刘荐辉",
+                              "content": "@白驹过隙 今天下班前反馈",
+                              "sentAt": "2026-06-06T09:20:00+08:00",
+                              "messageType": "Text"
+                            }
+                          ]
+                        }
+                        """,
+        StandardError: ""));
+    var adapter = new WeChatLocalCommandCaptureAdapter(
+        new WeChatLocalCommandOptions("wechat-local-reader.exe", new[] { "capture", "--format", "json" }),
+        runner);
+
+    var batch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
+    {
+        [adapter.Name] = "1699999999:9999"
+    }), CancellationToken.None);
+
+    AssertEqual("WeChat.LocalDatabase", adapter.Name, "Command adapter should identify the local database source.");
+    AssertEqual(1, batch.Messages.Count, "Command adapter should capture structured messages.");
+    AssertEqual("WeChat:local:10003", batch.Messages[0].SourceMessageKey, "Command message should use stable local identity.");
+    AssertEqual("数字石化（二期）", batch.Messages[0].ChatName, "Command message should preserve chat name.");
+    AssertEqual("@白驹过隙 今天下班前反馈", batch.Messages[0].Content, "Command message should preserve content.");
+    AssertEqual("1700000000:10003", batch.NextOffset, "Command adapter should use the reader's next offset.");
+    AssertEqual("1699999999:9999", runner.LastEnvironment["WECHAT_DASHBOARD_OFFSET"], "Existing offset should be passed to the reader.");
+}
+
 static async Task TestCapturePipelineAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
@@ -540,25 +622,18 @@ static async Task TestCapturePipelineAsync()
     AssertTrue(pendingTodos.Single().Title.Contains("@张三"), "Todo title should come from mention message.");
 }
 
-static async Task TestLiveWeChatWindowCapturePipelineAsync()
+static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
     Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
 
     var captureRoot = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
-    var capturedAt = new DateTimeOffset(2026, 6, 4, 11, 0, 0, TimeSpan.FromHours(8));
-    var provider = new StaticWindowTextSnapshotProvider(new[]
+    var localExportRoot = Path.Combine(captureRoot, "WeChatLocalExport");
+    Directory.CreateDirectory(localExportRoot);
+    await File.WriteAllLinesAsync(Path.Combine(localExportRoot, "wechat-local-export.jsonl"), new[]
     {
-        new WindowTextSnapshot(
-            WindowTitle: "微信",
-            Text: """
-                  CRM项目群
-                  10:58
-                  王经理
-                  @张三 紧急，今天处理线上故障
-                  """,
-            CapturedAt: capturedAt)
-    });
+        """{"msgId":"local-mention","chatId":"crm","chatName":"CRM项目群","senderName":"王经理","content":"@张三 紧急，今天处理线上故障","createTime":"2026-06-05T11:00:00+08:00","msgType":"Text"}"""
+    }, CancellationToken.None);
 
     var initializer = new SqliteDatabaseInitializer(databasePath);
     await initializer.InitializeAsync(CancellationToken.None);
@@ -567,7 +642,7 @@ static async Task TestLiveWeChatWindowCapturePipelineAsync()
     var todoRepository = new SqliteTodoRepository(databasePath);
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
     var pipeline = new MessageCapturePipeline(
-        adapters: CaptureAdapterFactory.CreateAdapters(CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot), provider),
+        adapters: CaptureAdapterFactory.CreateAdapters(CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)),
         messageRepository,
         todoRepository,
         offsetRepository,
@@ -583,13 +658,108 @@ static async Task TestLiveWeChatWindowCapturePipelineAsync()
     var recentMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
     var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
 
-    AssertEqual(1, firstRun.CapturedCount, "Live WeChat window source should capture the visible mention.");
-    AssertEqual(1, firstRun.PersistedCount, "Visible mention should be persisted.");
-    AssertEqual(1, firstRun.CreatedTodoCount, "Visible mention should create a todo.");
-    AssertEqual(0, secondRun.CapturedCount, "Live WeChat offset should prevent unchanged visible-window duplicates.");
-    AssertEqual("WeChat", recentMessages.Single().Source, "Persisted live message should keep WeChat source.");
-    AssertEqual("CRM项目群", recentMessages.Single().ChatName, "Persisted live message should use inferred chat name.");
+    AssertEqual(1, firstRun.CapturedCount, "Live WeChat local export source should capture the local mention.");
+    AssertEqual(1, firstRun.PersistedCount, "Local mention should be persisted.");
+    AssertEqual(1, firstRun.CreatedTodoCount, "Local mention should create a todo.");
+    AssertEqual(0, secondRun.CapturedCount, "Live WeChat local export offset should prevent duplicates.");
+    AssertEqual("WeChat", recentMessages.Single().Source, "Persisted local message should keep WeChat source.");
+    AssertEqual("CRM项目群", recentMessages.Single().ChatName, "Persisted local message should use local chat name.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should be created from @我.");
+}
+
+static async Task TestCaptureSourceSettingsRepositoryAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var repository = new SqliteCaptureSourceSettingsRepository(databasePath);
+
+    var initialSettings = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(0, initialSettings.Count, "Fresh database should have no saved source settings.");
+
+    var now = DateTimeOffset.Now;
+    var settings = new[]
+    {
+        new CaptureSourceSettings(0, "WeChat", "微信", "JsonlDirectory", "/capture/WeChat", true, now, now),
+        new CaptureSourceSettings(0, "WeChat", "微信本地导出", "WeChatLocalExport", "/capture/WeChatLocalExport", true, now, now),
+        new CaptureSourceSettings(0, "WeChat", "微信可见窗口", "WindowText", "/capture/WeChatWindow", false, now, now)
+    };
+
+    await repository.SaveAllAsync(settings, CancellationToken.None);
+
+    var loaded = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(3, loaded.Count, "All saved source settings should round-trip.");
+    AssertTrue(loaded.Any(s => s.Source == "WeChat" && s.Kind == "WindowText" && !s.IsEnabled), "WindowText should be saved as disabled.");
+    AssertTrue(loaded.Any(s => s.Source == "WeChat" && s.Kind == "JsonlDirectory" && s.IsEnabled), "JsonlDirectory should be saved as enabled.");
+
+    var windowText = loaded.First(s => s.Kind == "WindowText");
+    await repository.SaveAsync(windowText with { IsEnabled = true }, CancellationToken.None);
+
+    var reloaded = await repository.GetAllAsync(CancellationToken.None);
+    AssertTrue(reloaded.First(s => s.Kind == "WindowText").IsEnabled, "Updated setting should reflect enable change.");
+
+    await repository.DeleteAllAsync(CancellationToken.None);
+    var afterDelete = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(0, afterDelete.Count, "All settings should be removable.");
+}
+
+static async Task TestCapturePipelineWithSavedSettingsAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var captureRoot = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    var localExportRoot = Path.Combine(captureRoot, "WeChatLocalExport");
+    Directory.CreateDirectory(localExportRoot);
+    await File.WriteAllLinesAsync(Path.Combine(localExportRoot, "export.jsonl"), new[]
+    {
+        """{"msgId":"m1","chatId":"crm","chatName":"CRM项目群","senderName":"王经理","content":"@张三 紧急处理","createTime":"2026-06-05T11:00:00+08:00","msgType":"Text"}"""
+    }, CancellationToken.None);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
+    var settingsRepository = new SqliteCaptureSourceSettingsRepository(databasePath);
+
+    var now = DateTimeOffset.Now;
+    var savedSettings = new[]
+    {
+        new CaptureSourceSettings(0, "WeChat", "微信", "JsonlDirectory", captureRoot, true, now, now),
+        new CaptureSourceSettings(0, "WeChat", "微信本地导出", "WeChatLocalExport", localExportRoot, true, now, now)
+    };
+    await settingsRepository.SaveAllAsync(savedSettings, CancellationToken.None);
+
+    var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot);
+    var effectiveSources = defaultSources.Select(source =>
+    {
+        var saved = savedSettings.FirstOrDefault(s =>
+            s.Source == source.Source && s.Kind == source.Kind.ToString());
+        return saved is null ? source : source with { IsEnabled = saved.IsEnabled };
+    }).ToArray();
+
+    var pipeline = new MessageCapturePipeline(
+        adapters: CaptureAdapterFactory.CreateAdapters(effectiveSources),
+        messageRepository,
+        todoRepository,
+        offsetRepository,
+        new MentionDetector(new[] { "张三" }),
+        new ProjectClassifier(new[]
+        {
+            new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100)
+        }),
+        new UrgencyRanker(priorityContacts: new[] { "王经理" }, priorityProjectIds: new[] { 1L }));
+
+    var firstRun = await pipeline.RunOnceAsync(CancellationToken.None);
+
+    AssertEqual(1, firstRun.CapturedCount, "Pipeline should use saved settings to capture from local export.");
+    AssertEqual(1, firstRun.PersistedCount, "Message should be persisted through saved settings.");
+    AssertEqual(1, firstRun.CreatedTodoCount, "Mention should create todo through saved settings.");
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)
@@ -676,5 +846,29 @@ public sealed class FakeScreenOcrReader : IScreenOcrReader
     public Task<string> ReadWindowTextAsync(int nativeWindowHandle, CancellationToken cancellationToken)
     {
         return Task.FromResult(_textByWindowHandle.TryGetValue(nativeWindowHandle, out var text) ? text : "");
+    }
+}
+
+public sealed class FakeExternalCommandRunner : IExternalCommandRunner
+{
+    private readonly ExternalCommandResult _result;
+
+    public FakeExternalCommandRunner(ExternalCommandResult result)
+    {
+        _result = result;
+    }
+
+    public IReadOnlyDictionary<string, string> LastEnvironment { get; private set; } =
+        new Dictionary<string, string>();
+
+    public Task<ExternalCommandResult> RunAsync(
+        string executablePath,
+        IReadOnlyList<string> arguments,
+        string? workingDirectory,
+        IReadOnlyDictionary<string, string> environment,
+        CancellationToken cancellationToken)
+    {
+        LastEnvironment = environment;
+        return Task.FromResult(_result);
     }
 }

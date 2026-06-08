@@ -45,7 +45,17 @@ public sealed class MessageCapturePipeline
 
         foreach (var adapter in _adapters)
         {
-            var batch = await adapter.CaptureAsync(context, cancellationToken);
+            CaptureBatch batch;
+            try
+            {
+                batch = await adapter.CaptureAsync(context, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                System.Diagnostics.Debug.WriteLine($"Capture adapter '{adapter.Name}' failed: {ex.Message}");
+                continue;
+            }
+
             captured += batch.Messages.Count;
 
             foreach (var capturedMessage in batch.Messages)

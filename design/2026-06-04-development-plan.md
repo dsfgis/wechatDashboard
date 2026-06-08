@@ -35,6 +35,11 @@ Completed:
 - `WindowsOcrWindowTextSnapshotProvider` and `WindowsScreenOcrReader` add a Windows OCR fallback for WeChat windows that expose only window chrome through UIA.
 - `WindowOcrCropCalculator` crops WeChat OCR to the right-side chat panel and skips the left navigation/conversation list.
 - WeChat capture options ignore this application's own window title, `微信项目消息看板`, so diagnostics and capture do not ingest dashboard text.
+- `WeChatLocalExportCaptureAdapter` reads local WeChat database/export JSONL or JSON files from the default live capture pipeline.
+- Default live capture now enables `WeChat.LocalExport`; `WeChat.WindowText` remains available as a fallback/diagnostic source instead of the primary live source.
+- `WeChatLocalCommandCaptureAdapter` invokes an isolated local reader process, passes the pipeline offset through `WECHAT_DASHBOARD_OFFSET`, parses structured JSON, and keeps external failures out of the WPF process.
+- `tools/wechat-local-reader/wechat_local_reader.py` queries every changed session and emits complete structured message rows instead of using a last-message-only session summary.
+- The packaged reader executable is installed under `%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader`; the source remains disabled until its local config and authorized database keys exist.
 - `DefaultMentionAliases` sets the current user's aliases to `白驹过隙` and `戴少峰`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
 - Tests covering core rules, SQLite round-trip, JSONL capture, visible-window capture, OCR snapshot fallback, live WeChat source registration, and capture pipeline.
@@ -43,7 +48,8 @@ Completed:
 Known gaps:
 
 - Real Windows UI Automation + OCR snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
-- Current WeChat capture is limited to visible UIA text. It does not read hidden chats, encrypted message databases, or full historical WeChat data.
+- Current WeChat window capture is limited to visible UIA/OCR text. It does not read hidden chats, encrypted message databases, or full historical WeChat data.
+- The next WeChat direction is local file/local database capture, because it can keep working when WeChat is minimized or covered. The canonical design is `design/wechat-message-monitor-wpf-design.md`.
 - Windows notification listener is not implemented.
 - Feishu, Shihuatong, and DingTalk adapters are not implemented.
 - Project rules are hardcoded.
@@ -61,7 +67,7 @@ Purpose: make multiple message sources first-class without changing the pipeline
 - Create: `src/WechatDashboard.Infrastructure/Capture/CaptureAdapterFactory.cs`
 - Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
-- Modify: `design/message-capture-extension.md`
+- Modify: `design/wechat-message-monitor-wpf-design.md`
 
 - [x] Step 1: Write failing tests proving the factory creates adapters for WeChat, Feishu, Shihuatong, and DingTalk.
 - [x] Step 2: Implement source definitions and a factory that maps `JsonlDirectory` definitions to `JsonlDirectoryCaptureAdapter`.
@@ -78,7 +84,7 @@ Purpose: capture user-visible WeChat desktop text without process injection or d
 - Create: `src/WechatDashboard.Infrastructure/Capture/WindowTextCaptureOptions.cs`
 - Modify: `src/WechatDashboard.Infrastructure/WechatDashboard.Infrastructure.csproj` if Windows UI Automation references are required.
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
-- Modify: `design/message-capture-extension.md`
+- Modify: `design/wechat-message-monitor-wpf-design.md`
 
 - [x] Step 1: Add tests around text normalization and stable source keys using injected window text snapshots.
 - [x] Step 2: Implement a generic visible-window text adapter behind `IMessageCaptureAdapter`.
@@ -99,7 +105,7 @@ Purpose: make the existing WeChat visible-window adapter usable from WPF without
 - Modify: `src/WechatDashboard.App/MainWindow.xaml`
 - Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
-- Modify: `design/message-capture-extension.md`
+- Modify: `design/wechat-message-monitor-wpf-design.md`
 - Modify: `Agent.md`
 
 - [x] Step 1: Add failing tests proving live source registration includes enabled `WeChat.WindowText`.
@@ -133,6 +139,27 @@ Purpose: handle current WeChat desktop windows where UI Automation exposes only 
 - [x] Step 5: Wire WPF capture and diagnostics to UIA + OCR snapshots.
 - [x] Step 6: Run tests and full solution build.
 - [x] Step 7: Prioritize OCR chat text, crop OCR to the chat panel, and exclude the dashboard window from WeChat capture.
+
+## Milestone 2.3: WeChat Local File Capture Spike
+
+Purpose: move WeChat live collection away from OCR as the primary path and validate local file/local database ingestion behind the existing adapter pipeline.
+
+**Files:**
+
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatLocalExportCaptureAdapter.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatLocalExportOptions.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/CaptureAdapterFactory.cs`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
+- Modify: `tests/WechatDashboard.Tests/Program.cs`
+- Modify: `design/wechat-message-monitor-wpf-design.md`
+
+- [x] Step 1: Add tests for reading WeChat-like local export JSONL into `CapturedMessage`.
+- [x] Step 2: Add offset tests proving repeated exports do not duplicate messages.
+- [x] Step 3: Add source registration for `WeChat.LocalExport` or `WeChat.LocalDatabase`.
+- [x] Step 4: Add diagnostics rows for data directory, external command status, last success, and parsed message count.
+- [x] Step 5: Keep `WeChat.WindowText` available as a disabled or fallback source.
+- [ ] Step 6: With explicit user authorization, initialize the encrypted database reader and validate with real desktop WeChat while the chat window is minimized.
 
 ## Milestone 3: Capture Source Settings UI
 
@@ -208,4 +235,22 @@ Expected result:
 
 Milestones 1, 2, 2.1, and 2.2 have been completed at the framework level. The app now runs WeChat visible-window UIA + OCR capture from "采集一次" and supports 5-second polling from "开始微信监听".
 
-The next executable milestone is still real-desktop validation: restart the app, open the target WeChat chat window, run "扫描微信窗口", document the observed UIA + OCR text preview, and tune parsing if the OCR line order differs from the currently supported single-line or split-block formats. After validation, continue with Milestone 3 so capture sources can be enabled and disabled from persisted settings instead of code defaults.
+Milestone 2.3 is implemented through the real-reader bridge. The app has located WeChat 4.1.10.31 data under `D:\cache\xwechat_files\dsfgis_84f8\db_storage`, and the packaged reader is installed. The user has explicitly authorized read-only `Weixin.exe` memory scanning for the current account's database key. The remaining work is version-compatible key extraction, minimized-window validation, and then Milestone 3.
+
+### 当前进度更新（2026-06-06）
+
+- 已完成本地导出文件适配器、外部命令适配器、WPF 采集诊断和本地读取器打包基础。
+- 已定位微信 `4.1.10.31` 数据目录：`D:\cache\xwechat_files\dsfgis_84f8\db_storage`。
+- 已获得用户明确授权，可只读扫描本机 `Weixin.exe` 进程内存提取本人数据库密钥。
+- 已排除旧版固定十六进制文本模式、固定 `0x2F` 指针结构和无包装十六进制候选。
+- 已实现可变容量指针结构、直接页密钥验证、PBKDF2 原始口令验证和敏感输出抑制，离线单元测试通过。
+- 真实初始化尚未成功，`WeChat.LocalDatabase` 仍应保持未启用状态。
+
+下一阶段按以下顺序执行：
+
+1. 在具备管理员进程读取许可时，运行可变容量结构扫描并记录非敏感候选统计。
+2. 若密钥校验成功，生成受限 ACL 的 `config.json` 和 `all_keys.json`。
+3. 通过读取器抓取最近五分钟消息，只验证数量、时间和字段完整性，不在开发日志中输出正文。
+4. 启动 WPF，确认 `WeChat.LocalDatabase` 诊断状态变为可用。
+5. 最小化微信窗口，发送一条已知测试消息，验证增量 offset、去重、`@白驹过隙`/`@戴少峰` Todo 创建和看板刷新。
+6. 完成回归构建、测试和隐私清理后再标记本地数据库采集为完成。

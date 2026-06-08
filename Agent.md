@@ -12,7 +12,7 @@ src/WechatDashboard.Application/     Business rules, capture contracts, pipeline
 src/WechatDashboard.Infrastructure/  SQLite repositories and capture adapter implementations
 src/WechatDashboard.App/             WPF UI
 tests/WechatDashboard.Tests/         Console-based regression test runner
-design/                              Design, extension, and development plan documents
+design/                              Canonical design document and development plan
 ```
 
 ## Current Architecture
@@ -20,6 +20,12 @@ design/                              Design, extension, and development plan doc
 - Message capture must go through `IMessageCaptureAdapter`.
 - Adapters return `CaptureBatch` containing `CapturedMessage` records.
 - `MessageCapturePipeline` owns deduplication, persistence, `@我` detection, project classification, urgency ranking, Todo creation, and offset saving.
+- WeChat capture direction is local file/local database ingestion first; visible-window OCR remains a fallback and diagnostics path.
+- `WeChatLocalExportCaptureAdapter` reads WeChat local database/export JSONL or JSON files and maps common local-export fields such as `msgId`, `talker`, `roomName`, `sender`, `message`, `createTime`, and `msgType`.
+- `CaptureAdapterFactory.CreateDefaultLiveSources(...)` enables `WeChat.LocalExport` by default and keeps `WeChat.WindowText` disabled unless explicitly enabled.
+- `WeChatLocalCommandCaptureAdapter` runs the isolated reader, passes offsets through `WECHAT_DASHBOARD_OFFSET`, and parses structured JSON without exposing database keys to WPF.
+- `tools/wechat-local-reader/wechat_local_reader.py` is packaged as `%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader\wechat-local-reader.exe`.
+- `WeChat.LocalDatabase` is enabled only when both the reader executable and its local `config.json` exist.
 - `WindowTextCaptureAdapter` parses visible-window text snapshots.
 - `SystemWindowsAutomationReader` reads Windows UI Automation top-level windows and uses Raw View traversal by default.
 - `WindowsOcrWindowTextSnapshotProvider` combines UIA text with Windows OCR over the visible WeChat window when UIA exposes only window chrome.
@@ -48,7 +54,11 @@ In the Codex sandbox, `dotnet build`, `dotnet run`, and Git writes may require e
 
 - Use TDD for behavior changes: write the failing test, run it, implement, then rerun.
 - Keep platform-specific message reading inside adapters.
-- Do not implement WeChat, Feishu, Shihuatong, or DingTalk collection by process injection, Hook, database cracking, credential capture, or bypassing encryption.
+- Do not collect account passwords, session tokens, or unrelated credentials.
+- Reading `Weixin.exe` process memory is allowed only after explicit user authorization and only for extracting the current user's local database key.
+- Keep key extraction inside the isolated local reader. Never print keys, salts, memory addresses, or chat content to application logs or command summaries.
+- Store generated key/config files outside the repository under `%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader`, restrict access to the current Windows user, and never commit them.
+- Process injection and API hooking are not part of the default design. Prefer read-only memory scanning and database-page validation.
 - Preserve `Source` and `SourceMessageKey`; they are required for cross-source deduplication.
 - Add or update tests when changing capture, classification, urgency, Todo generation, or SQLite persistence.
 - Run build and tests before claiming completion.
@@ -67,6 +77,7 @@ Default source subdirectories:
 
 ```text
 %LOCALAPPDATA%\WechatDashboard\capture-inbox\WeChat
+%LOCALAPPDATA%\WechatDashboard\capture-inbox\WeChatLocalExport
 %LOCALAPPDATA%\WechatDashboard\capture-inbox\Feishu
 %LOCALAPPDATA%\WechatDashboard\capture-inbox\Shihuatong
 %LOCALAPPDATA%\WechatDashboard\capture-inbox\DingTalk
@@ -78,8 +89,14 @@ Each `.jsonl` line is one message:
 {"id":"wx-1","platform":"WeChat","chatId":"crm","chatName":"CRM项目群","senderName":"王经理","content":"@张三 今天处理线上故障","sentAt":"2026-06-03T10:00:00+08:00","messageType":"Text"}
 ```
 
+The WeChat local export directory also accepts local-database export shaped records:
+
+```json
+{"msgId":"10001","chatId":"room-digital","chatName":"数字石化（二期）","senderName":"国科 王建辉","content":"@戴少峰 请确认域名配置","createTime":"2026-06-05T09:10:00+08:00","msgType":"Text"}
+```
+
 ## Next Planned Work
 
-Follow `design/2026-06-04-development-plan.md`.
+Follow `design/2026-06-04-development-plan.md`. Keep design changes in `design/wechat-message-monitor-wpf-design.md`; do not create extra design documents for new方案.
 
-Immediate next step: restart the WPF app, open the target WeChat chat, run "扫描微信窗口", and verify the preview now contains OCR text from the chat area. Current WeChat capture only reads visible window text; it does not read hidden chats, encrypted databases, or full historical messages.
+Immediate next step: validate the variable-layout WeChat 4.x memory scanner against Weixin 4.1.10.31, initialize the reader for `D:\cache\xwechat_files\dsfgis_84f8\db_storage`, then verify collection while the chat window is minimized. The fixed `x'<key><salt>'` and fixed-capacity `0x2F` patterns did not match this version. Current OCR capture only reads visible window text and remains a fallback.

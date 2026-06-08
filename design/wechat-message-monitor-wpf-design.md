@@ -15,28 +15,30 @@
 
 范围说明：
 
-1. 本文中的“所有微信消息”指当前用户授权、且能通过合规采集适配器获取到的消息集合。
+1. 本文中的“所有微信消息”指当前用户授权、且能通过合规采集适配器获取到的消息集合，包括本机微信已同步或已缓存到本地的数据。
 2. 本文中的“所有 `@我` 消息”指已采集消息中命中 `@我` 识别规则的全部消息。
 3. 系统不承诺突破微信个人版未公开接口或安全机制来读取不可访问的全量历史消息。
 
 ## 2. 合规边界与设计原则
 
-微信个人版没有公开的全量消息读取接口，因此系统必须将消息采集设计为可插拔适配器，并明确禁止依赖破解、绕过加密、进程注入、盗取密钥等方式。
+微信个人版没有公开的全量消息读取接口，因此系统必须将消息采集设计为可插拔适配器。当前主线从“屏幕 OCR 读取”调整为“本地文件或本地消息库读取优先，OCR 兜底”，但仍必须坚持用户授权、只读、本地执行和可审计的边界。
 
 设计边界：
 
 1. 系统只处理当前用户在本机、本人账号、明确授权范围内的消息。
-2. 默认采用桌面端 UI 自动化、通知监听、用户主动导入、企业合规接口等方式采集消息。
+2. 默认优先采用本地文件、本地消息库只读快照、外部导出 JSONL、通知监听、用户主动导入、企业合规接口等方式采集消息。
 3. 不设计微信账号密码采集，不保存微信登录凭据。
-4. 不绕过微信安全机制，不提供数据库解密、Hook、注入或逆向方案。
-5. 涉及群聊和个人消息的内容默认只保存在本地；如后续接入 AI 云服务，必须提供显式开关、脱敏策略和风险提示。
+4. 微信登录密码不能用于解密本地数据库，系统不接收、不保存、不尝试使用登录密码。
+5. WPF 主程序不内置 Hook、注入或不可审计的逆向逻辑；如需读取微信本地加密数据，只允许在用户显式授权后由隔离的本地读取器只读扫描 `Weixin.exe`，并通过数据库首页 HMAC 校验确认候选密钥。
+6. 数据库密钥、salt、内存地址和原始聊天正文不得写入应用日志、诊断摘要、项目目录或 Git 仓库。
+7. 涉及群聊和个人消息的内容默认只保存在本地；如后续接入 AI 云服务，必须提供显式开关、脱敏策略和风险提示。
 
 产品能力分级：
 
 | 等级 | 能力 | 说明 |
 | --- | --- | --- |
-| MVP | 监控已打开会话、系统通知、用户主动导入的消息 | 最容易合规落地，可先覆盖高频群和重点项目 |
-| 标准版 | 扩展聊天窗口轮询、规则配置、消息补偿扫描 | 提升覆盖率，但仍以用户桌面可见内容为边界 |
+| MVP | 手动导入、JSONL 导入、本地导出文件采集、重点消息 Todo 化 | 先验证消息流水线、去重、`@我` 和看板闭环 |
+| 标准版 | 微信本地文件/本地库采集、规则配置、消息补偿扫描 | 微信最小化或被遮挡时仍可采集本机已缓存消息 |
 | 企业版 | 对接企业微信、机器人、组织批准的数据接口 | 适合公司内部项目消息治理 |
 
 ## 3. 总体架构
@@ -45,7 +47,7 @@
 
 ```mermaid
 flowchart LR
-    A["微信桌面端 / 通知 / 导入文件 / 企业接口"] --> B["Message Capture Adapters"]
+    A["微信本地文件 / 本地消息库 / 桌面通知 / 导入文件 / 企业接口"] --> B["Message Capture Adapters"]
     B --> C["Message Normalizer"]
     C --> D["SQLite Repository"]
     C --> E["Mention Detector"]
@@ -67,7 +69,7 @@ flowchart LR
 | Presentation | WPF 页面、控件、ViewModel、用户交互 | TodoView、MessageFeedView、DashboardView、SettingsView |
 | Application | 编排业务流程和后台任务 | MessagePipelineService、TodoService、AnalyticsService |
 | Domain | 业务模型与规则 | Message、TodoItem、Project、UrgencyScore、ClassificationResult |
-| Infrastructure | SQLite、采集适配器、配置、日志、通知 | SqliteRepository、WeChatUiaAdapter、NotificationAdapter |
+| Infrastructure | SQLite、采集适配器、配置、日志、通知 | SqliteRepository、WeChatLocalDatabaseAdapter、WeChatUiaOcrAdapter、NotificationAdapter |
 
 推荐技术栈：
 
@@ -101,18 +103,94 @@ public interface IMessageCaptureAdapter
 
 | 适配器 | 用途 | 备注 |
 | --- | --- | --- |
-| WeChatUiaAdapter | 通过 Windows UI Automation 读取当前可见微信窗口文本 | 适合实时监控重点群、已打开会话 |
+| WeChatLocalExportAdapter | 读取本地导出工具生成的 JSONL 或 JSON 消息文件 | 第一优先级，风险低，便于快速验证微信最小化采集 |
+| WeChatLocalDatabaseAdapter | 只读读取本机微信已缓存的本地消息文件或本地消息库快照 | 标准版目标，窗口最小化、被遮挡不影响采集 |
+| WeChatUiaOcrAdapter | 通过 Windows UI Automation + OCR 读取当前可见微信窗口文本 | 作为诊断和兜底，不作为微信主采集路径 |
 | WindowsNotificationAdapter | 捕获系统通知中的新消息摘要 | 覆盖新消息提醒，但内容可能不完整 |
 | ManualImportAdapter | 支持用户导入 CSV、文本、截图 OCR 结果或企业导出的消息文件 | 适合补录历史消息 |
 | EnterpriseApiAdapter | 对接组织批准的企业微信或机器人消息接口 | 适合企业环境，权限清晰 |
 
 采集策略：
 
-1. 默认每 3 到 10 秒执行轻量轮询，避免影响微信和系统性能。
+1. 微信来源默认优先使用 `WeChatLocalExportAdapter` 或 `WeChatLocalDatabaseAdapter`，`WeChatUiaOcrAdapter` 只作为诊断和兜底。
 2. 通过 `source_message_key` 做去重，防止同一条消息重复入库。
 3. 保存采集偏移量 `processing_offsets`，重启后从上次位置继续。
 4. 采集异常只影响对应适配器，不阻塞其他适配器和 UI。
-5. UI Automation 只读取当前用户可见窗口内容，不做隐藏式监听。
+5. 本地文件采集默认只读，先复制或读取快照，不修改微信原始文件。
+6. UI Automation + OCR 只读取当前用户可见窗口内容，不做隐藏式监听。
+
+#### 4.1.1 微信本地文件/本地库采集
+
+该方案是后续微信采集主线。它不依赖屏幕像素，因此微信窗口最小化、被其他窗口遮挡或切到后台时，仍有机会读取本机已经接收并缓存到本地的消息。
+
+阶段划分：
+
+1. **本地导出桥接阶段**：WPF 配置本地导出工具路径或导出目录，工具输出 JSONL/JSON，系统通过 `WeChatLocalExportAdapter` 转换为 `CapturedMessage`。该阶段不在主程序中实现微信库解析，优先验证增量采集、去重、`@我` Todo 和看板刷新。
+2. **本地库只读阶段**：通过隔离的 `wechat-local-reader` 进程读取加密数据库并输出结构化 JSON。WPF 只负责启动工具、传入 offset 和解析结果，不在主进程保存或打印数据库密钥。读取器使用临时解密副本，不修改微信原始文件。
+3. **多源本地采集阶段**：沉淀 `ExternalCommandCaptureAdapter`、`LocalFileWatchCaptureAdapter`、`LocalDatabaseCaptureAdapter`，让飞书、石化通、钉钉也能按本地文件、外部命令、官方 API 或可见窗口等方式接入。
+
+本地消息映射：
+
+| 微信本地数据 | 系统字段 | 说明 |
+| --- | --- | --- |
+| 消息唯一 ID 或组合键 | SourceMessageKey | 跨重启去重的核心字段 |
+| 会话 ID | ChatId | 群聊或单聊稳定标识 |
+| 会话名称 | ChatName | 用于项目分类和看板展示 |
+| 发送人 ID 或昵称 | SenderName | 群聊中尽量保留真实发送人 |
+| 消息正文或摘要 | Content | 文本、引用摘要、文件标题、链接标题 |
+| 发送时间 | SentAt | 用于排序、统计和增量 offset |
+| 消息类型 | MessageType | Text、Image、File、Link、System |
+
+非文本消息第一阶段处理为摘要：图片记为 `[图片]`，文件记录文件名和大小，链接记录标题和 URL，语音和视频先记录占位摘要，撤回和系统通知默认不生成 Todo。
+
+增量采集要求：
+
+1. 优先使用微信本地消息唯一 ID。
+2. 没有唯一 ID 时，使用 `账号 + 会话 ID + 发送时间 + 发送人 + 内容 hash` 生成稳定键。
+3. offset 至少保存 `source`、账号标识、最后消息时间、最后消息键和按会话推进的位置。
+4. 同一导出文件重复读取时不能重复入库。
+5. 外部工具失败、输出格式错误、版本不兼容、目录不存在等问题必须显示在采集诊断页，不导致 WPF 崩溃。
+
+当前默认本地导出目录：
+
+```text
+%LOCALAPPDATA%\WechatDashboard\capture-inbox\WeChatLocalExport
+```
+
+第一阶段已支持 JSONL/JSON 中常见字段名映射，例如 `msgId`、`messageId`、`chatId`、`talker`、`roomName`、`senderName`、`sender`、`content`、`message`、`createTime`、`timestamp`、`msgType`。
+
+当前真实环境已定位：
+
+```text
+微信版本：4.1.10.31
+数据目录：D:\cache\xwechat_files\dsfgis_84f8\db_storage
+主消息库：D:\cache\xwechat_files\dsfgis_84f8\db_storage\message\message_0.db
+读取工具：%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader\wechat-local-reader.exe
+```
+
+本地库文件是加密格式。首次初始化必须由用户明确授权读取正在运行的 `Weixin.exe` 进程内存以获取本机数据库密钥。密钥只保存在应用本机工具目录的配置文件中，不进入应用日志、SQLite 消息库、项目目录或 Git 仓库。初始化完成前，`WeChat.LocalDatabase` 保持禁用。
+
+#### 4.1.2 微信 4.x 密钥初始化
+
+本地读取器提供独立 `init` 子命令，初始化过程与 WPF 消息采集进程隔离：
+
+1. 枚举本机正在运行的 `Weixin.exe`，只申请 `PROCESS_VM_READ | PROCESS_QUERY_INFORMATION`。
+2. 分块读取已提交、可读、私有内存，不写入或修改微信进程。
+3. 识别微信 4.x 的 32 字节密钥结构、无包装 ASCII/UTF-16 十六进制候选，并允许容量字段随微信版本变化。
+4. 先把候选作为已派生页密钥直接验证，再按微信 4.x 参数执行 `PBKDF2-HMAC-SHA512` 256000 次派生并验证。
+5. 使用数据库第一页的 HMAC-SHA512 校验确认密钥，未经校验的候选不得保存。
+6. 为 `session`、`contact` 和 `message` 数据库生成独立派生密钥映射，原子写入本机 `all_keys.json`。
+7. 生成的 `config.json` 和 `all_keys.json` 位于 `%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader`，并限制为当前 Windows 用户访问。
+8. 初始化命令只输出状态、数据库数量、候选数量和耗时，不输出密钥、salt、内存地址或聊天内容。
+
+当前验证状态（2026-06-06）：
+
+1. 已确认微信版本为 `4.1.10.31`，数据库目录和消息库持续更新。
+2. 旧版 `x'<64hex_key><32hex_salt>'` 文本模式未在五个微信进程中出现。
+3. 固定容量 `0x2F` 的微信 4.x 指针结构产生候选，但没有候选通过数据库校验。
+4. 无包装 ASCII/UTF-16 十六进制候选也没有通过直接页密钥或原始口令校验。
+5. 读取器已改为支持可变容量结构、直接页密钥和原始口令双路径；真实进程验证仍待下一次具备管理员读取权限时完成。
+6. 在密钥校验成功、配置生成且真实消息读取测试通过前，系统不能宣称已经支持后台读取微信消息。
 
 ### 4.2 消息标准化
 
@@ -540,12 +618,13 @@ UI 测试：
 3. 实现 `@我` 识别、基础项目规则和紧急度评分。
 4. 实现待办理页面和今日概览看板。
 
-第二阶段：实时监控能力
+第二阶段：微信本地采集和实时监控能力
 
-1. 实现 Windows 通知适配器。
-2. 实现 WeChat UI Automation 适配器。
-3. 增加采集诊断页面和失败重试机制。
-4. 增加桌面通知和托盘状态。
+1. 实现 `WeChatLocalExportAdapter`，先读取本地 JSONL/JSON 导出消息。
+2. 验证微信窗口最小化时，本机新增消息是否能通过本地导出链路进入 SQLite 和 Todo。
+3. 抽象 `IWeChatLocalStoreReader`，准备本地库只读快照读取能力。
+4. 保留 `WeChatUiaOcrAdapter` 作为诊断和兜底。
+5. 增加采集诊断页面、失败重试、桌面通知和托盘状态。
 
 第三阶段：分类和看板增强
 
@@ -565,8 +644,9 @@ UI 测试：
 
 | 风险 | 影响 | 应对 |
 | --- | --- | --- |
-| 微信个人版缺少官方全量读取接口 | 无法保证读取所有历史消息 | 采用适配器分级，先覆盖可见窗口、通知和导入数据 |
-| UI Automation 稳定性受微信版本影响 | 采集可能偶发失败 | 增加采集诊断、重试、规则化窗口识别和手动导入补偿 |
+| 微信个人版缺少官方全量读取接口 | 无法保证读取所有历史消息 | 采用适配器分级，优先读取本机已缓存消息，保留导入、通知和 OCR 兜底 |
+| 微信本地库加密、分片或版本变化 | 本地采集可能失效 | 先采用外部导出桥接和只读快照，诊断页暴露版本、路径和错误 |
+| UI Automation 和 OCR 稳定性受窗口状态影响 | 最小化或遮挡时不可用 | OCR 只作为兜底，不作为主采集路径 |
 | 群消息涉及隐私 | 合规风险 | 本地存储、显式授权、群级采集开关、脱敏和清理 |
 | 分类误判 | 项目统计不准确 | 规则优先、展示分类原因、支持用户修正并沉淀规则 |
 | 消息量大导致卡顿 | 用户体验下降 | 后台队列、批量写入、分页、虚拟化、聚合缓存 |
@@ -587,10 +667,11 @@ MVP 验收：
 正式版验收：
 
 1. 支持至少一种实时采集适配器。
-2. 支持项目规则编辑、规则测试和用户修正闭环。
-3. 支持 P0/P1 待办桌面提醒。
-4. 支持按项目、时间、类别、状态、紧急程度多维统计。
-5. 支持群级采集策略、数据删除、导出和备份。
+2. 微信窗口最小化或被遮挡时，已缓存到本机的新消息仍能通过本地采集链路进入消息库。
+3. 支持项目规则编辑、规则测试和用户修正闭环。
+4. 支持 P0/P1 待办桌面提醒。
+5. 支持按项目、时间、类别、状态、紧急程度多维统计。
+6. 支持群级采集策略、数据删除、导出和备份。
 
 ## 14. 推荐项目结构
 

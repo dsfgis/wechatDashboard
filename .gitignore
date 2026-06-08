@@ -1,6 +1,9 @@
 bin/
 obj/
 .vs/
+.tmp/
+__pycache__/
+*.py[cod]
 *.user
 *.suo
 *.db
