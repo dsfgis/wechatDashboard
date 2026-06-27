@@ -27,6 +27,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("WeChat local export adapter captures local database export messages incrementally", TestWeChatLocalExportCaptureAdapterAsync),
     ("WeChat local command adapter captures structured messages and passes offsets", TestWeChatLocalCommandCaptureAdapterAsync),
+    ("WeChat local command adapter exposes staged diagnostics from reader", TestWeChatLocalCommandStagedDiagnosticsAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
@@ -577,6 +578,53 @@ static async Task TestWeChatLocalCommandCaptureAdapterAsync()
     AssertEqual("1699999999:9999", runner.LastEnvironment["WECHAT_DASHBOARD_OFFSET"], "Existing offset should be passed to the reader.");
 }
 
+static async Task TestWeChatLocalCommandStagedDiagnosticsAsync()
+{
+    var runner = new FakeExternalCommandRunner(new ExternalCommandResult(
+        ExitCode: 0,
+        StandardOutput: """
+                        {
+                          "status": "ok",
+                          "stages": [
+                            {"stage": "config", "status": "loaded", "db_dir": "D:/cache/xwechat_files/dsfgis_84f8/db_storage"},
+                            {"stage": "keys", "status": "loaded", "key_count": 12},
+                            {"stage": "decrypt", "status": "ok", "total": 12, "decrypted": 3, "skipped": 9, "failed": 0},
+                            {"stage": "offset", "status": "ok", "last_offset": 1700000000, "query_start": 1699999990},
+                            {"stage": "query", "status": "ok", "sessions": 5, "matched_tables": 3, "shards_scanned": 2, "rows_read": 1}
+                          ],
+                          "nextOffset": "1700000200",
+                          "messages": [
+                            {
+                              "id": "room@chatroom:message_0.db:1001:1700000100",
+                              "chatId": "room@chatroom",
+                              "chatName": "测试群",
+                              "senderName": "Alice",
+                              "content": "@白驹过隙 确认一下",
+                              "sentAt": 1700000100,
+                              "messageType": "Text"
+                            }
+                          ]
+                        }
+                        """,
+        StandardError: ""));
+    var adapter = new WeChatLocalCommandCaptureAdapter(
+        new WeChatLocalCommandOptions("wechat-local-reader.exe", new[] { "capture", "--format", "json" }),
+        runner);
+
+    var batch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+
+    AssertEqual(1, batch.Messages.Count, "Staged diagnostics test should still capture messages.");
+    AssertEqual("1700000200", batch.NextOffset, "Next offset should come from reader output.");
+    AssertNotNull(adapter.LastStages, "Adapter should expose staged diagnostics.");
+    AssertEqual("ok", adapter.LastStages!.Status, "Overall status should be ok.");
+    AssertEqual(5, adapter.LastStages.Stages.Count, "All five stages should be parsed.");
+    AssertEqual("decrypt", adapter.LastStages.Stages[2].Name, "Third stage should be decrypt.");
+    AssertEqual("ok", adapter.LastStages.Stages[2].Status, "Decrypt stage should be ok.");
+    AssertTrue(adapter.LastStages.Stages[2].Detail.Contains("decrypted=3"), "Decrypt detail should include decrypted count.");
+    AssertEqual("query", adapter.LastStages.Stages[4].Name, "Last stage should be query.");
+    AssertTrue(adapter.LastStages.Stages[4].Detail.Contains("rows_read=1"), "Query detail should include rows_read.");
+}
+
 static async Task TestCapturePipelineAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
@@ -799,6 +847,14 @@ static void AssertEqual<T>(T expected, T actual, string message)
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
     {
         throw new InvalidOperationException($"{message} Expected '{expected}', got '{actual}'.");
+    }
+}
+
+static void AssertNotNull<T>(T? value, string message) where T : class
+{
+    if (value is null)
+    {
+        throw new InvalidOperationException(message);
     }
 }
 

@@ -8,27 +8,109 @@ import json
 import math
 import os
 import re
+import shlex
 import sqlite3
 import struct
 import subprocess
 import sys
 import time
 
-try:
-    from wechat_cli.core.contacts import get_contact_names
-    from wechat_cli.core.context import AppContext
-    from wechat_cli.core.messages import (
-        _find_msg_tables_for_user,
-        _format_message_text,
-        _iter_table_contexts,
-        _load_name2id_maps,
-        _query_messages,
-        _resolve_sender_label,
-        _split_msg_type,
-        decompress_content,
-    )
-except ImportError:
-    pass
+# ---------------------------------------------------------------------------
+# Optional crypto backends. The reader needs AES-256-CBC for SQLCipher V4
+# page decryption and zstd for compressed message content. Both are loaded
+# lazily so that key-extraction diagnostics still work on machines without
+# the extra packages installed.
+# ---------------------------------------------------------------------------
+
+_AES_BACKEND = None
+_ZSTD_BACKEND = None
+
+
+def _load_aes_backend():
+    global _AES_BACKEND
+    if _AES_BACKEND is not None:
+        return _AES_BACKEND
+
+    try:
+        from Crypto.Cipher import AES as _AES  # pycryptodome
+
+        def decrypt(key, iv, ciphertext):
+            return _AES.new(key, _AES.MODE_CBC, iv).decrypt(ciphertext)
+
+        _AES_BACKEND = ("pycryptodome", decrypt)
+        return _AES_BACKEND
+    except ImportError:
+        pass
+
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher as _Cipher
+        from cryptography.hazmat.primitives.ciphers import algorithms as _alg
+        from cryptography.hazmat.primitives.ciphers import modes as _modes
+
+        def decrypt(key, iv, ciphertext):
+            decryptor = _Cipher(_alg.AES(key), _modes.CBC(iv)).decryptor()
+            return decryptor.update(ciphertext) + decryptor.finalize()
+
+        _AES_BACKEND = ("cryptography", decrypt)
+        return _AES_BACKEND
+    except ImportError:
+        pass
+
+    return None
+
+
+def _load_zstd_backend():
+    global _ZSTD_BACKEND
+    if _ZSTD_BACKEND is not None:
+        return _ZSTD_BACKEND
+
+    try:
+        import zstandard as _zstd
+
+        _ZSTD_BACKEND = ("zstandard", lambda data: _zstd.ZstdDecompressor().decompress(data))
+        return _ZSTD_BACKEND
+    except ImportError:
+        pass
+
+    try:
+        import pyzstd as _pyzstd
+
+        _ZSTD_BACKEND = ("pyzstd", lambda data: _pyzstd.decompress(data))
+        return _ZSTD_BACKEND
+    except ImportError:
+        pass
+
+    try:
+        import compression.zstd as _stdlib_zstd  # Python 3.14+
+
+        _ZSTD_BACKEND = (
+            "stdlib",
+            lambda data: _stdlib_zstd.ZstdDecompressor().decompress(data),
+        )
+        return _ZSTD_BACKEND
+    except ImportError:
+        pass
+
+    return None
+
+
+def aes_decrypt(key, iv, ciphertext):
+    backend = _load_aes_backend()
+    if backend is None:
+        raise RuntimeError(
+            "AES backend not available. Install 'cryptography' or 'pycryptodome'."
+        )
+    return backend[1](key, iv, ciphertext)
+
+
+def zstd_decompress(data):
+    backend = _load_zstd_backend()
+    if backend is None:
+        raise RuntimeError(
+            "zstd backend not available. Install 'zstandard' or 'pyzstd'."
+        )
+    return backend[1](data)
+
 
 PAGE_SIZE = 4096
 KEY_SIZE = 32
@@ -68,6 +150,13 @@ DB_PATH_KEYWORD = re.compile(
     re.IGNORECASE,
 )
 
+SQLITE_HEADER = b"SQLite format 3\x00"
+BOOTSTRAP_RANGES = {
+    "7d": 7 * 24 * 3600,
+    "30d": 30 * 24 * 3600,
+    "all": 0,
+}
+
 
 class MemoryBasicInformation(ctypes.Structure):
     _fields_ = [
@@ -81,6 +170,10 @@ class MemoryBasicInformation(ctypes.Structure):
         ("Type", ctypes.wintypes.DWORD),
     ]
 
+
+# ---------------------------------------------------------------------------
+# Memory scanning and key extraction (preserved from previous implementation)
+# ---------------------------------------------------------------------------
 
 def windows_kernel32():
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -541,6 +634,10 @@ def find_wechat_v4_passphrase(candidate_values, validation_page):
     )
 
 
+# ---------------------------------------------------------------------------
+# Database discovery, key derivation, and decryption
+# ---------------------------------------------------------------------------
+
 def collect_database_pages(database_root):
     pages = []
     for root, _, files in os.walk(database_root):
@@ -562,6 +659,15 @@ def collect_database_pages(database_root):
                 )
             )
     return pages
+
+
+def normalize_database_root(path):
+    """Accept either an account directory or its db_storage directory."""
+    absolute = os.path.abspath(path)
+    db_storage = os.path.join(absolute, "db_storage")
+    if os.path.isdir(db_storage):
+        return db_storage
+    return absolute
 
 
 def choose_validation_page(database_pages):
@@ -618,6 +724,169 @@ def derive_database_keys(passphrase, database_pages):
     }
 
 
+def parse_hex_key(value):
+    if value is None:
+        return None
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return None
+    if cleaned.startswith("0x"):
+        cleaned = cleaned[2:]
+    if not re.fullmatch(r"[0-9a-f]{64}", cleaned):
+        raise RuntimeError("Imported DB key must be a 64-character hexadecimal string.")
+    return bytes.fromhex(cleaned)
+
+
+def extract_db_key_from_text(text):
+    """Extract a 64-hex-character DB key from JSON or plain command output."""
+    if not text:
+        return None
+
+    def walk_json(value):
+        if isinstance(value, str):
+            try:
+                return parse_hex_key(value)
+            except RuntimeError:
+                return None
+        if isinstance(value, dict):
+            preferred = (
+                "key",
+                "dbKey",
+                "db_key",
+                "databaseKey",
+                "database_key",
+                "WECHAT_DB_KEY",
+            )
+            for name in preferred:
+                if name in value:
+                    found = walk_json(value[name])
+                    if found is not None:
+                        return found
+            for item in value.values():
+                found = walk_json(item)
+                if found is not None:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = walk_json(item)
+                if found is not None:
+                    return found
+        return None
+
+    try:
+        parsed = json.loads(text)
+        found = walk_json(parsed)
+        if found is not None:
+            return found
+    except Exception:
+        pass
+
+    match = re.search(r"(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])", text)
+    return bytes.fromhex(match.group(1)) if match else None
+
+
+def extract_db_key_from_file(path):
+    if not path:
+        return None
+    normalized = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(normalized):
+        return None
+    with open(normalized, "r", encoding="utf-8", errors="ignore") as key_file:
+        return extract_db_key_from_text(key_file.read())
+
+
+def external_key_command_has_pid_token(command_text):
+    return "{pid}" in command_text or "{wechat_pid}" in command_text
+
+
+def build_external_key_command(command_text, process_id=None, db_dir=None, config_path=None):
+    """Build a command for subprocess.run without invoking a shell.
+
+    Plain strings are passed directly on Windows so quoted executable paths such
+    as "C:\\Program Files\\Tool\\DbkeyHookCMD.exe" -pid {pid} keep working.
+    JSON arrays are supported for callers that want explicit argv boundaries.
+    """
+    if not command_text or not command_text.strip():
+        return None
+
+    replacements = {
+        "{pid}": "" if process_id is None else str(process_id),
+        "{wechat_pid}": "" if process_id is None else str(process_id),
+        "{db_dir}": "" if db_dir is None else str(db_dir),
+        "{config}": "" if config_path is None else str(config_path),
+    }
+    raw_command = command_text.strip()
+
+    def replace_tokens(value):
+        for token, replacement in replacements.items():
+            value = value.replace(token, replacement)
+        return value
+
+    if raw_command.startswith("["):
+        try:
+            parsed = json.loads(raw_command)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"Invalid external key command JSON: {error}") from error
+        if not isinstance(parsed, list) or not parsed or not all(isinstance(item, str) for item in parsed):
+            raise RuntimeError("External key command JSON must be a non-empty string array.")
+        return [replace_tokens(item) for item in parsed]
+
+    expanded = replace_tokens(raw_command)
+
+    if os.name == "nt":
+        return expanded
+
+    try:
+        return shlex.split(expanded, posix=True)
+    except ValueError as error:
+        raise RuntimeError(f"Invalid external key command: {error}") from error
+
+
+def run_external_key_command(command_text, process_id=None, db_dir=None, config_path=None, key_file=None):
+    """Run a user-configured external key tool and parse a DB key from output."""
+    command = build_external_key_command(
+        command_text,
+        process_id=process_id,
+        db_dir=db_dir,
+        config_path=config_path,
+    )
+    if not command:
+        return None
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=180,
+    )
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    key = extract_db_key_from_text(output)
+    if key is None and key_file:
+        key = extract_db_key_from_file(key_file)
+    if key is None:
+        raise RuntimeError(
+            f"External key command did not return a usable DB key (exit code {result.returncode})."
+        )
+    return key
+
+
+def derive_database_keys_from_imported_key(imported_key, database_pages):
+    """Validate an imported WeChat DB master key against all database pages."""
+    database_keys = derive_database_keys(imported_key, database_pages)
+    if has_required_database_keys(database_keys):
+        return "imported_passphrase", database_keys
+
+    # Some tools may export an already-derived page key for one database.
+    # This is not sufficient for full capture, but the diagnostic makes the
+    # mismatch explicit instead of silently accepting a partial setup.
+    direct_keys = find_direct_database_keys([imported_key], database_pages)
+    if has_required_database_keys(direct_keys):
+        return "imported_direct", direct_keys
+
+    return "imported_invalid", database_keys or direct_keys
+
+
 def find_direct_database_keys(candidate_values, database_pages):
     direct_keys = {}
     for relative_path, path, page in database_pages:
@@ -664,72 +933,809 @@ def write_json_atomically(path, value):
     os.replace(temporary_path, path)
 
 
+# ---------------------------------------------------------------------------
+# SQLCipher V4 page decryption (self-contained, no wechat_cli dependency)
+# ---------------------------------------------------------------------------
+
+def decrypt_database_page(page, database_key, page_number, reserve_size=RESERVE_SIZE):
+    """Decrypt one SQLCipher V4 page and return a 4096-byte plaintext page.
+
+    Page layout (reserve=80):
+      page 1: salt(16) + ciphertext(4000) + iv(16) + hmac(64)
+      page N: ciphertext(4016) + iv(16) + hmac(64)
+
+    The plaintext page is rebuilt as a standard 4096-byte SQLite page with
+    the reserve area zeroed so that SQLite reads it as a normal file.
+    """
+    if len(page) != PAGE_SIZE:
+        return None
+
+    salt = page[:SALT_SIZE]
+    content_end = PAGE_SIZE - reserve_size
+    iv = page[content_end:content_end + 16]
+
+    if page_number == 1:
+        ciphertext = page[SALT_SIZE:content_end]
+        plaintext = aes_decrypt(database_key, iv, ciphertext)
+        rebuilt = SQLITE_HEADER + plaintext
+    else:
+        ciphertext = page[:content_end]
+        plaintext = aes_decrypt(database_key, iv, ciphertext)
+        rebuilt = plaintext
+
+    # Pad to full page size; the reserve area is zeroed.
+    if len(rebuilt) < PAGE_SIZE:
+        rebuilt = rebuilt + b"\x00" * (PAGE_SIZE - len(rebuilt))
+    elif len(rebuilt) > PAGE_SIZE:
+        rebuilt = rebuilt[:PAGE_SIZE]
+
+    # Clear the reserved-space field (byte 20) on page 1 so SQLite does not
+    # expect trailing reserve bytes in the decrypted file.
+    if page_number == 1:
+        rebuilt = rebuilt[:20] + b"\x00" + rebuilt[21:]
+
+    return rebuilt
+
+
+def decrypt_database_file(source_path, destination_path, database_key, reserve_size=RESERVE_SIZE):
+    """Decrypt an entire SQLCipher V4 database file to a plain SQLite file."""
+    file_size = os.path.getsize(source_path)
+    if file_size < PAGE_SIZE:
+        return False, "file smaller than one page"
+
+    page_count = file_size // PAGE_SIZE
+    if file_size % PAGE_SIZE != 0:
+        page_count += 1
+
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    bytes_written = 0
+    with open(source_path, "rb") as source, open(destination_path, "wb") as destination:
+        for page_number in range(1, page_count + 1):
+            page = source.read(PAGE_SIZE)
+            if len(page) < PAGE_SIZE:
+                page = page + b"\x00" * (PAGE_SIZE - len(page))
+
+            decrypted = decrypt_database_page(
+                page, database_key, page_number, reserve_size
+            )
+            if decrypted is None:
+                return False, f"failed to decrypt page {page_number}"
+
+            destination.write(decrypted)
+            bytes_written += PAGE_SIZE
+
+    return True, f"{page_count} pages, {bytes_written} bytes"
+
+
+def decrypt_all_databases(database_root, decrypted_root, keys, changed_only=True):
+    """Decrypt every database listed in *keys* into *decrypted_root*.
+
+    Returns a diagnostics dict with per-file status and aggregate counts.
+    """
+    diagnostics = {
+        "total": 0,
+        "decrypted": 0,
+        "skipped": 0,
+        "failed": 0,
+        "failures": [],
+    }
+
+    for relative_path, key_info in keys.items():
+        diagnostics["total"] += 1
+        source_path = os.path.join(database_root, relative_path.replace("/", os.sep))
+        destination_path = os.path.join(decrypted_root, relative_path.replace("/", os.sep))
+
+        if not os.path.exists(source_path):
+            diagnostics["failed"] += 1
+            diagnostics["failures"].append(
+                {"path": relative_path, "error": "source missing"}
+            )
+            continue
+
+        if changed_only and os.path.exists(destination_path):
+            source_mtime = os.path.getmtime(source_path)
+            dest_mtime = os.path.getmtime(destination_path)
+            if source_mtime <= dest_mtime:
+                diagnostics["skipped"] += 1
+                continue
+
+        database_key = bytes.fromhex(key_info["enc_key"])
+        ok, detail = decrypt_database_file(source_path, destination_path, database_key)
+        if ok:
+            diagnostics["decrypted"] += 1
+        else:
+            diagnostics["failed"] += 1
+            diagnostics["failures"].append(
+                {"path": relative_path, "error": detail}
+            )
+
+    return diagnostics
+
+
+# ---------------------------------------------------------------------------
+# V4 schema reading (SessionTable, Msg_<md5(username)>, Name2Id)
+# ---------------------------------------------------------------------------
+
+def md5_hex_lower(value):
+    return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+
+def quote_identifier(identifier):
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def table_exists(connection, table_name):
+    cursor = connection.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name=?
+        """,
+        (table_name,),
+    )
+    return cursor.fetchone() is not None
+
+
+def table_columns(connection, table_name):
+    rows = connection.execute(
+        f"PRAGMA table_info({quote_identifier(table_name)})"
+    ).fetchall()
+    return [row[1] for row in rows]
+
+
+def pick_column(columns, *candidates):
+    by_lower = {column.lower(): column for column in columns}
+    for candidate in candidates:
+        column = by_lower.get(candidate.lower())
+        if column:
+            return column
+    return None
+
+
+def select_expr(column, alias, fallback="NULL"):
+    if column:
+        return f"{quote_identifier(column)} AS {quote_identifier(alias)}"
+    return f"{fallback} AS {quote_identifier(alias)}"
+
+
+def read_session_table(session_db_path, contact_names=None):
+    """Read sessions from session/session.db.
+
+    Returns a list of dicts with username, last_timestamp, summary, and
+    display_name fields. Does not log message content.
+    """
+    if not os.path.exists(session_db_path):
+        return []
+
+    sessions = []
+    with sqlite3.connect(session_db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        if not table_exists(connection, "SessionTable"):
+            return []
+
+        columns = table_columns(connection, "SessionTable")
+        username_col = pick_column(columns, "username", "strUsrName", "user_name")
+        last_timestamp_col = pick_column(
+            columns, "last_timestamp", "sort_timestamp", "nTime"
+        )
+        summary_col = pick_column(columns, "summary", "strContent", "content")
+        display_col = pick_column(
+            columns,
+            "display_name",
+            "last_sender_display_name",
+            "strNickName",
+            "nick_name",
+        )
+
+        if not username_col:
+            return []
+
+        order_col = last_timestamp_col or username_col
+        query = f"""
+            SELECT
+                {select_expr(username_col, "username")},
+                {select_expr(last_timestamp_col, "last_timestamp", "0")},
+                {select_expr(summary_col, "summary", "''")},
+                {select_expr(display_col, "display_name", "''")}
+            FROM SessionTable
+            ORDER BY {quote_identifier(order_col)} DESC
+        """
+        rows = connection.execute(query).fetchall()
+
+        for row in rows:
+            username = row["username"] or ""
+            display_name = ""
+            if contact_names:
+                display_name = contact_names.get(username, "")
+            if not display_name:
+                display_name = row["display_name"] or ""
+            sessions.append(
+                {
+                    "username": username,
+                    "last_timestamp": int(row["last_timestamp"] or 0),
+                    "summary": row["summary"] or "",
+                    "display_name": display_name,
+                }
+            )
+
+    return sessions
+
+
+def read_name2id_map(message_db_path):
+    """Read the Name2Id table from a message database.
+
+    Returns a dict mapping id -> name.
+    """
+    name_map = {}
+    if not os.path.exists(message_db_path):
+        return name_map
+
+    with sqlite3.connect(message_db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        if not table_exists(connection, "Name2Id"):
+            return name_map
+
+        columns = table_columns(connection, "Name2Id")
+        id_col = pick_column(columns, "id")
+        name_col = pick_column(columns, "user_name", "username", "name", "UsrName")
+        if not name_col:
+            return name_map
+
+        select_parts = ["rowid AS __rowid", select_expr(name_col, "name")]
+        if id_col:
+            select_parts.append(select_expr(id_col, "id"))
+        else:
+            select_parts.append("NULL AS id")
+
+        rows = connection.execute(
+            f"SELECT {', '.join(select_parts)} FROM Name2Id"
+        ).fetchall()
+        for row in rows:
+            name = row["name"] or ""
+            if not name:
+                continue
+            name_map[str(row["__rowid"])] = name
+            if row["id"] is not None:
+                name_map[str(row["id"])] = name
+
+    return name_map
+
+
+def read_contact_names(contact_db_path):
+    """Read contact display names from a decrypted contact database."""
+    names = {}
+    if not os.path.exists(contact_db_path):
+        return names
+
+    with sqlite3.connect(contact_db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        table_name = "contact" if table_exists(connection, "contact") else None
+        if table_name is None and table_exists(connection, "Contact"):
+            table_name = "Contact"
+        if table_name is None:
+            return names
+
+        columns = table_columns(connection, table_name)
+        username_col = pick_column(columns, "username", "UserName", "user_name")
+        remark_col = pick_column(columns, "remark", "Remark")
+        nick_col = pick_column(columns, "nick_name", "NickName", "nickname")
+        if not username_col:
+            return names
+
+        rows = connection.execute(
+            f"""
+            SELECT
+                {select_expr(username_col, "username")},
+                {select_expr(remark_col, "remark", "''")},
+                {select_expr(nick_col, "nick_name", "''")}
+            FROM {quote_identifier(table_name)}
+            """
+        ).fetchall()
+
+        for row in rows:
+            username = row["username"] or ""
+            if not username:
+                continue
+            display = row["remark"] or row["nick_name"] or username
+            names[username] = display
+
+    return names
+
+
+def list_message_shards(decrypted_root):
+    """Find all decrypted message.db and message_N.db files."""
+    message_dir = os.path.join(decrypted_root, "message")
+    shards = []
+    if not os.path.isdir(message_dir):
+        return shards
+
+    for filename in sorted(os.listdir(message_dir)):
+        if re.match(r"message(?:_\d+)?\.db$", filename):
+            shards.append(os.path.join(message_dir, filename))
+
+    return shards
+
+
+def list_msg_tables(connection, username):
+    """Find all Msg_<md5(username)> tables across message shards."""
+    table_suffix = md5_hex_lower(username)
+    pattern = f"Msg_{table_suffix}"
+    tables = []
+    cursor = connection.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name=?
+        """,
+        (pattern,),
+    )
+    for row in cursor.fetchall():
+        tables.append(row[0])
+    return tables
+
+
+def decompress_content(content, content_type):
+    """Decompress message content based on its type field.
+
+    WeChat V4 stores some content as zstd-compressed blobs. The content_type
+    field indicates the encoding.
+    """
+    if content is None:
+        return ""
+
+    if isinstance(content, bytes):
+        if content_type == 1 or content.startswith(b"\x28\xb5\x2f\xfd"):
+            try:
+                return zstd_decompress(content).decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+        try:
+            return content.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    else:
+        if content_type == 1:
+            try:
+                return zstd_decompress(content.encode("latin-1")).decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception:
+                return content
+        return content
+
+
+def split_msg_type(local_type):
+    """Split a WeChat local_type into (base_type, sub_type).
+
+    WeChat encodes the type as a 32-bit integer where the low byte is the
+    base type and the next byte is the sub-type. However, system message
+    types (10000, 10002) are stored as the full integer and must be matched
+    directly.
+    """
+    if local_type is None:
+        return 0, 0
+    if local_type in (10000, 10002):
+        return local_type, 0
+    base = local_type & 0xFF
+    sub = (local_type >> 8) & 0xFF
+    return base, sub
+
+
+def message_type_name(local_type):
+    base_type, sub_type = split_msg_type(local_type)
+    if base_type == 1:
+        return "Text"
+    if base_type == 3:
+        return "Image"
+    if base_type == 49 and sub_type == 5:
+        return "Link"
+    if base_type == 49:
+        return "File"
+    if base_type in (34, 43, 47, 48, 50):
+        return "File"
+    if base_type in (10000, 10002):
+        return "System"
+    return "Text"
+
+
+def extract_sender_and_content(raw_content, is_group, username, display_name, name_map):
+    """Parse a WeChat message content field into (sender_name, text).
+
+    Group messages often have the format 'sender_wxid:\nactual_content'.
+    Non-group messages have the content directly.
+    """
+    if raw_content is None:
+        return "", ""
+
+    text = raw_content
+    sender_name = ""
+
+    if is_group and ":\n" in text:
+        parts = text.split(":\n", 1)
+        if len(parts) == 2:
+            sender_id = parts[0]
+            text = parts[1]
+            sender_name = name_map.get(sender_id, sender_id)
+
+    return sender_name, text
+
+
+def query_messages_from_shard(
+    shard_path,
+    username,
+    display_name,
+    name_map,
+    start_timestamp,
+    limit=None,
+):
+    """Query messages for a single user from a single message shard."""
+    messages = []
+    if not os.path.exists(shard_path):
+        return messages
+
+    table_suffix = md5_hex_lower(username)
+    table_name = f"Msg_{table_suffix}"
+    is_group = "@chatroom" in username
+
+    with sqlite3.connect(shard_path) as connection:
+        connection.row_factory = sqlite3.Row
+        if not table_exists(connection, table_name):
+            return messages
+
+        columns = table_columns(connection, table_name)
+        local_id_col = pick_column(columns, "local_id", "localId", "msgId")
+        server_id_col = pick_column(columns, "server_id", "MsgSvrID", "msg_svr_id")
+        local_type_col = pick_column(columns, "local_type", "type", "Type")
+        sort_seq_col = pick_column(columns, "sort_seq", "Sequence", "sequence")
+        real_sender_id_col = pick_column(columns, "real_sender_id", "TalkerId")
+        create_time_col = pick_column(columns, "create_time", "CreateTime", "nTime")
+        message_content_col = pick_column(
+            columns, "message_content", "StrContent", "content"
+        )
+        compress_content_col = pick_column(
+            columns, "compress_content", "CompressContent"
+        )
+        packed_info_col = pick_column(columns, "packed_info_data", "BytesExtra")
+        status_col = pick_column(columns, "status", "IsSender")
+
+        if not create_time_col:
+            return messages
+
+        # Merge the shard's own Name2Id map.
+        shard_name_map = dict(name_map)
+        shard_name_map.update(read_name2id_map(shard_path))
+
+        local_id_expr = (
+            select_expr(local_id_col, "local_id")
+            if local_id_col
+            else "rowid AS local_id"
+        )
+        select_parts = [
+            local_id_expr,
+            select_expr(server_id_col, "server_id"),
+            select_expr(local_type_col, "local_type", "1"),
+            select_expr(sort_seq_col, "sort_seq", "0"),
+            select_expr(real_sender_id_col, "real_sender_id"),
+            select_expr(create_time_col, "create_time"),
+            select_expr(message_content_col, "message_content", "''"),
+            select_expr(compress_content_col, "compress_content"),
+            select_expr(packed_info_col, "packed_info_data"),
+            select_expr(status_col, "status", "0"),
+        ]
+
+        query = f"""
+            SELECT {', '.join(select_parts)}
+            FROM {quote_identifier(table_name)}
+            WHERE {quote_identifier(create_time_col)} >= ?
+            ORDER BY {quote_identifier(create_time_col)} ASC
+        """
+
+        params = (start_timestamp,)
+        if limit:
+            query += " LIMIT ?"
+            params = (start_timestamp, limit)
+
+        rows = connection.execute(query, params).fetchall()
+        for row in rows:
+            local_id = row["local_id"]
+            server_id = row["server_id"]
+            local_type = row["local_type"]
+            create_time = row["create_time"]
+            real_sender_id = row["real_sender_id"]
+            message_content = row["message_content"]
+            compress_content = row["compress_content"]
+
+            # Text is normally in message_content. compress_content often holds
+            # media payloads, so only use it when the text field is empty.
+            decoded = decompress_content(message_content, 0)
+            if not decoded and compress_content:
+                decoded = decompress_content(compress_content, 1)
+
+            sender_from_content, text = extract_sender_and_content(
+                decoded, is_group, username, display_name, shard_name_map
+            )
+
+            # Resolve sender: prefer real_sender_id via Name2Id, fall back to
+            # the sender parsed from content, then display_name.
+            if real_sender_id:
+                resolved_user = shard_name_map.get(str(real_sender_id), "")
+                sender_name = (
+                    shard_name_map.get(resolved_user, resolved_user)
+                    or sender_from_content
+                    or display_name
+                )
+            else:
+                sender_name = sender_from_content or display_name
+
+            source_id = (
+                f"{username}:{os.path.basename(shard_path)}:{server_id or local_id}:{create_time}"
+            )
+
+            messages.append(
+                {
+                    "id": source_id,
+                    "chatId": username,
+                    "chatName": display_name or username,
+                    "senderName": sender_name or "Unknown sender",
+                    "content": text or "",
+                    "sentAt": int(create_time or 0),
+                    "messageType": message_type_name(local_type),
+                }
+            )
+
+    return messages
+
+
+def read_messages(decrypted_root, start_timestamp, limit=None):
+    """Read all messages across sessions and shards since *start_timestamp*.
+
+    Returns (messages, max_timestamp, diagnostics).
+    """
+    diagnostics = {
+        "sessions": 0,
+        "matched_tables": 0,
+        "rows_read": 0,
+        "shards_scanned": 0,
+    }
+
+    session_db_path = os.path.join(decrypted_root, "session", "session.db")
+    contact_db_path = os.path.join(decrypted_root, "contact", "contact.db")
+    contact_names = read_contact_names(contact_db_path)
+    sessions = read_session_table(session_db_path, contact_names=contact_names)
+    diagnostics["sessions"] = len(sessions)
+
+    # Global name map resolves wxid/user_name values to display names.
+    global_name_map = dict(contact_names)
+
+    shards = list_message_shards(decrypted_root)
+    diagnostics["shards_scanned"] = len(shards)
+
+    messages = []
+    seen_keys = set()
+    max_timestamp = start_timestamp
+
+    for session in sessions:
+        username = session["username"]
+        if not username:
+            continue
+
+        display_name = session["display_name"] or username
+        for shard_path in shards:
+            shard_messages = query_messages_from_shard(
+                shard_path,
+                username,
+                display_name,
+                global_name_map,
+                start_timestamp,
+                limit,
+            )
+            if shard_messages:
+                diagnostics["matched_tables"] += 1
+            for message in shard_messages:
+                if message["id"] in seen_keys:
+                    continue
+                seen_keys.add(message["id"])
+                messages.append(message)
+                if message["sentAt"] > max_timestamp:
+                    max_timestamp = message["sentAt"]
+
+    diagnostics["rows_read"] = len(messages)
+    messages.sort(key=lambda item: (item["sentAt"], item["id"]))
+    return messages, max_timestamp, diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Offset and bootstrap management
+# ---------------------------------------------------------------------------
+
+def read_offset(initial_lookback_seconds):
+    raw_offset = os.environ.get("WECHAT_DASHBOARD_OFFSET", "").strip()
+    try:
+        return max(0, int(raw_offset))
+    except ValueError:
+        return max(0, int(time.time()) - initial_lookback_seconds)
+
+
+def bootstrap_lookback_seconds(value):
+    if not value:
+        return 30 * 24 * 3600
+    return BOOTSTRAP_RANGES.get(value, 30 * 24 * 3600)
+
+
+# ---------------------------------------------------------------------------
+# Init command (fixed: no more direct_database_keys reference; staged output)
+# ---------------------------------------------------------------------------
+
 def initialize_local_reader(args):
-    database_root = os.path.abspath(args.db_dir)
+    stages = []
+    started_at = time.monotonic()
+    database_root = normalize_database_root(args.db_dir)
     if not os.path.isdir(database_root):
         raise RuntimeError(f"WeChat database directory not found: {database_root}")
+
+    stages.append({"stage": "path", "status": "ok", "db_dir": database_root})
 
     database_pages = collect_database_pages(database_root)
     validation_page = choose_validation_page(database_pages)
     if validation_page is None:
+        stages.append({"stage": "path", "status": "no_databases"})
         raise RuntimeError("No WeChat database files were found.")
 
-    process_ids = [args.pid] if args.pid else list_weixin_process_ids()
-    if not process_ids:
-        raise RuntimeError("Weixin.exe is not running.")
-
-    print("正在扫描微信进程内存以提取数据库密钥...", file=sys.stderr)
-    started_at = time.monotonic()
-    (
-        candidate_values,
-        scanned_processes,
-        hex_count,
-        pointer_count,
-        key_salt_count,
-        raw_count,
-        db_path_ref_count,
-        _,
-    ) = collect_wechat_v4_candidates(
-        process_ids,
+    stages.append(
+        {
+            "stage": "path",
+            "status": "databases_found",
+            "count": len(database_pages),
+        }
     )
-    print(f"扫描完成: 找到 {len(candidate_values)} 个密钥候选, 处理 {scanned_processes} 个进程", file=sys.stderr)
-    plausible_candidate_count = sum(
-        is_plausible_passphrase(candidate)
-        for candidate in candidate_values
-    )
-    print(f"其中 {plausible_candidate_count} 个可能是口令, 正在验证...", file=sys.stderr)
 
-    direct_key = find_key_from_candidates(candidate_values, validation_page)
-    passphrase = None
-    extraction_mode = "direct"
+    imported_key = parse_hex_key(args.db_key or os.environ.get("WECHAT_DASHBOARD_DB_KEY"))
+    key_command = args.key_command or os.environ.get("WECHAT_DASHBOARD_KEY_COMMAND")
+    key_file = args.key_file or os.environ.get("WECHAT_DASHBOARD_KEY_FILE")
     database_keys = {}
+    extraction_mode = "unknown"
+    key_provider_label = "Weixin.exe"
+    candidate_values = []
+    scanned_processes = 0
+    hex_count = 0
+    pointer_count = 0
+    key_salt_count = 0
+    raw_count = 0
+    db_path_ref_count = 0
+    plausible_candidate_count = 0
 
-    if direct_key is not None:
-        passphrase = direct_key if is_plausible_passphrase(direct_key) else None
-        database_keys = find_direct_database_keys([direct_key], database_pages)
-        if not has_required_database_keys(database_keys) and passphrase is not None:
-            database_keys = derive_database_keys(passphrase, database_pages)
-            extraction_mode = "passphrase"
-    else:
-        print(f"直接密钥验证未找到, 尝试口令派生 ({plausible_candidate_count} 个候选)...", file=sys.stderr)
-        (
-            passphrase,
-            _,
-            _,
-        ) = find_wechat_v4_passphrase(
-            candidate_values,
-            validation_page,
+    if imported_key is not None:
+        stages.append({"stage": "key_provider", "status": "imported"})
+        key_provider_label = "imported DB key"
+        extraction_mode, database_keys = derive_database_keys_from_imported_key(
+            imported_key,
+            database_pages,
         )
-        if passphrase is not None:
-            extraction_mode = "passphrase"
-            database_keys = derive_database_keys(passphrase, database_pages)
+    elif key_command:
+        uses_pid = external_key_command_has_pid_token(key_command)
+        process_ids = [args.pid] if args.pid else (list_weixin_process_ids() if uses_pid else [None])
+        if uses_pid and not process_ids:
+            stages.append({"stage": "key_provider", "status": "no_process"})
+            raise RuntimeError("Weixin.exe is not running.")
+
+        stages.append(
+            {
+                "stage": "key_provider",
+                "status": "external_command",
+                "pid_token": uses_pid,
+                "attempts": len(process_ids),
+                "key_file": bool(key_file),
+            }
+        )
+        key_provider_label = "external key command"
+        scanned_processes = len(process_ids) if uses_pid else 0
+        last_external_error = None
+        for process_id in process_ids:
+            try:
+                candidate_key = run_external_key_command(
+                    key_command,
+                    process_id=process_id,
+                    db_dir=database_root,
+                    config_path=args.config,
+                    key_file=key_file,
+                )
+            except RuntimeError as error:
+                last_external_error = error
+                continue
+
+            candidate_mode, candidate_database_keys = derive_database_keys_from_imported_key(
+                candidate_key,
+                database_pages,
+            )
+            imported_key = candidate_key
+            extraction_mode = "external_" + candidate_mode
+            database_keys = candidate_database_keys
+            if has_required_database_keys(database_keys):
+                break
+
+        if imported_key is None and last_external_error is not None:
+            raise RuntimeError(str(last_external_error)) from last_external_error
+    else:
+        process_ids = [args.pid] if args.pid else list_weixin_process_ids()
+        if not process_ids:
+            stages.append({"stage": "key_provider", "status": "no_process"})
+            raise RuntimeError("Weixin.exe is not running.")
+
+        stages.append(
+            {"stage": "key_provider", "status": "scanning", "processes": len(process_ids)}
+        )
+
+        print("正在扫描微信进程内存以提取数据库密钥...", file=sys.stderr)
+        (
+            candidate_values,
+            scanned_processes,
+            hex_count,
+            pointer_count,
+            key_salt_count,
+            raw_count,
+            db_path_ref_count,
+            _,
+        ) = collect_wechat_v4_candidates(
+            process_ids,
+        )
+        print(
+            f"扫描完成: 找到 {len(candidate_values)} 个密钥候选, 处理 {scanned_processes} 个进程",
+            file=sys.stderr,
+        )
+        plausible_candidate_count = sum(
+            is_plausible_passphrase(candidate)
+            for candidate in candidate_values
+        )
+        print(f"其中 {plausible_candidate_count} 个可能是口令, 正在验证...", file=sys.stderr)
+
+        direct_key = find_key_from_candidates(candidate_values, validation_page)
+        passphrase = None
+        extraction_mode = "direct"
+
+        if direct_key is not None:
+            passphrase = direct_key if is_plausible_passphrase(direct_key) else None
+            database_keys = find_direct_database_keys([direct_key], database_pages)
+            if not has_required_database_keys(database_keys) and passphrase is not None:
+                database_keys = derive_database_keys(passphrase, database_pages)
+                extraction_mode = "passphrase"
+        else:
+            print(
+                f"直接密钥验证未找到, 尝试口令派生 ({plausible_candidate_count} 个候选)...",
+                file=sys.stderr,
+            )
+            (
+                passphrase,
+                _,
+                _,
+            ) = find_wechat_v4_passphrase(
+                candidate_values,
+                validation_page,
+            )
+            if passphrase is not None:
+                extraction_mode = "passphrase"
+                database_keys = derive_database_keys(passphrase, database_pages)
+
+    stages.append(
+        {
+            "stage": "key_validation",
+            "status": "ok" if has_required_database_keys(database_keys) else "failed",
+            "extraction_mode": extraction_mode,
+            "candidate_count": len(candidate_values),
+            "plausible_candidate_count": plausible_candidate_count,
+            "validated_database_count": len(database_keys),
+            "process_count": scanned_processes,
+            "hex_candidates": hex_count,
+            "pointer_candidates": pointer_count,
+            "key_salt_candidates": key_salt_count,
+            "raw_candidates": raw_count,
+            "db_path_refs": db_path_ref_count,
+        }
+    )
 
     if not has_required_database_keys(database_keys):
         raise RuntimeError(
-            "No usable WeChat 4.x database keys were found in Weixin.exe "
+            f"No usable WeChat 4.x database keys were found from {key_provider_label} "
             f"({len(candidate_values)} candidates, "
             f"{plausible_candidate_count} plausible, "
-            f"{len(direct_database_keys)} direct database matches)."
+            f"{len(database_keys)} direct database matches)."
         )
 
     config_path = os.path.abspath(args.config)
@@ -746,12 +1752,23 @@ def initialize_local_reader(args):
             "keys_file": keys_path,
             "decrypted_dir": decrypted_directory,
             "decoded_image_dir": decoded_image_directory,
+            "bootstrap_range": args.bootstrap_range,
         },
+    )
+
+    stages.append(
+        {
+            "stage": "config",
+            "status": "written",
+            "config_path": config_path,
+            "decrypted_dir": decrypted_directory,
+        }
     )
 
     json.dump(
         {
             "status": "initialized",
+            "stages": stages,
             "databaseCount": len(database_pages),
             "keyCount": len(database_keys),
             "extractionMode": extraction_mode,
@@ -771,140 +1788,83 @@ def initialize_local_reader(args):
     sys.stdout.write("\n")
 
 
-def message_type_name(local_type):
-    base_type, sub_type = _split_msg_type(local_type)
-    if base_type == 1:
-        return "Text"
-    if base_type == 3:
-        return "Image"
-    if base_type == 49 and sub_type == 5:
-        return "Link"
-    if base_type == 49:
-        return "File"
-    if base_type in (34, 43, 47, 48, 50):
-        return "File"
-    if base_type in (10000, 10002):
-        return "System"
-    return "Text"
+# ---------------------------------------------------------------------------
+# Capture command (self-contained, no wechat_cli dependency)
+# ---------------------------------------------------------------------------
+
+def load_config(config_path):
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        return json.load(config_file)
 
 
-def read_offset(initial_lookback_seconds):
-    raw_offset = os.environ.get("WECHAT_DASHBOARD_OFFSET", "").strip()
-    try:
-        return max(0, int(raw_offset))
-    except ValueError:
-        return max(0, int(time.time()) - initial_lookback_seconds)
-
-
-def read_sessions(app, start_timestamp):
-    session_path = app.cache.get(os.path.join("session", "session.db"))
-    if not session_path:
-        raise RuntimeError("Unable to decrypt session/session.db.")
-
-    with sqlite3.connect(session_path) as connection:
-        return connection.execute(
-            """
-            SELECT username, last_timestamp
-            FROM SessionTable
-            WHERE last_timestamp >= ?
-            ORDER BY last_timestamp
-            """,
-            (start_timestamp,),
-        ).fetchall()
-
-
-def read_messages(app, start_timestamp):
-    names = get_contact_names(app.cache, app.decrypted_dir)
-    messages = []
-    seen_keys = set()
-    max_timestamp = start_timestamp
-
-    for username, _ in read_sessions(app, start_timestamp):
-        display_name = names.get(username, username)
-        context = {
-            "query": username,
-            "username": username,
-            "display_name": display_name,
-            "message_tables": _find_msg_tables_for_user(
-                username,
-                app.msg_db_keys,
-                app.cache,
-            ),
-            "is_group": "@chatroom" in username,
-        }
-
-        for table_context in _iter_table_contexts(context):
-            database_name = os.path.basename(table_context["db_path"])
-            with sqlite3.connect(table_context["db_path"]) as connection:
-                id_to_username = _load_name2id_maps(connection)
-                rows = _query_messages(
-                    connection,
-                    table_context["table_name"],
-                    start_ts=start_timestamp,
-                    limit=None,
-                )
-
-            for row in rows:
-                local_id, local_type, create_time, real_sender_id, content, content_type = row
-                source_id = f"{username}:{database_name}:{local_id}:{create_time}"
-                if source_id in seen_keys:
-                    continue
-                seen_keys.add(source_id)
-
-                decoded_content = decompress_content(content, content_type)
-                if decoded_content is None:
-                    decoded_content = "(unable to decompress)"
-
-                sender_from_content, text = _format_message_text(
-                    local_id,
-                    local_type,
-                    decoded_content,
-                    table_context["is_group"],
-                    username,
-                    display_name,
-                    names,
-                    app.display_name_fn,
-                    db_dir=app.db_dir,
-                    create_time_ts=create_time,
-                    resolve_media=False,
-                )
-                sender_name = _resolve_sender_label(
-                    real_sender_id,
-                    sender_from_content,
-                    table_context["is_group"],
-                    username,
-                    display_name,
-                    names,
-                    id_to_username,
-                    app.display_name_fn,
-                )
-
-                messages.append(
-                    {
-                        "id": source_id,
-                        "chatId": username,
-                        "chatName": display_name,
-                        "senderName": sender_name or "Unknown sender",
-                        "content": text or "",
-                        "sentAt": int(create_time),
-                        "messageType": message_type_name(local_type),
-                    }
-                )
-                max_timestamp = max(max_timestamp, int(create_time))
-
-    messages.sort(key=lambda item: (item["sentAt"], item["id"]))
-    return messages, max_timestamp
+def load_keys(keys_path):
+    with open(keys_path, "r", encoding="utf-8") as keys_file:
+        return json.load(keys_file)
 
 
 def capture(args):
-    app = AppContext(args.config)
-    last_offset = read_offset(args.initial_lookback_seconds)
+    stages = []
+    config = load_config(args.config)
+    database_root = config["db_dir"]
+    keys_path = config["keys_file"]
+    decrypted_root = config["decrypted_dir"]
+    bootstrap_range = config.get("bootstrap_range", "30d")
+
+    stages.append({"stage": "config", "status": "loaded", "db_dir": database_root})
+
+    keys = load_keys(keys_path)
+    stages.append(
+        {"stage": "keys", "status": "loaded", "key_count": len(keys)}
+    )
+
+    # Decrypt changed databases.
+    decrypt_diag = decrypt_all_databases(database_root, decrypted_root, keys)
+    stages.append(
+        {
+            "stage": "decrypt",
+            "status": "ok" if decrypt_diag["failed"] == 0 else "partial",
+            "total": decrypt_diag["total"],
+            "decrypted": decrypt_diag["decrypted"],
+            "skipped": decrypt_diag["skipped"],
+            "failed": decrypt_diag["failed"],
+            "failures": decrypt_diag["failures"][:5],
+        }
+    )
+
+    # Determine the query start timestamp.
+    last_offset = read_offset(bootstrap_lookback_seconds(bootstrap_range))
     query_start = max(0, last_offset - args.lookback_seconds)
-    messages, max_timestamp = read_messages(app, query_start)
+    stages.append(
+        {
+            "stage": "offset",
+            "status": "ok",
+            "last_offset": last_offset,
+            "query_start": query_start,
+        }
+    )
+
+    # Read messages.
+    messages, max_timestamp, read_diag = read_messages(
+        decrypted_root, query_start, limit=args.limit or None
+    )
+    stages.append(
+        {
+            "stage": "query",
+            "status": "ok",
+            "sessions": read_diag["sessions"],
+            "matched_tables": read_diag["matched_tables"],
+            "shards_scanned": read_diag["shards_scanned"],
+            "rows_read": read_diag["rows_read"],
+        }
+    )
+
+    next_offset = str(max(last_offset, max_timestamp))
 
     json.dump(
         {
-            "nextOffset": str(max(last_offset, max_timestamp)),
+            "status": "ok",
+            "stages": stages,
+            "nextOffset": next_offset,
             "messages": messages,
         },
         sys.stdout,
@@ -922,12 +1882,30 @@ def build_parser():
     capture_parser.add_argument("--format", choices=("json",), default="json")
     capture_parser.add_argument("--initial-lookback-seconds", type=int, default=300)
     capture_parser.add_argument("--lookback-seconds", type=int, default=10)
+    capture_parser.add_argument("--limit", type=int, default=0)
     capture_parser.set_defaults(handler=capture)
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--db-dir", required=True)
     init_parser.add_argument("--config", required=True)
     init_parser.add_argument("--pid", type=int)
+    init_parser.add_argument(
+        "--db-key",
+        help="Optional 64-character hex DB master key. Prefer WECHAT_DASHBOARD_DB_KEY to avoid command-line exposure.",
+    )
+    init_parser.add_argument(
+        "--key-command",
+        help="Optional external command that prints a 64-character hex DB key as JSON or text. Prefer WECHAT_DASHBOARD_KEY_COMMAND.",
+    )
+    init_parser.add_argument(
+        "--key-file",
+        help="Optional file written by an external key tool. Prefer WECHAT_DASHBOARD_KEY_FILE.",
+    )
+    init_parser.add_argument(
+        "--bootstrap-range",
+        choices=("7d", "30d", "all"),
+        default="30d",
+    )
     init_parser.set_defaults(handler=initialize_local_reader)
     return parser
 

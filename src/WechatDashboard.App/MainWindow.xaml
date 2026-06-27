@@ -69,6 +69,20 @@
                     <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <TextBlock Text="历史导入范围：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                    <ComboBox x:Name="BootstrapRangeComboBox" Width="90" Margin="0,0,8,0" SelectedIndex="1">
+                        <ComboBoxItem Content="7天" Tag="7d" />
+                        <ComboBoxItem Content="30天" Tag="30d" />
+                        <ComboBoxItem Content="全部" Tag="all" />
+                    </ComboBox>
+                    <TextBlock Text="DB Key：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                    <PasswordBox x:Name="ImportedDatabaseKeyBox" Width="220" Margin="0,0,8,0" />
+                    <TextBlock Text="Key工具：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                    <TextBox x:Name="ExternalKeyCommandTextBox" Width="240" Margin="0,0,8,0"
+                             ToolTip="例如：&quot;D:\tools\DbkeyHookCMD.exe&quot; -pid {pid}" />
+                    <TextBlock Text="Key文件：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                    <TextBox x:Name="ExternalKeyFileTextBox" Width="180" Margin="0,0,8,0"
+                             ToolTip="外部工具写出的 dbkey.txt，可留空" />
                     <Button x:Name="InitLocalDatabaseButton" Content="初始化本地库" Click="InitLocalDatabaseButton_Click" Margin="0,0,8,0" />
                     <Button Content="刷新" Click="RefreshButton_Click" />
                     <Button Content="采集一次" Click="CaptureButton_Click" />

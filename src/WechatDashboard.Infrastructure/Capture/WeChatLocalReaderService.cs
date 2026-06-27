@@ -11,6 +11,10 @@ public sealed class WeChatLocalReaderService
     private readonly string? _readerScriptPath;
     private readonly string? _readerExePath;
     private readonly IExternalCommandRunner _commandRunner;
+    private string _bootstrapRange = "30d";
+    private string? _importedDatabaseKey;
+    private string? _externalKeyCommand;
+    private string? _externalKeyFile;
 
     private bool? _isInitialized;
     private string? _lastError;
@@ -28,11 +32,9 @@ public sealed class WeChatLocalReaderService
         _configPath = Path.Combine(readerDir, "config.json");
         _keysPath = Path.Combine(readerDir, "all_keys.json");
 
-        // Prefer Python script over exe (easier to update, fewer lock issues)
-        var scriptPath = Path.Combine(readerDir, "wechat_local_reader.py");
-        _readerScriptPath = File.Exists(scriptPath)
-            ? scriptPath
-            : FindReaderScript();
+        // Prefer the newest Python script when running from source; it is
+        // easier to update than a packaged exe and avoids stale local copies.
+        _readerScriptPath = FindReaderScript(readerDir);
 
         var exePath = Path.Combine(readerDir, "wechat-local-reader.exe");
         var newExePath = Path.Combine(readerDir, "wechat-local-reader-new.exe");
@@ -50,6 +52,46 @@ public sealed class WeChatLocalReaderService
     public string ConfigPath => _configPath;
 
     public string KeysPath => _keysPath;
+
+    public string? ImportedDatabaseKey
+    {
+        get => _importedDatabaseKey;
+        set
+        {
+            var trimmed = value?.Trim();
+            _importedDatabaseKey = string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+        }
+    }
+
+    public string? ExternalKeyCommand
+    {
+        get => _externalKeyCommand;
+        set
+        {
+            var trimmed = value?.Trim();
+            _externalKeyCommand = string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+        }
+    }
+
+    public string? ExternalKeyFile
+    {
+        get => _externalKeyFile;
+        set
+        {
+            var trimmed = value?.Trim();
+            _externalKeyFile = string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+        }
+    }
+
+    public string BootstrapRange
+    {
+        get => _bootstrapRange;
+        set
+        {
+            var normalized = value?.Trim().ToLowerInvariant() ?? "30d";
+            _bootstrapRange = normalized is "7d" or "30d" or "all" ? normalized : "30d";
+        }
+    }
 
     public string? ReaderExecutablePath => _readerScriptPath ?? _readerExePath;
 
@@ -107,11 +149,25 @@ public sealed class WeChatLocalReaderService
 
         try
         {
+            var environment = new Dictionary<string, string>();
+            if (!string.IsNullOrWhiteSpace(_importedDatabaseKey))
+            {
+                environment["WECHAT_DASHBOARD_DB_KEY"] = _importedDatabaseKey!;
+            }
+            if (!string.IsNullOrWhiteSpace(_externalKeyCommand))
+            {
+                environment["WECHAT_DASHBOARD_KEY_COMMAND"] = _externalKeyCommand!;
+            }
+            if (!string.IsNullOrWhiteSpace(_externalKeyFile))
+            {
+                environment["WECHAT_DASHBOARD_KEY_FILE"] = _externalKeyFile!;
+            }
+
             var result = await _commandRunner.RunAsync(
                 executable,
                 args,
-                Path.GetDirectoryName(_readerScriptPath)!,
-                new Dictionary<string, string>(),
+                Path.GetDirectoryName(ReaderExecutablePath ?? executable),
+                environment,
                 linkedCts.Token);
 
             if (result.ExitCode != 0)
@@ -142,7 +198,7 @@ public sealed class WeChatLocalReaderService
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
-            _lastError = "初始化超时（4分钟）。请确认微信正在运行，并以管理员身份运行本程序。";
+            _lastError = "初始化超时（8分钟）。请确认微信正在运行，并以管理员身份运行本程序。";
             _isInitialized = false;
             return false;
         }
@@ -174,32 +230,70 @@ public sealed class WeChatLocalReaderService
             var pythonExe = FindPythonExecutable();
             return (
                 pythonExe,
-                new[] { _readerScriptPath, "init", "--db-dir", dbDir, "--config", configPath });
+                new[]
+                {
+                    _readerScriptPath,
+                    "init",
+                    "--db-dir", dbDir,
+                    "--config", configPath,
+                    "--bootstrap-range", _bootstrapRange
+                });
         }
 
         var exe = _readerExePath ?? "wechat-local-reader.exe";
-        return (exe, new[] { "init", "--db-dir", dbDir, "--config", configPath });
+        return (
+            exe,
+            new[]
+            {
+                "init",
+                "--db-dir", dbDir,
+                "--config", configPath,
+                "--bootstrap-range", _bootstrapRange
+            });
     }
 
-    private static string FindReaderScript()
+    private static string? FindReaderScript(string readerDir)
     {
         var candidates = new[]
         {
+            Path.Combine(readerDir, "wechat_local_reader.py"),
             Path.Combine(AppContext.BaseDirectory, "wechat_local_reader.py"),
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "tools", "wechat-local-reader", "wechat_local_reader.py"),
             Path.Combine(Environment.CurrentDirectory, "tools", "wechat-local-reader", "wechat_local_reader.py")
-        };
+        }
+            .Concat(FindReaderScriptUpwards(AppContext.BaseDirectory))
+            .Concat(FindReaderScriptUpwards(Environment.CurrentDirectory))
+            .Select(Path.GetFullPath)
+            .Where(File.Exists)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(path => new FileInfo(path))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .ToArray();
 
-        foreach (var candidate in candidates)
+        return candidates.FirstOrDefault()?.FullName;
+    }
+
+    private static IEnumerable<string> FindReaderScriptUpwards(string startDirectory)
+    {
+        DirectoryInfo? directory;
+        try
         {
-            var full = Path.GetFullPath(candidate);
-            if (File.Exists(full))
-            {
-                return full;
-            }
+            directory = new DirectoryInfo(Path.GetFullPath(startDirectory));
+        }
+        catch
+        {
+            yield break;
         }
 
-        return "";
+        while (directory is not null)
+        {
+            yield return Path.Combine(
+                directory.FullName,
+                "tools",
+                "wechat-local-reader",
+                "wechat_local_reader.py");
+            directory = directory.Parent;
+        }
     }
 
     private static string FindPythonExecutable()

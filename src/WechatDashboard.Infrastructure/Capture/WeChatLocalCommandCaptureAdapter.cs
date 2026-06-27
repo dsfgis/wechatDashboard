@@ -13,6 +13,8 @@ public sealed class WeChatLocalCommandCaptureAdapter : IMessageCaptureAdapter
     private readonly WeChatLocalCommandOptions _options;
     private readonly IExternalCommandRunner _commandRunner;
 
+    private CaptureStageDiagnostics? _lastStages;
+
     public WeChatLocalCommandCaptureAdapter(
         WeChatLocalCommandOptions options,
         IExternalCommandRunner commandRunner)
@@ -27,6 +29,8 @@ public sealed class WeChatLocalCommandCaptureAdapter : IMessageCaptureAdapter
     }
 
     public string Name => "WeChat.LocalDatabase";
+
+    public CaptureStageDiagnostics? LastStages => _lastStages;
 
     public async Task<CaptureBatch> CaptureAsync(CaptureContext context, CancellationToken cancellationToken)
     {
@@ -55,6 +59,10 @@ public sealed class WeChatLocalCommandCaptureAdapter : IMessageCaptureAdapter
             var detail = string.IsNullOrWhiteSpace(result.StandardError)
                 ? $"exit code {result.ExitCode}"
                 : Truncate(result.StandardError.Trim(), MaxDiagnosticErrorLength);
+            _lastStages = new CaptureStageDiagnostics(
+                Status: "failed",
+                Stages: Array.Empty<CaptureStage>(),
+                Error: detail);
             throw new InvalidOperationException($"WeChat local database reader failed: {detail}");
         }
 
@@ -64,10 +72,15 @@ public sealed class WeChatLocalCommandCaptureAdapter : IMessageCaptureAdapter
             var root = document.RootElement;
             var messages = ReadMessages(root);
             var nextOffset = ReadString(root, "nextOffset", "next_offset") ?? currentOffset;
+            _lastStages = ReadStageDiagnostics(root);
             return new CaptureBatch(Name, messages, nextOffset);
         }
         catch (JsonException ex)
         {
+            _lastStages = new CaptureStageDiagnostics(
+                Status: "invalid_json",
+                Stages: Array.Empty<CaptureStage>(),
+                Error: Truncate(ex.Message, MaxDiagnosticErrorLength));
             throw new InvalidOperationException("WeChat local database reader returned invalid JSON.", ex);
         }
     }
@@ -193,4 +206,48 @@ public sealed class WeChatLocalCommandCaptureAdapter : IMessageCaptureAdapter
     {
         return value.Length <= maxLength ? value : value[..maxLength];
     }
+
+    private static CaptureStageDiagnostics ReadStageDiagnostics(JsonElement root)
+    {
+        var status = ReadString(root, "status") ?? "ok";
+        var stages = new List<CaptureStage>();
+
+        if (root.TryGetProperty("stages", out var stagesElement) &&
+            stagesElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var stageElement in stagesElement.EnumerateArray())
+            {
+                var stageName = ReadString(stageElement, "stage") ?? "unknown";
+                var stageStatus = ReadString(stageElement, "status") ?? "ok";
+                var detail = stageElement.ValueKind == JsonValueKind.Object
+                    ? string.Join(", ", stageElement.EnumerateObject()
+                        .Where(p => p.Name is not "stage" and not "status")
+                        .Select(p => $"{p.Name}={FormatStageValue(p.Value)}"))
+                    : "";
+                stages.Add(new CaptureStage(stageName, stageStatus, detail));
+            }
+        }
+
+        return new CaptureStageDiagnostics(status, stages, Error: null);
+    }
+
+    private static string FormatStageValue(JsonElement value)
+    {
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? "",
+            JsonValueKind.Number => value.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Null => "null",
+            _ => value.GetRawText()
+        };
+    }
 }
+
+public sealed record CaptureStageDiagnostics(
+    string Status,
+    IReadOnlyList<CaptureStage> Stages,
+    string? Error);
+
+public sealed record CaptureStage(string Name, string Status, string Detail);

@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using System.Windows.Controls;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Mentions;
@@ -138,6 +139,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (!_readerService.IsInitialized && _readerService.IsAvailable)
         {
+            ApplyBootstrapRange();
             SummaryText = "正在初始化微信本地数据库读取器...";
             var initSuccess = await _readerService.InitializeAsync(CancellationToken.None);
             if (initSuccess)
@@ -164,6 +166,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        ApplyBootstrapRange();
         SummaryText = "正在初始化微信本地数据库读取器...";
         InitLocalDatabaseButton.IsEnabled = false;
         try
@@ -184,6 +187,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             InitLocalDatabaseButton.IsEnabled = true;
         }
+    }
+
+    private void ApplyBootstrapRange()
+    {
+        if (BootstrapRangeComboBox?.SelectedItem is ComboBoxItem item &&
+            item.Tag is string tag)
+        {
+            _readerService.BootstrapRange = tag;
+        }
+
+        _readerService.ImportedDatabaseKey = ImportedDatabaseKeyBox?.Password;
+        _readerService.ExternalKeyCommand = ExternalKeyCommandTextBox?.Text;
+        _readerService.ExternalKeyFile = ExternalKeyFileTextBox?.Text;
     }
 
     private void StartWeChatListenerButton_Click(object sender, RoutedEventArgs e)
@@ -250,6 +266,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var localDbStatus = localDatabaseSource.IsEnabled ? "已就绪"
             : _readerService.IsAvailable ? (_readerService.LastError ?? "等待初始化")
             : "未安装";
+        var localDbDetail = localDatabaseSource.IsEnabled
+            ? $"配置: {localDatabaseConfigPath} | 历史范围: {_readerService.BootstrapRange}"
+            : dataDir is not null
+                ? $"数据目录已检测: {dataDir} | 历史范围: {_readerService.BootstrapRange}，点击\"初始化本地库\"按钮完成设置"
+                : _readerService.IsAvailable
+                    ? "未检测到微信数据目录，请确认微信正在运行"
+                    : localDatabaseSource.Location;
 
         Replace(Messages, recentMessages.Select(message => new MessageRow(
             message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
@@ -282,11 +305,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 "WeChat.LocalDatabase",
                 localDbStatus,
                 localDatabaseSource.IsEnabled ? DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm") : "-",
-                localDatabaseSource.IsEnabled
-                    ? localDatabaseConfigPath
-                    : dataDir is not null
-                        ? $"数据目录已检测: {dataDir}，点击\"初始化本地库\"按钮完成设置"
-                        : _readerService.IsAvailable ? "未检测到微信数据目录，请确认微信正在运行" : localDatabaseSource.Location),
+                localDbDetail),
             new DiagnosticRow("Feishu.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Feishu")),
             new DiagnosticRow("Shihuatong.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Shihuatong")),
             new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),

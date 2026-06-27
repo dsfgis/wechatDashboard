@@ -161,6 +161,57 @@ Purpose: move WeChat live collection away from OCR as the primary path and valid
 - [x] Step 5: Keep `WeChat.WindowText` available as a disabled or fallback source.
 - [ ] Step 6: With explicit user authorization, initialize the encrypted database reader and validate with real desktop WeChat while the chat window is minimized.
 
+## Milestone 2.4: WeChat V4 Database Capture Rework
+
+Purpose: replace the current single-path memory scan and five-minute query with a diagnosable pipeline inspired by the verified WeTrace data flow: pluggable key acquisition, complete database decryption, V4 shard indexing, historical bootstrap, and incremental capture.
+
+Implementation direction updated after the WeTrace comparison:
+
+- Treat WeTrace as evidence for the data chain, not as a dependency to embed. The reusable part is `db_storage` discovery, full SQLCipher V4 database decryption, `SessionTable` loading, `Msg_<md5(username)>` table matching, and `Name2Id` sender resolution.
+- Stop treating the read-only memory scanner as the only path to success. It remains a low-intrusion provider, but failure to find a key should route to `ImportedKeyProvider` or a user-configured `ExternalHookKeyProvider`.
+- Add an explicit external key command contract: stdout may return JSON with `ok`, `provider`, `version`, `wechat_version`, and `db_key`, a plain-text 64-hex DB key, or a configured key file such as `dbkey.txt`. The reader must extract only the key and must not log raw stdout/stderr.
+- Prefer adapting `gzygood/DbkeyHook`'s `DbkeyHookCMD.exe -pid {pid}` style command for Windows WeChat 4.1.x, because its documented approach targets the post-4.0.3.39 behavior where dbkey is released after use and old memory search patterns stop working. Keep `ylytdeng/wechat-decrypt` as a reference for SQLCipher4 and export behavior, not as the first replacement for key acquisition.
+- Validate any imported or externally extracted DB key against `session/session.db`, `contact/contact.db`, and at least one `message/message_N.db` before saving initialization state.
+- Keep third-party Hook tools outside the WPF process and outside this repository. The app can invoke a user-provided command after explicit authorization, but it must not bundle unreviewed DLLs or copy WeTrace's absent `wx_key.dll`.
+- Consider the WeChat local database capture incomplete until the same key drives full database decryption, V4 shard indexing, historical bootstrap, one real incremental message, deduplication, and Todo creation.
+
+Reference reviewed on 2026-06-10:
+
+- [afumu/wetrace documentation](https://github.com/afumu/wetrace/tree/main/docs)
+- Reuse only architecture and independently verified format knowledge.
+- Do not copy or redistribute its `wx_key.dll`; the DLL is excluded from the source repository.
+- WeTrace is licensed under `CC BY-NC-SA 4.0`, so direct source reuse requires separate license review.
+
+**Planned files:**
+
+- Create: `src/WechatDashboard.Application/Capture/IWeChatDatabaseKeyProvider.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/ReadOnlyMemoryKeyProvider.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/ExternalHookKeyProvider.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/ImportedKeyProvider.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseSnapshotService.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseDecryptor.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatV4MessageReader.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatCaptureDiagnostics.cs`
+- Modify: `tools/wechat-local-reader/wechat_local_reader.py`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/WeChatLocalReaderService.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/WeChatLocalCommandCaptureAdapter.cs`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
+- Modify: `tests/WechatDashboard.Tests/Program.cs`
+
+- [ ] Step 1: Add stage-result contracts for path discovery, key acquisition, key validation, snapshot, decryption, schema inspection, shard indexing, message query, and pipeline persistence.
+- [ ] Step 2: Stop collapsing adapter exceptions into `0 messages`; expose a sanitized per-stage error in WPF diagnostics.
+- [ ] Step 3: Add `IWeChatDatabaseKeyProvider` and preserve the current read-only scanner as one provider instead of the only initialization path.
+- [ ] Step 4: Add an imported-key provider for controlled testing with a trusted 64-character hexadecimal DB master key.
+- [ ] Step 5: Define an external Hook provider protocol using a separate process, explicit per-run authorization, tool version and SHA-256 reporting, and no key output in logs.
+- [ ] Step 6: Add offline fixtures proving the DB master key is separately derived against each database salt using PBKDF2-HMAC-SHA512 and page HMAC validation.
+- [ ] Step 7: Discover all required databases, copy stable snapshots, decrypt only changed files, preserve `session/`, `contact/`, and `message/` paths, and atomically publish verified SQLite files.
+- [ ] Step 8: Implement V4 schema reading directly: `SessionTable`, `Timestamp`/`DBInfo`, `Msg_<md5(username)>`, `Name2Id`, plain/zstd message content, and non-text summaries.
+- [ ] Step 9: Add a configurable first-run bootstrap range of 7 days, 30 days, or all history; use per-shard high-water offsets only after bootstrap.
+- [ ] Step 10: Add tests where key validation succeeds but a required database, table, shard, or message table is missing, and assert the exact diagnostic stage.
+- [ ] Step 11: Validate on Weixin 4.1.10.31 using only counts, schema names, time ranges, and a known test message; do not log real message content.
+- [ ] Step 12: Minimize WeChat and verify incremental capture, deduplication, mention detection, Todo creation, and dashboard refresh.
+
 ## Milestone 3: Capture Source Settings UI
 
 Purpose: let the user enable, disable, and inspect capture sources without editing code.
@@ -235,22 +286,26 @@ Expected result:
 
 Milestones 1, 2, 2.1, and 2.2 have been completed at the framework level. The app now runs WeChat visible-window UIA + OCR capture from "采集一次" and supports 5-second polling from "开始微信监听".
 
-Milestone 2.3 is implemented through the real-reader bridge. The app has located WeChat 4.1.10.31 data under `D:\cache\xwechat_files\dsfgis_84f8\db_storage`, and the packaged reader is installed. The user has explicitly authorized read-only `Weixin.exe` memory scanning for the current account's database key. The remaining work is version-compatible key extraction, minimized-window validation, and then Milestone 3.
+Milestone 2.3 is implemented through the real-reader bridge. The app has located WeChat 4.1.10.31 data under `D:\cache\xwechat_files\dsfgis_84f8\db_storage`, and the packaged reader is installed. The current reader still does not produce real chat messages, so Milestone 2.4 now takes priority over further UI work.
 
-### 当前进度更新（2026-06-06）
+### 当前进度更新（2026-06-10）
 
 - 已完成本地导出文件适配器、外部命令适配器、WPF 采集诊断和本地读取器打包基础。
 - 已定位微信 `4.1.10.31` 数据目录：`D:\cache\xwechat_files\dsfgis_84f8\db_storage`。
 - 已获得用户明确授权，可只读扫描本机 `Weixin.exe` 进程内存提取本人数据库密钥。
 - 已排除旧版固定十六进制文本模式、固定 `0x2F` 指针结构和无包装十六进制候选。
 - 已实现可变容量指针结构、直接页密钥验证、PBKDF2 原始口令验证和敏感输出抑制，离线单元测试通过。
+- 已调研 WeTrace 的完整链路：Hook 获取 DB 主密钥、按数据库 salt 派生、全库解密、`SessionTable` 会话读取、`Msg_<md5(username)>` 消息表和 `Name2Id` 发送人映射。
+- 已确认当前方案存在三个结构性问题：密钥获取只有一个 Provider、首次采集固定回看五分钟、采集异常会被折叠成“0 条消息”。
 - 真实初始化尚未成功，`WeChat.LocalDatabase` 仍应保持未启用状态。
 
 下一阶段按以下顺序执行：
 
-1. 在具备管理员进程读取许可时，运行可变容量结构扫描并记录非敏感候选统计。
-2. 若密钥校验成功，生成受限 ACL 的 `config.json` 和 `all_keys.json`。
-3. 通过读取器抓取最近五分钟消息，只验证数量、时间和字段完整性，不在开发日志中输出正文。
-4. 启动 WPF，确认 `WeChat.LocalDatabase` 诊断状态变为可用。
-5. 最小化微信窗口，发送一条已知测试消息，验证增量 offset、去重、`@白驹过隙`/`@戴少峰` Todo 创建和看板刷新。
-6. 完成回归构建、测试和隐私清理后再标记本地数据库采集为完成。
+1. 先实现阶段化诊断，使路径、密钥、解密、schema、分片、查询和 pipeline 错误可以区分。
+2. 抽象 `IWeChatDatabaseKeyProvider`，将现有只读扫描降为一个可替换 Provider。
+3. 增加受控的导入密钥 Provider，用离线 fixture 验证多数据库 salt 派生和全库解密。
+4. 定义隔离的外部 Hook Provider 协议；在来源、哈希、许可证和安全审查完成前不分发第三方 DLL。
+5. 自主实现 V4 会话和消息读取，不继续依赖 `wechat_cli` 的内部私有函数。
+6. 首次初始化提供 7 天、30 天或全部历史导入，之后再启用按分片高水位增量。
+7. 使用真实微信只验证非敏感计数和一条已知测试消息，再验证最小化窗口采集、去重、`@白驹过隙`/`@戴少峰` Todo 和看板刷新。
+8. 完成回归构建、测试、许可证检查和隐私清理后，再标记本地数据库采集为完成。
