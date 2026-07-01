@@ -33,7 +33,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
-    ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync)
+    ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync),
+    ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync)
 };
 
 var failures = new List<string>();
@@ -916,6 +917,43 @@ static async Task TestCapturePipelineWithSavedSettingsAsync()
     AssertEqual(1, firstRun.CapturedCount, "Pipeline should use saved settings to capture from local export.");
     AssertEqual(1, firstRun.PersistedCount, "Message should be persisted through saved settings.");
     AssertEqual(1, firstRun.CreatedTodoCount, "Mention should create todo through saved settings.");
+}
+
+static async Task TestUserAliasRepositoryAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var repository = new SqliteUserAliasRepository(databasePath);
+
+    var initial = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(0, initial.Count, "Fresh database should have no user aliases.");
+
+    var saved = await repository.SaveAsync("白驹过隙", CancellationToken.None);
+    AssertTrue(saved.Id > 0, "Saved alias should get a database id.");
+    await repository.SaveAsync("戴少峰", CancellationToken.None);
+
+    var loaded = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(2, loaded.Count, "Both saved aliases should round-trip.");
+    AssertTrue(loaded.Any(a => a.Alias == "白驹过隙"), "First alias should be present.");
+    AssertTrue(loaded.Any(a => a.Alias == "戴少峰"), "Second alias should be present.");
+    AssertTrue(loaded.All(a => a.IsActive), "Loaded aliases should be active.");
+
+    var detector = new MentionDetector(loaded.Select(a => a.Alias));
+    AssertTrue(detector.IsMentioned("@白驹过隙 今天处理线上故障"), "Configured alias should be detected as mention.");
+    AssertFalse(detector.IsMentioned("@张三 帮忙看一下"), "Unknown alias should not be detected.");
+
+    await repository.SaveAsync("白驹过隙", CancellationToken.None);
+    var stillTwo = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(2, stillTwo.Count, "Saving a duplicate alias should not create a new row.");
+
+    await repository.DeleteAsync(loaded.First(a => a.Alias == "戴少峰").Id, CancellationToken.None);
+    var afterDelete = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(1, afterDelete.Count, "Deleted alias should no longer be returned.");
+    AssertEqual("白驹过隙", afterDelete.Single().Alias, "Remaining alias should be the one not deleted.");
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)

@@ -24,7 +24,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteTodoRepository _todoRepository;
     private readonly SqliteProcessingOffsetRepository _offsetRepository;
     private readonly SqliteCaptureSourceSettingsRepository _settingsRepository;
+    private readonly SqliteUserAliasRepository _aliasRepository;
     private readonly string _captureInboxPath;
+    private IReadOnlyList<string> _currentAliases = DefaultMentionAliases.All;
     private readonly WeChatLocalReaderService _readerService;
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
     private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
@@ -62,6 +64,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _todoRepository = new SqliteTodoRepository(_databasePath);
         _offsetRepository = new SqliteProcessingOffsetRepository(_databasePath);
         _settingsRepository = new SqliteCaptureSourceSettingsRepository(_databasePath);
+        _aliasRepository = new SqliteUserAliasRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
 
@@ -149,6 +152,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ObservableCollection<WindowSnapshotRow> WindowSnapshots { get; } = new();
 
     public ObservableCollection<CaptureSourceSettingRow> CaptureSourceSettings { get; } = new();
+
+    public ObservableCollection<UserAliasRow> Aliases { get; } = new();
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
@@ -397,6 +402,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
     {
         await _databaseInitializer.InitializeAsync(CancellationToken.None);
+        await LoadUserAliasesAsync();
         if (seedIfEmpty)
         {
             var existingMessages = await _messageRepository.GetRecentAsync(1, CancellationToken.None);
@@ -735,7 +741,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task SeedSampleMessagesAsync()
     {
-        var mentionDetector = new MentionDetector(DefaultMentionAliases.All);
+        var mentionDetector = new MentionDetector(_currentAliases);
         var classifier = new ProjectClassifier(new[]
         {
             new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
@@ -792,6 +798,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(CaptureSourceSettings, rows);
     }
 
+    private async Task LoadUserAliasesAsync()
+    {
+        var aliases = await _aliasRepository.GetAllAsync(CancellationToken.None);
+        if (aliases.Count == 0)
+        {
+            var seeded = new List<UserAlias>();
+            foreach (var alias in DefaultMentionAliases.All)
+            {
+                seeded.Add(await _aliasRepository.SaveAsync(alias, CancellationToken.None));
+            }
+            aliases = seeded;
+        }
+
+        _currentAliases = aliases.Select(alias => alias.Alias).ToArray();
+        Replace(Aliases, aliases.Select(alias => new UserAliasRow(alias.Id, alias.Alias)));
+    }
+
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var now = DateTimeOffset.Now;
@@ -808,6 +831,37 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _settingsRepository.DeleteAllAsync(CancellationToken.None);
         await _settingsRepository.SaveAllAsync(settings, CancellationToken.None);
         SummaryText = $"采集源设置已保存，共 {settings.Count} 个源";
+    }
+
+    private async void AddAliasButton_Click(object sender, RoutedEventArgs e)
+    {
+        var alias = NewAliasTextBox?.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(alias))
+        {
+            SummaryText = "请输入要添加的别名。";
+            return;
+        }
+
+        await _aliasRepository.SaveAsync(alias, CancellationToken.None);
+        if (NewAliasTextBox is not null)
+        {
+            NewAliasTextBox.Text = "";
+        }
+        await LoadUserAliasesAsync();
+        SummaryText = $"已添加别名「{alias}」，新采集将按更新后的别名识别 @我。";
+    }
+
+    private async void DeleteAliasButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (AliasesGrid?.SelectedItem is not UserAliasRow row)
+        {
+            SummaryText = "请先选中要删除的别名。";
+            return;
+        }
+
+        await _aliasRepository.DeleteAsync(row.Id, CancellationToken.None);
+        await LoadUserAliasesAsync();
+        SummaryText = $"已删除别名「{row.Alias}」。";
     }
 
     private MessageCapturePipeline CreateCapturePipeline()
@@ -828,7 +882,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _messageRepository,
             _todoRepository,
             _offsetRepository,
-            new MentionDetector(DefaultMentionAliases.All),
+            new MentionDetector(_currentAliases),
             new ProjectClassifier(new[]
             {
                 new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
@@ -1027,3 +1081,5 @@ public sealed record CaptureSourceSettingRow
     public string Location { get; set; } = "";
     public bool IsEnabled { get; set; }
 }
+
+public sealed record UserAliasRow(long Id, string Alias);

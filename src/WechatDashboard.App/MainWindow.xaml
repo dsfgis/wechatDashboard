@@ -209,7 +209,18 @@
                 <TabItem Header="规则">
                     <Border Background="White" Padding="16">
                     <StackPanel>
-                        <TextBlock Text="别名：白驹过隙、戴少峰" FontSize="15" Margin="0,0,0,10" />
+                        <TextBlock Text="别名（@我识别名称，可配置，新消息采集后生效）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <TextBox x:Name="NewAliasTextBox" Width="220" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入微信昵称或姓名，用于识别 @我 消息" />
+                            <Button Content="添加别名" Click="AddAliasButton_Click" Margin="0,0,8,0" />
+                            <Button Content="删除选中别名" Click="DeleteAliasButton_Click" />
+                        </StackPanel>
+                        <DataGrid x:Name="AliasesGrid" ItemsSource="{Binding Aliases}" Height="180" Margin="0,0,0,16">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="80" />
+                                <DataGridTextColumn Header="别名" Binding="{Binding Alias}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
                         <TextBlock Text="项目规则：CRM项目群 => CRM升级；支付 => 支付平台" FontSize="15" Margin="0,0,0,10" />
                         <TextBlock Text="紧急度：@我、紧急词、今天/下班前、线上故障、重点联系人、重点项目" FontSize="15" />
                         <TextBlock Text="{Binding CaptureInboxPath, StringFormat=采集目录：{0}}" FontSize="15" Margin="0,10,0,0" TextWrapping="Wrap" />
