@@ -11,6 +11,8 @@ public interface IMessageRepository
     Task<IReadOnlyList<Message>> GetRecentAsync(int limit, CancellationToken cancellationToken);
 
     Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken);
+
+    Task<int> GetMessageCountAsync(CancellationToken cancellationToken);
 }
 
 public sealed record MessagePage(

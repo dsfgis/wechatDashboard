@@ -153,6 +153,8 @@ public sealed class SqliteDatabaseInitializer
         CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
         CREATE INDEX IF NOT EXISTS idx_messages_chat_session ON messages(chat_session_id);
         CREATE INDEX IF NOT EXISTS idx_messages_mention ON messages(is_mention_me, sent_at);
+        CREATE INDEX IF NOT EXISTS idx_messages_captured_at_id ON messages(captured_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_source_key ON messages(source, source_message_key);
         CREATE INDEX IF NOT EXISTS idx_todo_status_priority ON todo_items(status, priority, due_at);
         CREATE INDEX IF NOT EXISTS idx_classification_project ON message_classifications(project_id, category);
         """;

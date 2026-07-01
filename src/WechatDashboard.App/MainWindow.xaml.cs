@@ -464,18 +464,33 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         PendingTodoCount = pendingTodos.Count;
         HighPriorityTodoCount = pendingTodos.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1);
 
-        await LoadMessageStreamPageAsync(_messageStreamPageNumber);
+        await LoadMessageStreamPageAsync(_messageStreamPageNumber, refreshCount: true);
         SummaryText = $"消息 {_messageStreamTotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
     }
 
     private async Task LoadMessageStreamPageAsync(int pageNumber)
     {
+        await LoadMessageStreamPageAsync(pageNumber, refreshCount: false);
+    }
+
+    private async Task LoadMessageStreamPageAsync(int pageNumber, bool refreshCount)
+    {
         var safePage = Math.Max(1, pageNumber);
-        var page = await _messageRepository.GetPageAsync(safePage, _messageStreamPageSize, CancellationToken.None);
+        MessagePage page;
+        if (refreshCount || _messageStreamTotalCount == 0)
+        {
+            page = await _messageRepository.GetPageAsync(safePage, _messageStreamPageSize, CancellationToken.None);
+        }
+        else
+        {
+            page = await _messageRepository.GetPageWithKnownCountAsync(
+                safePage, _messageStreamPageSize, _messageStreamTotalCount, CancellationToken.None);
+        }
+
         var pageCount = CalculateMessageStreamPageCount(page.TotalCount);
         if (page.Messages.Count == 0 && page.TotalCount > 0 && safePage > pageCount)
         {
-            await LoadMessageStreamPageAsync(pageCount);
+            await LoadMessageStreamPageAsync(pageCount, refreshCount);
             return;
         }
 

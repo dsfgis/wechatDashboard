@@ -6,6 +6,7 @@ namespace WechatDashboard.Infrastructure.Persistence;
 internal static class SqliteConnectionFactory
 {
     private static int _sqliteInitialized;
+    private const string BusyTimeoutPragma = "PRAGMA busy_timeout=5000;";
 
     public static SqliteConnection Open(string databasePath)
     {
@@ -23,11 +24,17 @@ internal static class SqliteConnectionFactory
         var connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
-            Cache = SqliteCacheMode.Shared
+            Cache = SqliteCacheMode.Shared,
+            DefaultTimeout = 5
         }.ToString();
 
         var connection = new SqliteConnection(connectionString);
         connection.Open();
+        using (var pragmaCommand = connection.CreateCommand())
+        {
+            pragmaCommand.CommandText = BusyTimeoutPragma;
+            pragmaCommand.ExecuteNonQuery();
+        }
         return connection;
     }
 }

@@ -106,18 +106,52 @@ public sealed class SqliteMessageRepository : IMessageRepository
         return messages;
     }
 
-    public async Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken)
+    public Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken)
     {
-        var safePage = Math.Max(1, pageNumber);
-        var safeSize = Math.Clamp(pageSize, 1, 200);
-        var offset = (safePage - 1) * safeSize;
+        return Task.Run(async () =>
+        {
+            var safePage = Math.Max(1, pageNumber);
+            var safeSize = Math.Clamp(pageSize, 1, 200);
+            var offset = (safePage - 1) * safeSize;
 
-        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+            await using var connection = SqliteConnectionFactory.Open(_databasePath);
 
-        await using var countCommand = connection.CreateCommand();
-        countCommand.CommandText = "SELECT COUNT(*) FROM messages;";
-        var totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            await using var countCommand = connection.CreateCommand();
+            countCommand.CommandText = "SELECT COUNT(*) FROM messages;";
+            var totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
 
+            var messages = await ReadPageAsync(connection, safeSize, offset, cancellationToken);
+            return new MessagePage(messages, totalCount, safePage, safeSize);
+        }, cancellationToken);
+    }
+
+    public Task<MessagePage> GetPageWithKnownCountAsync(int pageNumber, int pageSize, int totalCount, CancellationToken cancellationToken)
+    {
+        return Task.Run(async () =>
+        {
+            var safePage = Math.Max(1, pageNumber);
+            var safeSize = Math.Clamp(pageSize, 1, 200);
+            var offset = (safePage - 1) * safeSize;
+
+            await using var connection = SqliteConnectionFactory.Open(_databasePath);
+            var messages = await ReadPageAsync(connection, safeSize, offset, cancellationToken);
+            return new MessagePage(messages, totalCount, safePage, safeSize);
+        }, cancellationToken);
+    }
+
+    public Task<int> GetMessageCountAsync(CancellationToken cancellationToken)
+    {
+        return Task.Run(async () =>
+        {
+            await using var connection = SqliteConnectionFactory.Open(_databasePath);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM messages;";
+            return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        }, cancellationToken);
+    }
+
+    private static async Task<List<Message>> ReadPageAsync(SqliteConnection connection, int limit, int offset, CancellationToken cancellationToken)
+    {
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT
@@ -136,7 +170,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
             ORDER BY captured_at DESC, id DESC
             LIMIT $limit OFFSET $offset;
             """;
-        command.Parameters.AddWithValue("$limit", safeSize);
+        command.Parameters.AddWithValue("$limit", limit);
         command.Parameters.AddWithValue("$offset", offset);
 
         var messages = new List<Message>();
@@ -145,8 +179,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
         {
             messages.Add(ReadMessage(reader));
         }
-
-        return new MessagePage(messages, totalCount, safePage, safeSize);
+        return messages;
     }
 
     private static void AddMessageParameters(SqliteCommand command, Message message)
