@@ -28,6 +28,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly WeChatLocalReaderService _readerService;
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
     private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
+    private const int DefaultWeChatMessagePageSize = 50;
+    private const int DefaultMessageStreamPageSize = 50;
 
     private CancellationTokenSource? _liveCaptureCts;
     private Task? _liveCaptureTask;
@@ -38,25 +40,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private int _mentionCount;
     private int _pendingTodoCount;
     private int _highPriorityTodoCount;
-
+    private int _wechatMessagePageNumber = 1;
+    private int _wechatMessagePageSize = DefaultWeChatMessagePageSize;
+    private int _wechatMessageTotalCount;
+    private string _wechatMessagePageText = "第 0/0 页，共 0 条";
+    private string _wechatMessageStatusText = "默认读取当天微信消息。请先提取 DB Key 并初始化本地库。";
+    private int _messageStreamPageNumber = 1;
+    private int _messageStreamPageSize = DefaultMessageStreamPageSize;
+    private int _messageStreamTotalCount;
+    private string _messageStreamPageText = "第 0/0 页，共 0 条";
+    private string _messageStreamStatusText = "正在加载消息流...";
     public MainWindow()
     {
         InitializeComponent();
 
         _databasePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "WechatDashboard",
-            "data",
+            ProjectToolPaths.DataDirectory,
             "wechat-dashboard.db");
         _databaseInitializer = new SqliteDatabaseInitializer(_databasePath);
         _messageRepository = new SqliteMessageRepository(_databasePath);
         _todoRepository = new SqliteTodoRepository(_databasePath);
         _offsetRepository = new SqliteProcessingOffsetRepository(_databasePath);
         _settingsRepository = new SqliteCaptureSourceSettingsRepository(_databasePath);
-        _captureInboxPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "WechatDashboard",
-            "capture-inbox");
+        _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
 
         DatabasePath = _databasePath;
@@ -106,9 +112,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         private set => SetField(ref _highPriorityTodoCount, value);
     }
 
+    public string WeChatMessagePageText
+    {
+        get => _wechatMessagePageText;
+        private set => SetField(ref _wechatMessagePageText, value);
+    }
+
+    public string WeChatMessageStatusText
+    {
+        get => _wechatMessageStatusText;
+        private set => SetField(ref _wechatMessageStatusText, value);
+    }
+
+    public string MessageStreamPageText
+    {
+        get => _messageStreamPageText;
+        private set => SetField(ref _messageStreamPageText, value);
+    }
+
+    public string MessageStreamStatusText
+    {
+        get => _messageStreamStatusText;
+        private set => SetField(ref _messageStreamStatusText, value);
+    }
+
     public ObservableCollection<TodoRow> Todos { get; } = new();
 
     public ObservableCollection<MessageRow> Messages { get; } = new();
+
+    public ObservableCollection<WeChatMessageRow> WeChatMessages { get; } = new();
 
     public ObservableCollection<ProjectSummaryRow> ProjectSummaries { get; } = new();
 
@@ -122,11 +154,103 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         await InitializeAndRefreshAsync(seedIfEmpty: true);
         await LoadCaptureSourceSettingsAsync();
+        if (_readerService.IsInitialized)
+        {
+            await LoadTodayWeChatMessagesAsync(1, ensureInitialized: false);
+        }
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         await InitializeAndRefreshAsync(seedIfEmpty: false);
+    }
+
+    private async void LoadTodayWeChatMessagesButton_Click(object sender, RoutedEventArgs e)
+    {
+        await LoadTodayWeChatMessagesAsync(1, ensureInitialized: true);
+    }
+
+    private async void PreviousWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_wechatMessagePageNumber <= 1)
+        {
+            WeChatMessageStatusText = "已是首页，没有上一页。";
+            return;
+        }
+
+        await LoadTodayWeChatMessagesAsync(_wechatMessagePageNumber - 1, ensureInitialized: true);
+    }
+
+    private async void NextWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_wechatMessagePageNumber >= CalculateWeChatMessagePageCount(_wechatMessageTotalCount))
+        {
+            WeChatMessageStatusText = "已是末页，没有下一页。";
+            return;
+        }
+
+        await LoadTodayWeChatMessagesAsync(_wechatMessagePageNumber + 1, ensureInitialized: true);
+    }
+
+    private async void FirstWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_wechatMessagePageNumber <= 1)
+        {
+            WeChatMessageStatusText = "已是首页。";
+            return;
+        }
+
+        await LoadTodayWeChatMessagesAsync(1, ensureInitialized: true);
+    }
+
+    private async void LastWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var pageCount = CalculateWeChatMessagePageCount(_wechatMessageTotalCount);
+        if (_wechatMessagePageNumber >= pageCount)
+        {
+            WeChatMessageStatusText = "已是末页。";
+            return;
+        }
+
+        await LoadTodayWeChatMessagesAsync(pageCount, ensureInitialized: true);
+    }
+
+    private async void GoToWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var requestedPage = ReadRequestedWeChatMessagePage();
+        if (!requestedPage.HasValue)
+        {
+            return;
+        }
+
+        await LoadTodayWeChatMessagesAsync(requestedPage.Value, ensureInitialized: true);
+    }
+
+    private async void WeChatMessagePageSizeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var selectedPageSize = ReadSelectedWeChatMessagePageSize();
+        if (selectedPageSize == _wechatMessagePageSize)
+        {
+            return;
+        }
+
+        var firstRowIndex = Math.Max(0, (_wechatMessagePageNumber - 1) * _wechatMessagePageSize);
+        _wechatMessagePageSize = selectedPageSize;
+        var targetPage = firstRowIndex / _wechatMessagePageSize + 1;
+        UpdateWeChatMessagePagingText();
+
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        if (!_readerService.IsInitialized && WeChatMessages.Count == 0)
+        {
+            WeChatMessageStatusText = $"每页显示 {_wechatMessagePageSize} 条。读取消息前请先初始化本地库。";
+            return;
+        }
+
+        await LoadTodayWeChatMessagesAsync(targetPage, ensureInitialized: true);
     }
 
     private async void SeedButton_Click(object sender, RoutedEventArgs e)
@@ -156,6 +280,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var result = await RunCaptureOnceAsync(CancellationToken.None);
         SummaryText = $"本次采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
         await RefreshAsync();
+        if (_readerService.IsInitialized)
+        {
+            await LoadTodayWeChatMessagesAsync(_wechatMessagePageNumber, ensureInitialized: false);
+        }
+    }
+
+    private async void ExtractDatabaseKeyButton_Click(object sender, RoutedEventArgs e)
+    {
+        SummaryText = "正在自动提取微信 DB Key。请在 5 分钟内在微信里重新登录，不要关闭微信进程...";
+        ExtractDatabaseKeyButton.IsEnabled = false;
+        InitLocalDatabaseButton.IsEnabled = false;
+        try
+        {
+            var result = await _readerService.ExtractDatabaseKeyAsync(CancellationToken.None);
+            if (result is null)
+            {
+                SummaryText = $"DB Key 提取失败：{_readerService.LastError ?? "未知错误"}";
+                return;
+            }
+
+            ExternalKeyFileTextBox.Text = result.KeyPath;
+            SummaryText = $"DB Key 提取成功（微信 PID {result.TargetProcessId}），Key 文件已写入 tools/result。点击\"初始化本地库\"继续。";
+        }
+        finally
+        {
+            ExtractDatabaseKeyButton.IsEnabled = true;
+            InitLocalDatabaseButton.IsEnabled = true;
+        }
     }
 
     private async void InitLocalDatabaseButton_Click(object sender, RoutedEventArgs e)
@@ -174,9 +326,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var success = await _readerService.InitializeAsync(CancellationToken.None);
             if (success)
             {
-                SummaryText = "本地数据库初始化成功！点击\"采集一次\"即可读取微信消息。";
+                SummaryText = "本地数据库初始化成功，正在读取当天微信消息...";
                 await LoadCaptureSourceSettingsAsync();
                 await RefreshAsync();
+                await LoadTodayWeChatMessagesAsync(1, ensureInitialized: false);
             }
             else
             {
@@ -274,13 +427,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     ? "未检测到微信数据目录，请确认微信正在运行"
                     : localDatabaseSource.Location;
 
-        Replace(Messages, recentMessages.Select(message => new MessageRow(
-            message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
-            message.ChatName,
-            message.SenderName,
-            message.IsMentionMe ? "是" : "否",
-            message.Content)));
-
         Replace(Todos, pendingTodos.Select(todo => new TodoRow(
             todo.Id,
             todo.Priority.ToString(),
@@ -317,7 +463,259 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         MentionCount = recentMessages.Count(message => message.IsMentionMe);
         PendingTodoCount = pendingTodos.Count;
         HighPriorityTodoCount = pendingTodos.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1);
-        SummaryText = $"消息 {recentMessages.Count} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
+
+        await LoadMessageStreamPageAsync(_messageStreamPageNumber);
+        SummaryText = $"消息 {_messageStreamTotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
+    }
+
+    private async Task LoadMessageStreamPageAsync(int pageNumber)
+    {
+        var safePage = Math.Max(1, pageNumber);
+        var page = await _messageRepository.GetPageAsync(safePage, _messageStreamPageSize, CancellationToken.None);
+        var pageCount = CalculateMessageStreamPageCount(page.TotalCount);
+        if (page.Messages.Count == 0 && page.TotalCount > 0 && safePage > pageCount)
+        {
+            await LoadMessageStreamPageAsync(pageCount);
+            return;
+        }
+
+        _messageStreamPageNumber = page.PageNumber;
+        _messageStreamTotalCount = page.TotalCount;
+        Replace(Messages, page.Messages.Select(message => new MessageRow(
+            message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+            message.ChatName,
+            message.SenderName,
+            message.IsMentionMe ? "是" : "否",
+            message.Content)));
+        UpdateMessageStreamPagingText();
+        MessageStreamStatusText = page.Messages.Count == 0
+            ? "暂无消息。"
+            : $"已加载本页 {page.Messages.Count} 条消息。";
+    }
+
+    private async void FirstMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_messageStreamPageNumber <= 1)
+        {
+            MessageStreamStatusText = "已是首页。";
+            return;
+        }
+
+        await LoadMessageStreamPageAsync(1);
+    }
+
+    private async void PreviousMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_messageStreamPageNumber <= 1)
+        {
+            MessageStreamStatusText = "已是首页，没有上一页。";
+            return;
+        }
+
+        await LoadMessageStreamPageAsync(_messageStreamPageNumber - 1);
+    }
+
+    private async void NextMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_messageStreamPageNumber >= CalculateMessageStreamPageCount(_messageStreamTotalCount))
+        {
+            MessageStreamStatusText = "已是末页，没有下一页。";
+            return;
+        }
+
+        await LoadMessageStreamPageAsync(_messageStreamPageNumber + 1);
+    }
+
+    private async void LastMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
+        if (_messageStreamPageNumber >= pageCount)
+        {
+            MessageStreamStatusText = "已是末页。";
+            return;
+        }
+
+        await LoadMessageStreamPageAsync(pageCount);
+    }
+
+    private async void GoToMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var requestedPage = ReadRequestedMessageStreamPage();
+        if (!requestedPage.HasValue)
+        {
+            return;
+        }
+
+        await LoadMessageStreamPageAsync(requestedPage.Value);
+    }
+
+    private async void MessageStreamPageSizeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var selectedPageSize = ReadSelectedMessageStreamPageSize();
+        if (selectedPageSize == _messageStreamPageSize)
+        {
+            return;
+        }
+
+        var firstRowIndex = Math.Max(0, (_messageStreamPageNumber - 1) * _messageStreamPageSize);
+        _messageStreamPageSize = selectedPageSize;
+        var targetPage = firstRowIndex / _messageStreamPageSize + 1;
+        UpdateMessageStreamPagingText();
+
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await LoadMessageStreamPageAsync(targetPage);
+    }
+
+    private int CalculateMessageStreamPageCount(int totalCount)
+    {
+        return Math.Max(1, (int)Math.Ceiling(totalCount / (double)_messageStreamPageSize));
+    }
+
+    private int ReadSelectedMessageStreamPageSize()
+    {
+        if (MessageStreamPageSizeComboBox?.SelectedItem is ComboBoxItem item)
+        {
+            var rawValue = item.Tag?.ToString() ?? item.Content?.ToString();
+            if (int.TryParse(rawValue, out var selectedPageSize))
+            {
+                return Math.Clamp(selectedPageSize, 1, 200);
+            }
+        }
+
+        return _messageStreamPageSize;
+    }
+
+    private int? ReadRequestedMessageStreamPage()
+    {
+        var rawPage = MessageStreamPageNumberTextBox?.Text?.Trim();
+        if (!int.TryParse(rawPage, out var requestedPage) || requestedPage <= 0)
+        {
+            MessageStreamStatusText = "请输入有效页码。";
+            return null;
+        }
+
+        var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
+        return Math.Clamp(requestedPage, 1, pageCount);
+    }
+
+    private void UpdateMessageStreamPagingText()
+    {
+        var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
+        MessageStreamPageText = $"第 {_messageStreamPageNumber}/{pageCount} 页，共 {_messageStreamTotalCount} 条，每页 {_messageStreamPageSize} 条";
+        if (MessageStreamPageNumberTextBox is not null)
+        {
+            MessageStreamPageNumberTextBox.Text = _messageStreamPageNumber.ToString();
+        }
+    }
+
+    private async Task LoadTodayWeChatMessagesAsync(int pageNumber, bool ensureInitialized)
+    {
+        if (!_readerService.IsAvailable)
+        {
+            WeChatMessageStatusText = "微信本地读取器未安装。";
+            SummaryText = "微信本地读取器未安装。";
+            return;
+        }
+
+        ApplyBootstrapRange();
+        if (!_readerService.IsInitialized)
+        {
+            if (!ensureInitialized)
+            {
+                WeChatMessageStatusText = "本地库尚未初始化，点击\"初始化本地库\"或\"读取当天消息\"。";
+                return;
+            }
+
+            SummaryText = "正在初始化微信本地数据库读取器...";
+            var initialized = await _readerService.InitializeAsync(CancellationToken.None);
+            if (!initialized)
+            {
+                var error = _readerService.LastError ?? "未知错误";
+                WeChatMessageStatusText = $"初始化失败：{error}";
+                SummaryText = $"初始化失败：{error}";
+                return;
+            }
+
+            await LoadCaptureSourceSettingsAsync();
+        }
+
+        _wechatMessagePageSize = ReadSelectedWeChatMessagePageSize();
+        var safePage = Math.Max(1, pageNumber);
+        WeChatMessageStatusText = $"正在读取今天微信消息第 {safePage} 页，每页 {_wechatMessagePageSize} 条...";
+        var page = await _readerService.ReadMessagesAsync(
+            new WeChatLocalMessageReadOptions(DateTime.Today, safePage, _wechatMessagePageSize),
+            CancellationToken.None);
+        if (page is null)
+        {
+            var error = _readerService.LastError ?? "未知错误";
+            WeChatMessageStatusText = $"读取失败：{error}";
+            SummaryText = $"读取微信消息失败：{error}";
+            return;
+        }
+
+        var pageCount = CalculateWeChatMessagePageCount(page.TotalCount);
+        if (page.Messages.Count == 0 && page.TotalCount > 0 && safePage > pageCount)
+        {
+            await LoadTodayWeChatMessagesAsync(pageCount, ensureInitialized: false);
+            return;
+        }
+
+        _wechatMessagePageNumber = page.PageNumber;
+        _wechatMessageTotalCount = page.TotalCount;
+        Replace(WeChatMessages, page.Messages.Select(message => new WeChatMessageRow(
+            message.Content,
+            message.ChatName,
+            message.SenderName)));
+        UpdateWeChatMessagePagingText();
+        TodayMessageCount = page.TotalCount;
+        WeChatMessageStatusText = $"已读取今天微信消息 {page.Messages.Count} 条，本页最多 {_wechatMessagePageSize} 条。";
+        SummaryText = $"今天微信消息 {page.TotalCount} 条，当前第 {_wechatMessagePageNumber}/{CalculateWeChatMessagePageCount(page.TotalCount)} 页";
+    }
+
+    private int CalculateWeChatMessagePageCount(int totalCount)
+    {
+        return Math.Max(1, (int)Math.Ceiling(totalCount / (double)_wechatMessagePageSize));
+    }
+
+    private int ReadSelectedWeChatMessagePageSize()
+    {
+        if (WeChatMessagePageSizeComboBox?.SelectedItem is ComboBoxItem item)
+        {
+            var rawValue = item.Tag?.ToString() ?? item.Content?.ToString();
+            if (int.TryParse(rawValue, out var selectedPageSize))
+            {
+                return Math.Clamp(selectedPageSize, 1, 200);
+            }
+        }
+
+        return _wechatMessagePageSize;
+    }
+
+    private int? ReadRequestedWeChatMessagePage()
+    {
+        var rawPage = WeChatMessagePageNumberTextBox?.Text?.Trim();
+        if (!int.TryParse(rawPage, out var requestedPage) || requestedPage <= 0)
+        {
+            WeChatMessageStatusText = "请输入有效页码。";
+            return null;
+        }
+
+        var pageCount = CalculateWeChatMessagePageCount(_wechatMessageTotalCount);
+        return Math.Clamp(requestedPage, 1, pageCount);
+    }
+
+    private void UpdateWeChatMessagePagingText()
+    {
+        var pageCount = CalculateWeChatMessagePageCount(_wechatMessageTotalCount);
+        WeChatMessagePageText = $"第 {_wechatMessagePageNumber}/{pageCount} 页，共 {_wechatMessageTotalCount} 条，每页 {_wechatMessagePageSize} 条";
+        if (WeChatMessagePageNumberTextBox is not null)
+        {
+            WeChatMessagePageNumberTextBox.Text = _wechatMessagePageNumber.ToString();
+        }
     }
 
     private async Task SeedSampleMessagesAsync()
@@ -597,6 +995,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 public sealed record TodoRow(long Id, string Priority, string Status, string Project, string Title, string SourceMessageId);
 
 public sealed record MessageRow(string SentAt, string ChatName, string SenderName, string IsMentionMe, string Content);
+
+public sealed record WeChatMessageRow(string Content, string ChatName, string SenderName);
 
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
 

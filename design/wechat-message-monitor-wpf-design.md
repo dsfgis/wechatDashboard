@@ -155,7 +155,7 @@ public interface IMessageCaptureAdapter
 当前默认本地导出目录：
 
 ```text
-%LOCALAPPDATA%\WechatDashboard\capture-inbox\WeChatLocalExport
+tools\result\capture-inbox\WeChatLocalExport
 ```
 
 第一阶段已支持 JSONL/JSON 中常见字段名映射，例如 `msgId`、`messageId`、`chatId`、`talker`、`roomName`、`senderName`、`sender`、`content`、`message`、`createTime`、`timestamp`、`msgType`。
@@ -166,7 +166,7 @@ public interface IMessageCaptureAdapter
 微信版本：4.1.10.31
 数据目录：D:\cache\xwechat_files\dsfgis_84f8\db_storage
 主消息库：D:\cache\xwechat_files\dsfgis_84f8\db_storage\message\message_0.db
-读取工具：%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader\wechat-local-reader.exe
+读取工具：tools\wechat-local-reader\wechat-local-reader.exe
 ```
 
 本地库文件是加密格式。首次初始化必须由用户明确授权选用一种数据库密钥提供器。密钥只保存在应用本机工具目录的受保护配置中，不进入应用日志、SQLite 消息库、项目目录或 Git 仓库。初始化完成前，`WeChat.LocalDatabase` 保持禁用。
@@ -206,7 +206,7 @@ public interface IMessageCaptureAdapter
 1. 把 WeTrace 证明有效的“密钥获取 -> 全库解密 -> V4 会话和分片读取”作为本地数据库采集主线，替代继续堆叠 UIA/OCR 或单点内存扫描。
 2. WPF 主程序只编排采集，不持有逆向实现；所有密钥获取实现都挂在 `IWeChatDatabaseKeyProvider` 后面。
 3. 默认仍保留只读内存扫描作为低侵入诊断路径；当它无法拿到主密钥时，允许用户选择“手动导入 DB Key”或“调用外部 Key 工具”。
-4. 外部 Key 工具只作为用户本机显式配置的进程运行，项目不内置、不下载、不分发 `wx_key.dll` 或同类 Hook 二进制。
+4. 外部 Key 工具只作为用户本机显式授权的独立进程运行，统一放在项目 `tools\wx-key-tools` 下；生成的 key、日志、配置、解密库统一写入 `tools\result`。
 5. 读取器拿到 64 位十六进制主密钥后，必须对 `session`、`contact` 和至少一个 `message` 数据库分别校验；校验失败时不得继续解析消息，也不得把失败折叠成“采集 0 条”。
 
 外部工具选择（更新于 2026-06-27）：
@@ -332,6 +332,37 @@ V4 会话与消息索引：
 5. 最小化微信窗口重复测试，确认采集不依赖 UIA/OCR。
 6. 最后验证 `@白驹过隙`、`@戴少峰` Todo 创建和 WPF 看板刷新。
 
+#### 4.1.6 当前实现状态（2026-06-30）
+
+当前项目已经从“是否能拿到 DB Key”推进到“已能用 DB Key 读取本地微信消息并在 WPF 表格展示”的阶段。这里记录新工作树接手时的真实状态，避免把旧的 OCR 或内存扫描问题当成主线继续排查。
+
+已实现能力：
+
+1. `tools\wx-key-tools\run-wx-key-probe.ps1` 调用项目内 `wx_key` 工具，将 DB Key 写入 `tools\result\wechat-local-reader\wx-key-found.txt`。
+2. WPF 顶部 `自动提取Key` 会自动选择当前 `Weixin` 进程，调用 PowerShell 探测脚本，并把 Key 文件路径回填到界面。
+3. `WeChatLocalReaderService` 支持使用 Key 文件初始化本地读取器，生成 `config.json`、`all_keys.json` 和解密工作目录，全部位于 `tools\result\wechat-local-reader`。
+4. Python reader 已支持 `init` 和 `capture` 两类命令，`capture` 支持 `--start-timestamp`、`--end-timestamp`、`--offset`、`--limit`，可用于按日期和分页读取。
+5. WPF `微信消息` tab 已提供 `读取当天消息`、`上一页`、`下一页`，默认读取当天消息，每页 50 条。
+6. 表格字段已经按当前需求固定为 `消息内容`、`群名称`、`发消息人`。
+7. 读取器会在输出前把非文本 XML 元数据转成可读摘要，避免 UI 直接显示 XML。当前摘要包括 `[图片]`、`[视频]`、`[表情]`、`[文件]`、`[链接] 标题 - 描述`、`[位置]`。
+8. Python stdout/stderr 已强制 UTF-8/安全转义，WPF 调用时设置 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8:backslashreplace`，避免 Windows GBK 控制台遇到特殊字符时报错。
+9. 单元测试覆盖本地读取器 key 导入、V4 结构读取、分页参数、GBK 输出规避和 XML 摘要；.NET 测试覆盖 WPF 服务层读取当天消息分页。
+
+当前边界：
+
+1. DB Key 获取依赖外部 `wx_key` 工具，不应在 WPF 进程内加载第三方 Hook DLL。
+2. `tools\wx-key-tools` 作为项目内本地工具目录存在，但提交或分发前必须补充来源、版本、SHA-256、许可证和安全审查结论。
+3. `tools\result` 下可能包含 DB Key、派生 key、解密数据库和真实消息内容，必须保持 gitignore，不能提交。
+4. `微信消息` tab 当前直接读取本地数据库分页结果；`采集一次` 和 `开始微信监听` 仍走 `MessageCapturePipeline`，两条路径后续需要统一用户体验和状态展示。
+5. 非文本消息当前显示摘要，不下载或渲染图片、视频、表情、文件本体。
+6. 当前实现证明“拿到 DB Key 后可以读取本地消息”，但正式完成仍需补齐最小化微信增量验证、外部工具合规记录、错误诊断分层和用户可配置的数据目录。
+
+新工作树优先级：
+
+1. 先运行 `design/wechat-local-database-system-test.md` 中的非敏感测试步骤，确认本机仍能初始化和读取消息。
+2. 如果 UI 显示 XML 原文，优先检查 `tools\wechat-local-reader\wechat_local_reader.py` 的 `summarize_message_content` 是否在消息输出前被调用。
+3. 如果读取失败，优先区分 DB Key 文件不存在、key 与账号目录不匹配、解密失败、schema 查询失败和 WPF JSON 解析失败，不要直接回退到 OCR 排查。
+4. 提交前确认没有把 `tools\result`、`wx-key-found.txt`、`all_keys.json`、解密数据库或真实消息 JSON 加入 Git。
 ### 4.2 消息标准化
 
 不同来源的消息统一转成内部模型：
@@ -530,7 +561,7 @@ ViewModel 建议：
 
 ## 6. SQLite 数据模型
 
-数据库文件默认存放在用户应用数据目录，例如 `%LOCALAPPDATA%\WechatDashboard\data\wechat-dashboard.db`。开发环境可通过配置覆盖。
+数据库文件默认存放在项目结果目录，例如 `tools\result\data\wechat-dashboard.db`。开发环境可通过配置覆盖。
 
 基础设置：
 
@@ -820,37 +851,41 @@ MVP 验收：
 7. 支持按项目、时间、类别、状态、紧急程度多维统计。
 8. 支持群级采集策略、数据删除、导出和备份。
 
-## 14. 推荐项目结构
+## 14. 当前项目结构
 
 ```text
 WechatDashboard/
+  WechatDashboard.sln
+  Agent.md
   src/
-    WechatDashboard.App/
-      Views/
-      ViewModels/
-      App.xaml
-      MainWindow.xaml
-    WechatDashboard.Application/
-      Services/
-      Pipelines/
-      UseCases/
-    WechatDashboard.Domain/
-      Entities/
-      Rules/
-      ValueObjects/
-    WechatDashboard.Infrastructure/
-      Capture/
-      Persistence/
-      Notifications/
-      Configuration/
+    WechatDashboard.App/             WPF UI，主窗口、采集按钮、微信消息分页表格
+    WechatDashboard.Application/     捕获契约、流水线、@我识别、项目分类、紧急度、Todo 服务
+    WechatDashboard.Domain/          消息、待办、规则、分类、优先级等领域模型
+    WechatDashboard.Infrastructure/  SQLite 仓储、采集适配器、微信本地读取服务、工具路径解析
   tests/
-    WechatDashboard.Domain.Tests/
-    WechatDashboard.Application.Tests/
-    WechatDashboard.Infrastructure.Tests/
+    WechatDashboard.Tests/           控制台式回归测试，覆盖核心业务和集成路径
+  tools/
+    wechat-local-reader/             Python 本地微信数据库读取器和单元测试
+    wx-key-tools/                    本机外部 DB Key 工具包装目录，提交前需许可证和来源审查
+    result/                          生成文件目录，已 gitignore，可能包含 DB Key、解密库和真实消息
   design/
     wechat-message-monitor-wpf-design.md
+    2026-06-04-development-plan.md
+    wechat-local-database-system-test.md
 ```
 
+关键实现文件：
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/WechatDashboard.App/MainWindow.xaml` | WPF 主界面，包含 `微信消息` tab 和读取分页按钮 |
+| `src/WechatDashboard.App/MainWindow.xaml.cs` | WPF 编排、自动提取 Key、初始化本地库、读取当天微信消息 |
+| `src/WechatDashboard.Infrastructure/Capture/WeChatLocalReaderService.cs` | 调用 Python reader、初始化、分页读取、解析 reader JSON |
+| `src/WechatDashboard.Infrastructure/Capture/WeChatLocalCommandCaptureAdapter.cs` | 将本地 reader 接入 `MessageCapturePipeline` 的命令适配器 |
+| `src/WechatDashboard.Infrastructure/Capture/ProjectToolPaths.cs` | 统一解析项目根目录、`tools` 和 `tools/result` 路径 |
+| `tools/wechat-local-reader/wechat_local_reader.py` | DB Key 导入、数据库校验/解密、V4 消息读取、XML 摘要、JSON 输出 |
+| `tools/wechat-local-reader/test_wechat_local_reader.py` | Python reader 单元测试 |
+| `tools/wx-key-tools/run-wx-key-probe.ps1` | 调用本机 `wx_key` 工具并把 DB Key 写入 `tools/result` |
 ## 15. 结论
 
 该系统应以“本地优先、规则优先、合规采集、可解释排序”为核心。第一版不追求一次性解决所有微信历史消息读取问题，而是先建立稳定的数据模型、待办闭环和看板能力，再通过采集适配器逐步提升实时覆盖率。这样可以在技术风险和合规风险可控的前提下，尽快交付对用户真正有价值的 `@我` 待办理和项目消息看板。

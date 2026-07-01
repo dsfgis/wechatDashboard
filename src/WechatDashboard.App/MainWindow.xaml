@@ -68,7 +68,7 @@
                     <TextBlock Text="{Binding SummaryText}" Margin="0,6,0,0" Foreground="#4B5563" />
                     <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
                 </StackPanel>
-                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" MaxWidth="720">
                     <TextBlock Text="历史导入范围：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
                     <ComboBox x:Name="BootstrapRangeComboBox" Width="90" Margin="0,0,8,0" SelectedIndex="1">
                         <ComboBoxItem Content="7天" Tag="7d" />
@@ -83,13 +83,14 @@
                     <TextBlock Text="Key文件：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
                     <TextBox x:Name="ExternalKeyFileTextBox" Width="180" Margin="0,0,8,0"
                              ToolTip="外部工具写出的 dbkey.txt，可留空" />
+                    <Button x:Name="ExtractDatabaseKeyButton" Content="自动提取Key" Click="ExtractDatabaseKeyButton_Click" Margin="0,0,8,0" />
                     <Button x:Name="InitLocalDatabaseButton" Content="初始化本地库" Click="InitLocalDatabaseButton_Click" Margin="0,0,8,0" />
                     <Button Content="刷新" Click="RefreshButton_Click" />
                     <Button Content="采集一次" Click="CaptureButton_Click" />
                     <Button Content="开始微信监听" Click="StartWeChatListenerButton_Click" />
                     <Button Content="停止监听" Click="StopWeChatListenerButton_Click" />
                     <Button Content="写入示例消息" Click="SeedButton_Click" />
-                </StackPanel>
+                </WrapPanel>
             </DockPanel>
 
             <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,16">
@@ -132,15 +133,69 @@
                     </DataGrid>
                 </TabItem>
                 <TabItem Header="消息流">
-                    <DataGrid ItemsSource="{Binding Messages}">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="170" />
-                            <DataGridTextColumn Header="群聊" Binding="{Binding ChatName}" Width="160" />
-                            <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
-                            <DataGridTextColumn Header="@我" Binding="{Binding IsMentionMe}" Width="70" />
-                            <DataGridTextColumn Header="内容" Binding="{Binding Content}" Width="*" />
-                        </DataGrid.Columns>
-                    </DataGrid>
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                            <TextBlock Text="{Binding MessageStreamStatusText}" VerticalAlignment="Center" Foreground="#4B5563" TextWrapping="Wrap" />
+                            <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <TextBlock Text="每页" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                                <ComboBox x:Name="MessageStreamPageSizeComboBox" Width="72" Margin="0,0,8,0" SelectedIndex="1" SelectionChanged="MessageStreamPageSizeComboBox_SelectionChanged">
+                                    <ComboBoxItem Content="20" Tag="20" />
+                                    <ComboBoxItem Content="50" Tag="50" />
+                                    <ComboBoxItem Content="100" Tag="100" />
+                                    <ComboBoxItem Content="200" Tag="200" />
+                                </ComboBox>
+                                <Button Content="首页" Click="FirstMessageStreamPageButton_Click" />
+                                <Button Content="上一页" Click="PreviousMessageStreamPageButton_Click" />
+                                <Button Content="下一页" Click="NextMessageStreamPageButton_Click" />
+                                <Button Content="末页" Click="LastMessageStreamPageButton_Click" />
+                                <TextBlock Text="跳至" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                                <TextBox x:Name="MessageStreamPageNumberTextBox" Width="48" Text="1" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+                                <Button Content="跳转" Click="GoToMessageStreamPageButton_Click" />
+                                <TextBlock Text="{Binding MessageStreamPageText}" VerticalAlignment="Center" Foreground="#4B5563" Margin="4,0,0,0" />
+                            </WrapPanel>
+                        </DockPanel>
+                        <DataGrid ItemsSource="{Binding Messages}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="170" />
+                                <DataGridTextColumn Header="群聊" Binding="{Binding ChatName}" Width="160" />
+                                <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
+                                <DataGridTextColumn Header="@我" Binding="{Binding IsMentionMe}" Width="70" />
+                                <DataGridTextColumn Header="内容" Binding="{Binding Content}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </TabItem>
+                <TabItem Header="微信消息">
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                            <TextBlock Text="{Binding WeChatMessageStatusText}" VerticalAlignment="Center" Foreground="#4B5563" TextWrapping="Wrap" />
+                            <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Content="读取当天消息" Click="LoadTodayWeChatMessagesButton_Click" />
+                                <TextBlock Text="每页" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                                <ComboBox x:Name="WeChatMessagePageSizeComboBox" Width="72" Margin="0,0,8,0" SelectedIndex="1" SelectionChanged="WeChatMessagePageSizeComboBox_SelectionChanged">
+                                    <ComboBoxItem Content="20" Tag="20" />
+                                    <ComboBoxItem Content="50" Tag="50" />
+                                    <ComboBoxItem Content="100" Tag="100" />
+                                    <ComboBoxItem Content="200" Tag="200" />
+                                </ComboBox>
+                                <Button Content="首页" Click="FirstWeChatMessagesPageButton_Click" />
+                                <Button Content="上一页" Click="PreviousWeChatMessagesPageButton_Click" />
+                                <Button Content="下一页" Click="NextWeChatMessagesPageButton_Click" />
+                                <Button Content="末页" Click="LastWeChatMessagesPageButton_Click" />
+                                <TextBlock Text="跳至" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
+                                <TextBox x:Name="WeChatMessagePageNumberTextBox" Width="48" Text="1" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+                                <Button Content="跳转" Click="GoToWeChatMessagesPageButton_Click" />
+                                <TextBlock Text="{Binding WeChatMessagePageText}" VerticalAlignment="Center" Foreground="#4B5563" Margin="4,0,0,0" />
+                            </WrapPanel>
+                        </DockPanel>
+                        <DataGrid ItemsSource="{Binding WeChatMessages}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="消息内容" Binding="{Binding Content}" Width="*" />
+                                <DataGridTextColumn Header="群名称" Binding="{Binding ChatName}" Width="220" />
+                                <DataGridTextColumn Header="发消息人" Binding="{Binding SenderName}" Width="140" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
                 </TabItem>
                 <TabItem Header="项目看板">
                     <DataGrid ItemsSource="{Binding ProjectSummaries}">

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import io
 import json
 import os
 import struct
@@ -249,6 +250,54 @@ class WeChatKeyExtractionTests(unittest.TestCase):
         self.assertEqual(key, actual)
         self.assertEqual(["D:\\tools\\DbkeyHookCMD.exe", "-pid", "22800"], run.call_args.args[0])
 
+    def test_initialize_local_reader_reads_standalone_key_file(self):
+        key = bytes(range(32))
+        database_pages = [("session/session.db", "session.db", b"page")]
+        derived_keys = {
+            "session/session.db": {"enc_key": "a" * 64, "salt": "0" * 32, "size_mb": 0},
+            "contact/contact.db": {"enc_key": "b" * 64, "salt": "1" * 32, "size_mb": 0},
+            "message/message_0.db": {"enc_key": "c" * 64, "salt": "2" * 32, "size_mb": 0},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_dir = os.path.join(temp_dir, "db_storage")
+            os.makedirs(db_dir)
+            key_path = os.path.join(temp_dir, "dbkey.txt")
+            config_path = os.path.join(temp_dir, "state", "config.json")
+            with open(key_path, "w", encoding="utf-8") as output:
+                output.write(f"DB Key: {key.hex()}\n")
+
+            args = mock.Mock()
+            args.db_dir = db_dir
+            args.config = config_path
+            args.db_key = None
+            args.key_command = None
+            args.key_file = key_path
+            args.pid = None
+            args.bootstrap_range = "30d"
+            stdout = io.StringIO()
+
+            with mock.patch.object(
+                wechat_local_reader,
+                "collect_database_pages",
+                return_value=database_pages,
+            ):
+                with mock.patch.object(
+                    wechat_local_reader,
+                    "derive_database_keys_from_imported_key",
+                    return_value=("imported_passphrase", derived_keys),
+                ) as derive:
+                    with mock.patch.object(wechat_local_reader.sys, "stdout", stdout):
+                        wechat_local_reader.initialize_local_reader(args)
+
+        derive.assert_called_once_with(key, database_pages)
+        payload = json.loads(stdout.getvalue())
+        provider_stages = [
+            stage for stage in payload["stages"] if stage["stage"] == "key_provider"
+        ]
+        self.assertEqual("initialized", payload["status"])
+        self.assertEqual("key_file", provider_stages[0]["status"])
+
     def test_find_key_salt_candidates_extracts_key_from_96_char_hex(self):
         key = bytes(range(32))
         salt = bytes(range(16))
@@ -448,6 +497,26 @@ class WeChatV4SchemaReaderTests(unittest.TestCase):
         self.assertEqual("File", wechat_local_reader.message_type_name(0x0100 | 49))
         self.assertEqual("System", wechat_local_reader.message_type_name(10000))
         self.assertEqual("Text", wechat_local_reader.message_type_name(999))
+
+    def test_summarize_message_content_replaces_image_xml(self):
+        xml = '<?xml version="1.0"?><msg><img aeskey="abc" /></msg>'
+
+        self.assertEqual("[图片]", wechat_local_reader.summarize_message_content(xml, 3))
+
+    def test_summarize_message_content_extracts_link_title(self):
+        xml = (
+            '<?xml version="1.0"?><msg><appmsg>'
+            "<title>项目通知</title><des>请今天确认</des><type>5</type>"
+            "</appmsg></msg>"
+        )
+
+        self.assertEqual(
+            "[链接] 项目通知 - 请今天确认",
+            wechat_local_reader.summarize_message_content(xml, 0x0500 | 49),
+        )
+
+    def test_summarize_message_content_keeps_plain_text(self):
+        self.assertEqual("好的", wechat_local_reader.summarize_message_content("好的", 1))
 
     def test_extract_sender_and_content_handles_group_prefix(self):
         name_map = {"wxid_abc": "Alice"}
@@ -721,6 +790,43 @@ class WeChatV4SchemaReaderTests(unittest.TestCase):
             self.assertEqual("Test Room", messages[0]["chatName"])
             self.assertEqual("Text", messages[0]["messageType"])
 
+    def test_read_messages_skips_malformed_message_shard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = os.path.join(temp_dir, "session")
+            message_dir = os.path.join(temp_dir, "message")
+            os.makedirs(session_dir)
+            os.makedirs(message_dir)
+
+            username = "room@chatroom"
+            conn = sqlite3.connect(os.path.join(session_dir, "session.db"))
+            try:
+                conn.execute(
+                    "CREATE TABLE SessionTable ("
+                    "username TEXT, last_timestamp INTEGER, "
+                    "summary TEXT, display_name TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO SessionTable VALUES (?, ?, ?, ?)",
+                    (username, 1700000200, "summary", "Test Room"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with open(os.path.join(message_dir, "message_0.db"), "wb") as output:
+                output.write(b"not a sqlite database")
+
+            messages, max_ts, diag = wechat_local_reader.read_messages(
+                temp_dir, start_timestamp=0
+            )
+
+            self.assertEqual([], messages)
+            self.assertEqual(0, diag["matched_tables"])
+            self.assertEqual(1, diag["shards_scanned"])
+            self.assertEqual(1, diag["query_errors"])
+            self.assertEqual(0, diag["rows_read"])
+            self.assertEqual(0, max_ts)
+
     def test_read_messages_supports_real_v4_name2id_and_contact_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_dir = os.path.join(temp_dir, "session")
@@ -845,9 +951,77 @@ class WeChatV4SchemaReaderTests(unittest.TestCase):
             self.assertEqual(1700000500, max_ts)
 
 
+    def test_read_messages_filters_by_end_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = os.path.join(temp_dir, "session")
+            message_dir = os.path.join(temp_dir, "message")
+            os.makedirs(session_dir)
+            os.makedirs(message_dir)
+
+            username = "wxid_self"
+            table_name = f"Msg_{wechat_local_reader.md5_hex_lower(username)}"
+
+            conn = sqlite3.connect(os.path.join(session_dir, "session.db"))
+            try:
+                conn.execute(
+                    "CREATE TABLE SessionTable ("
+                    "username TEXT, last_timestamp INTEGER, "
+                    "summary TEXT, display_name TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO SessionTable VALUES (?, ?, ?, ?)",
+                    (username, 1700000300, "s", "Self"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            conn = sqlite3.connect(os.path.join(message_dir, "message_0.db"))
+            try:
+                conn.execute(
+                    f"CREATE TABLE {table_name} ("
+                    "local_id INTEGER, server_id INTEGER, local_type INTEGER, "
+                    "sort_seq INTEGER, real_sender_id INTEGER, create_time INTEGER, "
+                    "message_content TEXT, compress_content BLOB, "
+                    "packed_info_data BLOB, status INTEGER)"
+                )
+                for local_id, create_time, content in [
+                    (1, 1700000000, "before"),
+                    (2, 1700000500, "inside"),
+                    (3, 1700001000, "after"),
+                ]:
+                    conn.execute(
+                        f"INSERT INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
+                        (local_id, local_id, 1, local_id, 0, create_time, content, 0),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+            messages, max_ts, _ = wechat_local_reader.read_messages(
+                temp_dir,
+                start_timestamp=1700000100,
+                end_timestamp=1700001000,
+            )
+
+            self.assertEqual(1, len(messages))
+            self.assertEqual("inside", messages[0]["content"])
+            self.assertEqual(1700000500, max_ts)
+
 class WeChatCaptureCommandTests(unittest.TestCase):
     """Tests for the capture command's config loading and offset handling."""
 
+    def test_write_json_output_escapes_non_gbk_characters(self):
+        stdout = io.StringIO()
+        payload = {"messages": [{"content": "a\u2005b"}]}
+
+        with mock.patch.object(wechat_local_reader.sys, "stdout", stdout):
+            wechat_local_reader.write_json_output(payload)
+
+        output = stdout.getvalue()
+        self.assertIn("\\u2005", output)
+        self.assertNotIn("\u2005", output.replace("\\u2005", ""))
+        self.assertEqual(payload, json.loads(output))
     def test_read_offset_uses_environment_when_present(self):
         old = os.environ.get("WECHAT_DASHBOARD_OFFSET")
         try:

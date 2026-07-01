@@ -37,7 +37,9 @@ public sealed class WeChatLocalCommandCaptureAdapter : IMessageCaptureAdapter
         var currentOffset = context.GetOffset(Name) ?? "";
         var environment = new Dictionary<string, string>
         {
-            ["WECHAT_DASHBOARD_OFFSET"] = currentOffset
+            ["WECHAT_DASHBOARD_OFFSET"] = currentOffset,
+            ["PYTHONUTF8"] = "1",
+            ["PYTHONIOENCODING"] = "utf-8:backslashreplace"
         };
 
         if (!string.IsNullOrWhiteSpace(_options.TemporaryDirectory))

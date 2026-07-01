@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Domain.Entities;
@@ -103,6 +104,49 @@ public sealed class SqliteMessageRepository : IMessageRepository
         }
 
         return messages;
+    }
+
+    public async Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken)
+    {
+        var safePage = Math.Max(1, pageNumber);
+        var safeSize = Math.Clamp(pageSize, 1, 200);
+        var offset = (safePage - 1) * safeSize;
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+
+        await using var countCommand = connection.CreateCommand();
+        countCommand.CommandText = "SELECT COUNT(*) FROM messages;";
+        var totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                id,
+                source,
+                source_message_key,
+                chat_session_id,
+                chat_name,
+                sender_name,
+                content,
+                message_type,
+                sent_at,
+                captured_at,
+                is_mention_me
+            FROM messages
+            ORDER BY captured_at DESC, id DESC
+            LIMIT $limit OFFSET $offset;
+            """;
+        command.Parameters.AddWithValue("$limit", safeSize);
+        command.Parameters.AddWithValue("$offset", offset);
+
+        var messages = new List<Message>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            messages.Add(ReadMessage(reader));
+        }
+
+        return new MessagePage(messages, totalCount, safePage, safeSize);
     }
 
     private static void AddMessageParameters(SqliteCommand command, Message message)

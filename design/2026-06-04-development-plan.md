@@ -39,12 +39,22 @@ Completed:
 - Default live capture now enables `WeChat.LocalExport`; `WeChat.WindowText` remains available as a fallback/diagnostic source instead of the primary live source.
 - `WeChatLocalCommandCaptureAdapter` invokes an isolated local reader process, passes the pipeline offset through `WECHAT_DASHBOARD_OFFSET`, parses structured JSON, and keeps external failures out of the WPF process.
 - `tools/wechat-local-reader/wechat_local_reader.py` queries every changed session and emits complete structured message rows instead of using a last-message-only session summary.
-- The packaged reader executable is installed under `%LOCALAPPDATA%\WechatDashboard\tools\wechat-local-reader`; the source remains disabled until its local config and authorized database keys exist.
+- The reader lives under `tools\wechat-local-reader`; local key/config/decrypted outputs live under `tools\result\wechat-local-reader`; the source remains disabled until authorized database keys exist.
 - `DefaultMentionAliases` sets the current user's aliases to `白驹过隙` and `戴少峰`.
 - WPF shell with refresh, seed sample data, and one-shot capture button.
 - Tests covering core rules, SQLite round-trip, JSONL capture, visible-window capture, OCR snapshot fallback, live WeChat source registration, and capture pipeline.
 - Project targets .NET 10 to match the installed desktop runtime.
 
+Current handoff update (2026-06-30):
+
+- The local DB Key path has moved past the original read-only memory scanner blocker. A project-local external `wx_key` helper can produce a key file under `tools\result\wechat-local-reader` after explicit user action.
+- WPF exposes `自动提取Key`, `初始化本地库`, and a dedicated `微信消息` tab.
+- The `微信消息` tab reads today's local database messages with pagination: 50 rows per page, columns `消息内容`, `群名称`, `发消息人`.
+- `WeChatLocalReaderService.ReadMessagesAsync` calls the Python reader with day start/end timestamps, offset, and limit.
+- `tools/wechat-local-reader/wechat_local_reader.py` supports date-bounded capture, offset/limit paging, UTF-8-safe JSON output, and XML payload summaries.
+- XML media payloads are no longer shown raw in the UI; they are converted to user-facing summaries before JSON output.
+- Generated key/config/decrypted files are constrained to `tools\result`; `.gitignore` excludes that directory.
+- The current test baseline in this worktree is Python reader tests 47 passed, .NET console tests 24 passed, and WPF app build succeeded to `tools\result\build-check\WechatDashboard.App`.
 Known gaps:
 
 - Real Windows UI Automation + OCR snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
@@ -172,7 +182,7 @@ Implementation direction updated after the WeTrace comparison:
 - Add an explicit external key command contract: stdout may return JSON with `ok`, `provider`, `version`, `wechat_version`, and `db_key`, a plain-text 64-hex DB key, or a configured key file such as `dbkey.txt`. The reader must extract only the key and must not log raw stdout/stderr.
 - Prefer adapting `gzygood/DbkeyHook`'s `DbkeyHookCMD.exe -pid {pid}` style command for Windows WeChat 4.1.x, because its documented approach targets the post-4.0.3.39 behavior where dbkey is released after use and old memory search patterns stop working. Keep `ylytdeng/wechat-decrypt` as a reference for SQLCipher4 and export behavior, not as the first replacement for key acquisition.
 - Validate any imported or externally extracted DB key against `session/session.db`, `contact/contact.db`, and at least one `message/message_N.db` before saving initialization state.
-- Keep third-party Hook tools outside the WPF process and outside this repository. The app can invoke a user-provided command after explicit authorization, but it must not bundle unreviewed DLLs or copy WeTrace's absent `wx_key.dll`.
+- Keep third-party Hook tools outside the WPF process but place the explicitly authorized local `wx_key` tool under `tools\wx-key-tools`; generated key/config/decrypted outputs must stay under `tools\result`. Do not copy WeTrace's absent `wx_key.dll`.
 - Consider the WeChat local database capture incomplete until the same key drives full database decryption, V4 shard indexing, historical bootstrap, one real incremental message, deduplication, and Todo creation.
 
 Reference reviewed on 2026-06-10:
@@ -284,28 +294,43 @@ Expected result:
 
 ## Immediate Next Work
 
-Milestones 1, 2, 2.1, and 2.2 have been completed at the framework level. The app now runs WeChat visible-window UIA + OCR capture from "采集一次" and supports 5-second polling from "开始微信监听".
+Milestones 1, 2, 2.1, 2.2, and 2.3 are implemented at the framework level. Milestone 2.4 is partially implemented through the Python reader and WPF service path: DB Key file import, database initialization, V4 local message reading, date-bounded pagination, UTF-8-safe JSON output, and XML media summary display all exist.
 
-Milestone 2.3 is implemented through the real-reader bridge. The app has located WeChat 4.1.10.31 data under `D:\cache\xwechat_files\dsfgis_84f8\db_storage`, and the packaged reader is installed. The current reader still does not produce real chat messages, so Milestone 2.4 now takes priority over further UI work.
+### 当前进度更新（2026-06-30）
 
-### 当前进度更新（2026-06-10）
+Completed since the previous 2026-06-10 snapshot:
 
-- 已完成本地导出文件适配器、外部命令适配器、WPF 采集诊断和本地读取器打包基础。
-- 已定位微信 `4.1.10.31` 数据目录：`D:\cache\xwechat_files\dsfgis_84f8\db_storage`。
-- 已获得用户明确授权，可只读扫描本机 `Weixin.exe` 进程内存提取本人数据库密钥。
-- 已排除旧版固定十六进制文本模式、固定 `0x2F` 指针结构和无包装十六进制候选。
-- 已实现可变容量指针结构、直接页密钥验证、PBKDF2 原始口令验证和敏感输出抑制，离线单元测试通过。
-- 已调研 WeTrace 的完整链路：Hook 获取 DB 主密钥、按数据库 salt 派生、全库解密、`SessionTable` 会话读取、`Msg_<md5(username)>` 消息表和 `Name2Id` 发送人映射。
-- 已确认当前方案存在三个结构性问题：密钥获取只有一个 Provider、首次采集固定回看五分钟、采集异常会被折叠成“0 条消息”。
-- 真实初始化尚未成功，`WeChat.LocalDatabase` 仍应保持未启用状态。
+- Added project-local path resolution through `ProjectToolPaths` so external tools and generated outputs stay under `tools` and `tools/result`.
+- Added `tools\wx-key-tools\run-wx-key-probe.ps1` and WPF `自动提取Key` integration for the local external `wx_key` helper.
+- Added `WeChatLocalReaderService` initialization and paged message reading path for WPF.
+- Added WPF `微信消息` tab with `读取当天消息`, `上一页`, `下一页`, and page status text.
+- Implemented default read of today's messages with 50 rows per page.
+- Implemented Python reader capture arguments `--start-timestamp`, `--end-timestamp`, `--offset`, and `--limit`.
+- Fixed Windows GBK output failures by forcing/safely escaping Python JSON output.
+- Added non-text XML summarization so image/video/emoji/file/link/location messages do not display raw XML in the table.
+- Added/updated tests for key-file initialization, reader paging behavior, UTF-8-safe output, local reader service date paging, and XML summaries.
 
-下一阶段按以下顺序执行：
+Current validation baseline:
 
-1. 先实现阶段化诊断，使路径、密钥、解密、schema、分片、查询和 pipeline 错误可以区分。
-2. 抽象 `IWeChatDatabaseKeyProvider`，将现有只读扫描降为一个可替换 Provider。
-3. 增加受控的导入密钥 Provider，用离线 fixture 验证多数据库 salt 派生和全库解密。
-4. 定义隔离的外部 Hook Provider 协议；在来源、哈希、许可证和安全审查完成前不分发第三方 DLL。
-5. 自主实现 V4 会话和消息读取，不继续依赖 `wechat_cli` 的内部私有函数。
-6. 首次初始化提供 7 天、30 天或全部历史导入，之后再启用按分片高水位增量。
-7. 使用真实微信只验证非敏感计数和一条已知测试消息，再验证最小化窗口采集、去重、`@白驹过隙`/`@戴少峰` Todo 和看板刷新。
-8. 完成回归构建、测试、许可证检查和隐私清理后，再标记本地数据库采集为完成。
+- Python reader: `python -m unittest discover -v -s tools\wechat-local-reader -p test_wechat_local_reader.py` -> 47 tests passed.
+- .NET regression runner: `dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj` -> 24 tests passed.
+- WPF build while app is locked: `dotnet build src\WechatDashboard.App\WechatDashboard.App.csproj --no-restore -o tools\result\build-check\WechatDashboard.App` -> succeeded with existing SQLitePCLRaw vulnerability warnings only.
+- `git diff --check` -> passed; line-ending warnings may appear.
+
+Still open:
+
+1. Decide whether `tools\wx-key-tools` is committed as local tooling or documented as user-supplied. If committed, add source URL, version, SHA-256, license status, and security review notes.
+2. Finish user-facing configuration for manually selecting `db_storage`, importing a DB Key file, and clearing/reinitializing local reader state.
+3. Unify the dedicated `微信消息` read path with the main pipeline experience where appropriate: persistence, `@我` Todo creation, and dashboard refresh semantics.
+4. Improve diagnostics so WPF clearly separates key extraction, key validation, database copy/decrypt, schema query, message query, JSON parse, and UI display errors.
+5. Re-run the system test on a fresh worktree without printing real message content.
+6. Validate minimized-WeChat incremental capture using a known test message and non-sensitive counts.
+7. Keep raw DB Keys, `wx-key-found.txt`, `all_keys.json`, decrypted DBs, and capture JSON out of Git and logs.
+
+Recommended next branch/worktree handoff:
+
+1. Read `Agent.md` first for the current state and safety boundaries.
+2. Run the code-level tests from this file.
+3. Follow `design/wechat-local-database-system-test.md` for local DB validation.
+4. If the UI shows XML again, check `summarize_message_content` in `tools\wechat-local-reader\wechat_local_reader.py` and confirm `query_messages_from_shard` calls it before appending messages.
+5. If DB Key extraction fails, do not debug OCR first; inspect the key tool path, `Weixin` PID selection, key file creation, and key/database-directory match.

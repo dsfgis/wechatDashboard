@@ -9,3 +9,6 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+tools/result/
+.ai-code-tracker.json
+tools/wx-key-tools/wx_key-windows-v2.1.8/

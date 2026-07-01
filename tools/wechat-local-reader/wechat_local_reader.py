@@ -14,7 +14,27 @@ import struct
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 
+
+def configure_standard_streams():
+    """Keep Windows console encodings from breaking JSON output."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
+
+
+configure_standard_streams()
+
+
+def write_json_output(value):
+    json.dump(value, sys.stdout, ensure_ascii=True)
+    sys.stdout.write("\n")
 # ---------------------------------------------------------------------------
 # Optional crypto backends. The reader needs AES-256-CBC for SQLCipher V4
 # page decryption and zstd for compressed message content. Both are loaded
@@ -1336,6 +1356,84 @@ def message_type_name(local_type):
     return "Text"
 
 
+
+
+def is_xml_message(text):
+    stripped = (text or "").lstrip()
+    return stripped.startswith("<?xml") or stripped.startswith("<msg")
+
+
+def xml_text(root, path):
+    node = root.find(path)
+    if node is not None and node.text:
+        return node.text.strip()
+    return ""
+
+
+def summarize_xml_message(text, local_type):
+    base_type, sub_type = split_msg_type(local_type)
+    try:
+        root = ET.fromstring(text.lstrip())
+    except ET.ParseError:
+        return ""
+
+    if root.find(".//videomsg") is not None:
+        return "[视频]"
+    if root.find(".//emoji") is not None:
+        return "[表情]"
+    if root.find(".//img") is not None:
+        return "[图片]"
+
+    appmsg = root.find(".//appmsg")
+    if appmsg is not None:
+        title = xml_text(appmsg, "title")
+        des = xml_text(appmsg, "des")
+        app_type = xml_text(appmsg, "type")
+        if title and des:
+            return f"[链接] {title} - {des}"
+        if title:
+            return f"[链接] {title}"
+        if app_type == "6":
+            return "[文件]"
+        return "[链接]"
+
+    location = root.find(".//location")
+    if location is not None:
+        label = location.attrib.get("label", "").strip()
+        return f"[位置] {label}" if label else "[位置]"
+
+    if base_type == 3:
+        return "[图片]"
+    if base_type == 43:
+        return "[视频]"
+    if base_type == 47:
+        return "[表情]"
+    if base_type == 49 and sub_type == 5:
+        return "[链接]"
+    if base_type == 49:
+        return "[文件]"
+    return "[非文本消息]"
+
+
+def summarize_message_content(text, local_type):
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    if not is_xml_message(cleaned):
+        return cleaned
+
+    summary = summarize_xml_message(cleaned, local_type)
+    if summary:
+        return summary
+
+    message_type = message_type_name(local_type)
+    return {
+        "Image": "[图片]",
+        "Link": "[链接]",
+        "File": "[文件]",
+        "System": "[系统消息]",
+    }.get(message_type, "[非文本消息]")
+
 def extract_sender_and_content(raw_content, is_group, username, display_name, name_map):
     """Parse a WeChat message content field into (sender_name, text).
 
@@ -1364,6 +1462,7 @@ def query_messages_from_shard(
     display_name,
     name_map,
     start_timestamp,
+    end_timestamp=None,
     limit=None,
 ):
     """Query messages for a single user from a single message shard."""
@@ -1425,15 +1524,17 @@ def query_messages_from_shard(
             SELECT {', '.join(select_parts)}
             FROM {quote_identifier(table_name)}
             WHERE {quote_identifier(create_time_col)} >= ?
-            ORDER BY {quote_identifier(create_time_col)} ASC
         """
-
-        params = (start_timestamp,)
+        params = [start_timestamp]
+        if end_timestamp is not None:
+            query += f" AND {quote_identifier(create_time_col)} < ?"
+            params.append(end_timestamp)
+        query += f" ORDER BY {quote_identifier(create_time_col)} ASC"
         if limit:
             query += " LIMIT ?"
-            params = (start_timestamp, limit)
+            params.append(limit)
 
-        rows = connection.execute(query, params).fetchall()
+        rows = connection.execute(query, tuple(params)).fetchall()
         for row in rows:
             local_id = row["local_id"]
             server_id = row["server_id"]
@@ -1452,6 +1553,7 @@ def query_messages_from_shard(
             sender_from_content, text = extract_sender_and_content(
                 decoded, is_group, username, display_name, shard_name_map
             )
+            text = summarize_message_content(text, local_type)
 
             # Resolve sender: prefer real_sender_id via Name2Id, fall back to
             # the sender parsed from content, then display_name.
@@ -1484,7 +1586,7 @@ def query_messages_from_shard(
     return messages
 
 
-def read_messages(decrypted_root, start_timestamp, limit=None):
+def read_messages(decrypted_root, start_timestamp, end_timestamp=None, limit=None):
     """Read all messages across sessions and shards since *start_timestamp*.
 
     Returns (messages, max_timestamp, diagnostics).
@@ -1493,6 +1595,7 @@ def read_messages(decrypted_root, start_timestamp, limit=None):
         "sessions": 0,
         "matched_tables": 0,
         "rows_read": 0,
+        "query_errors": 0,
         "shards_scanned": 0,
     }
 
@@ -1519,14 +1622,19 @@ def read_messages(decrypted_root, start_timestamp, limit=None):
 
         display_name = session["display_name"] or username
         for shard_path in shards:
-            shard_messages = query_messages_from_shard(
-                shard_path,
-                username,
-                display_name,
-                global_name_map,
-                start_timestamp,
-                limit,
-            )
+            try:
+                shard_messages = query_messages_from_shard(
+                    shard_path,
+                    username,
+                    display_name,
+                    global_name_map,
+                    start_timestamp,
+                    end_timestamp,
+                    limit,
+                )
+            except sqlite3.DatabaseError:
+                diagnostics["query_errors"] += 1
+                continue
             if shard_messages:
                 diagnostics["matched_tables"] += 1
             for message in shard_messages:
@@ -1605,6 +1713,16 @@ def initialize_local_reader(args):
     if imported_key is not None:
         stages.append({"stage": "key_provider", "status": "imported"})
         key_provider_label = "imported DB key"
+        extraction_mode, database_keys = derive_database_keys_from_imported_key(
+            imported_key,
+            database_pages,
+        )
+    elif key_file:
+        stages.append({"stage": "key_provider", "status": "key_file"})
+        imported_key = extract_db_key_from_file(key_file)
+        if imported_key is None:
+            raise RuntimeError("External key file did not contain a usable DB key.")
+        key_provider_label = "external key file"
         extraction_mode, database_keys = derive_database_keys_from_imported_key(
             imported_key,
             database_pages,
@@ -1765,7 +1883,7 @@ def initialize_local_reader(args):
         }
     )
 
-    json.dump(
+    write_json_output(
         {
             "status": "initialized",
             "stages": stages,
@@ -1781,11 +1899,8 @@ def initialize_local_reader(args):
             "rawCandidates": raw_count,
             "dbPathRefs": db_path_ref_count,
             "elapsedSeconds": round(time.monotonic() - started_at, 1),
-        },
-        sys.stdout,
-        ensure_ascii=False,
+        }
     )
-    sys.stdout.write("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1831,22 +1946,47 @@ def capture(args):
         }
     )
 
-    # Determine the query start timestamp.
-    last_offset = read_offset(bootstrap_lookback_seconds(bootstrap_range))
-    query_start = max(0, last_offset - args.lookback_seconds)
+    # Determine the query time window. By default this remains incremental and
+    # offset-driven. Explicit timestamps are used by the WPF paged message view.
+    if args.start_timestamp is not None:
+        last_offset = args.start_timestamp
+        query_start = max(0, args.start_timestamp)
+    else:
+        last_offset = read_offset(bootstrap_lookback_seconds(bootstrap_range))
+        query_start = max(0, last_offset - args.lookback_seconds)
+    query_end = args.end_timestamp
+    paged_query = (
+        args.start_timestamp is not None
+        or args.end_timestamp is not None
+        or args.offset > 0
+    )
+    query_limit = None if paged_query else args.limit or None
     stages.append(
         {
             "stage": "offset",
             "status": "ok",
             "last_offset": last_offset,
             "query_start": query_start,
+            "query_end": query_end,
         }
     )
 
     # Read messages.
     messages, max_timestamp, read_diag = read_messages(
-        decrypted_root, query_start, limit=args.limit or None
+        decrypted_root,
+        query_start,
+        end_timestamp=query_end,
+        limit=query_limit,
     )
+    total_messages = len(messages)
+    result_offset = max(0, args.offset)
+    if paged_query:
+        if args.limit > 0:
+            result_messages = messages[result_offset : result_offset + args.limit]
+        else:
+            result_messages = messages[result_offset:]
+    else:
+        result_messages = messages
     stages.append(
         {
             "stage": "query",
@@ -1855,22 +1995,23 @@ def capture(args):
             "matched_tables": read_diag["matched_tables"],
             "shards_scanned": read_diag["shards_scanned"],
             "rows_read": read_diag["rows_read"],
+            "query_errors": read_diag["query_errors"],
         }
     )
 
     next_offset = str(max(last_offset, max_timestamp))
 
-    json.dump(
+    write_json_output(
         {
             "status": "ok",
             "stages": stages,
             "nextOffset": next_offset,
-            "messages": messages,
-        },
-        sys.stdout,
-        ensure_ascii=False,
+            "totalMessages": total_messages,
+            "offset": result_offset,
+            "limit": args.limit,
+            "messages": result_messages,
+        }
     )
-    sys.stdout.write("\n")
 
 
 def build_parser():
@@ -1882,6 +2023,9 @@ def build_parser():
     capture_parser.add_argument("--format", choices=("json",), default="json")
     capture_parser.add_argument("--initial-lookback-seconds", type=int, default=300)
     capture_parser.add_argument("--lookback-seconds", type=int, default=10)
+    capture_parser.add_argument("--start-timestamp", type=int)
+    capture_parser.add_argument("--end-timestamp", type=int)
+    capture_parser.add_argument("--offset", type=int, default=0)
     capture_parser.add_argument("--limit", type=int, default=0)
     capture_parser.set_defaults(handler=capture)
 

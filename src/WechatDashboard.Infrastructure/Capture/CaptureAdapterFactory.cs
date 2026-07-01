@@ -141,8 +141,7 @@ public static class CaptureAdapterFactory
             {
                 WorkingDirectory = Path.GetDirectoryName(source.Location),
                 TemporaryDirectory = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "WechatDashboard",
+                    ProjectToolPaths.ResultDirectory,
                     "temp",
                     "wechat-local-reader")
             },

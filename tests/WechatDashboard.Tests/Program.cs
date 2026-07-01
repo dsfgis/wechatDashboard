@@ -28,6 +28,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("WeChat local export adapter captures local database export messages incrementally", TestWeChatLocalExportCaptureAdapterAsync),
     ("WeChat local command adapter captures structured messages and passes offsets", TestWeChatLocalCommandCaptureAdapterAsync),
     ("WeChat local command adapter exposes staged diagnostics from reader", TestWeChatLocalCommandStagedDiagnosticsAsync),
+    ("WeChat local reader service extracts DB key through PowerShell probe", TestWeChatLocalReaderServiceExtractsDatabaseKeyAsync),
+    ("WeChat local reader service reads today messages with paging", TestWeChatLocalReaderServiceReadsPagedMessagesAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
@@ -624,6 +626,107 @@ static async Task TestWeChatLocalCommandStagedDiagnosticsAsync()
     AssertEqual("query", adapter.LastStages.Stages[4].Name, "Last stage should be query.");
     AssertTrue(adapter.LastStages.Stages[4].Detail.Contains("rows_read=1"), "Query detail should include rows_read.");
 }
+static async Task TestWeChatLocalReaderServiceExtractsDatabaseKeyAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var scriptPath = Path.Combine(root, "run-wx-key-probe.ps1");
+    var dllDirectory = Path.Combine(root, "dll");
+    var keyPath = Path.Combine(root, "wx-key-found.txt");
+    var logPath = Path.Combine(root, "wx-key-probe.log");
+    Directory.CreateDirectory(dllDirectory);
+    await File.WriteAllTextAsync(scriptPath, "# fake wx_key probe", CancellationToken.None);
+
+    var runner = new FakeExternalCommandRunner(
+        new ExternalCommandResult(0, "", ""),
+        onRun: (_, _, _, _) => File.WriteAllText(keyPath, "DB Key: " + new string('a', 64)));
+    var service = new WeChatLocalReaderService(runner);
+
+    var result = await service.ExtractDatabaseKeyAsync(
+        new WeChatDatabaseKeyExtractionOptions(
+            ScriptPath: scriptPath,
+            DllDirectory: dllDirectory,
+            KeyPath: keyPath,
+            LogPath: logPath,
+            Seconds: 7,
+            TargetProcessId: 1234),
+        CancellationToken.None);
+
+    AssertNotNull(result, "DB key extraction should return a result.");
+    AssertEqual(1234, result!.TargetProcessId, "Configured target PID should be used.");
+    AssertEqual(keyPath, result.KeyPath, "Result should expose the generated key file path.");
+    AssertEqual(keyPath, service.ExternalKeyFile, "Service should reuse the generated key file for reader init.");
+    var probeArguments = runner.LastArguments
+        ?? throw new InvalidOperationException("PowerShell probe arguments should be captured.");
+    AssertTrue(probeArguments.Contains("-TargetPid"), "Probe should receive TargetPid.");
+    AssertTrue(probeArguments.Contains("1234"), "Probe should receive the selected PID.");
+    AssertTrue(probeArguments.Contains("-DllDir"), "Probe should receive DllDir.");
+    AssertTrue(probeArguments.Contains(dllDirectory), "Probe should receive the wx_key DLL directory.");
+    AssertTrue(probeArguments.Contains("-KeyPath"), "Probe should receive KeyPath.");
+    AssertTrue(probeArguments.Contains(keyPath), "Probe should write to the configured key file.");
+    AssertTrue(probeArguments.Contains("-LogPath"), "Probe should receive LogPath.");
+    AssertTrue(probeArguments.Contains(logPath), "Probe should write logs to the configured log path.");
+}
+
+static async Task TestWeChatLocalReaderServiceReadsPagedMessagesAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var configPath = Path.Combine(root, "config.json");
+    await File.WriteAllTextAsync(configPath, "{}", CancellationToken.None);
+
+    var runner = new FakeExternalCommandRunner(new ExternalCommandResult(
+        ExitCode: 0,
+        StandardOutput: """
+                        {
+                          "status": "ok",
+                          "totalMessages": 75,
+                          "offset": 50,
+                          "limit": 50,
+                          "messages": [
+                            {
+                              "id": "room@chatroom:message_0.db:1051:1782702000",
+                              "chatId": "room@chatroom",
+                              "chatName": "项目群",
+                              "senderName": "Alice",
+                              "content": "第51条消息",
+                              "sentAt": "2026-06-29T10:00:00+08:00",
+                              "messageType": "Text"
+                            }
+                          ]
+                        }
+                        """,
+        StandardError: ""));
+    var service = new WeChatLocalReaderService(runner);
+    var date = new DateTime(2026, 6, 29);
+
+    var page = await service.ReadMessagesAsync(
+        new WeChatLocalMessageReadOptions(date, PageNumber: 2, PageSize: 50, ConfigPath: configPath),
+        CancellationToken.None);
+
+    AssertNotNull(page, "Message page should be returned.");
+    AssertEqual(75, page!.TotalCount, "Total message count should come from reader output.");
+    AssertEqual(2, page.PageNumber, "Requested page number should round-trip.");
+    AssertEqual(50, page.PageSize, "Requested page size should round-trip.");
+    AssertEqual(1, page.Messages.Count, "Second page should contain parsed messages.");
+    AssertEqual("第51条消息", page.Messages[0].Content, "Message content should be parsed for the table.");
+    AssertEqual("项目群", page.Messages[0].ChatName, "Chat name should be parsed for the table.");
+    AssertEqual("Alice", page.Messages[0].SenderName, "Sender should be parsed for the table.");
+
+    var arguments = runner.LastArguments
+        ?? throw new InvalidOperationException("Reader arguments should be captured.");
+    var localDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Unspecified);
+    var startTimestamp = new DateTimeOffset(localDate, TimeZoneInfo.Local.GetUtcOffset(localDate)).ToUnixTimeSeconds().ToString();
+    var endTimestamp = new DateTimeOffset(localDate.AddDays(1), TimeZoneInfo.Local.GetUtcOffset(localDate.AddDays(1))).ToUnixTimeSeconds().ToString();
+    AssertTrue(arguments.Contains("capture"), "Reader should run the capture command.");
+    AssertTrue(arguments.Contains("--start-timestamp"), "Reader should receive the local day start timestamp flag.");
+    AssertTrue(arguments.Contains(startTimestamp), "Reader should receive the local day start timestamp.");
+    AssertTrue(arguments.Contains("--end-timestamp"), "Reader should receive the next day timestamp flag.");
+    AssertTrue(arguments.Contains(endTimestamp), "Reader should receive the next day timestamp.");
+    AssertTrue(arguments.Contains("--offset"), "Reader should receive a paging offset flag.");
+    AssertTrue(arguments.Contains("50"), "Second page should use offset 50 and limit 50.");
+    AssertTrue(arguments.Contains("--limit"), "Reader should receive a page-size limit flag.");
+}
 
 static async Task TestCapturePipelineAsync()
 {
@@ -689,8 +792,11 @@ static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
     var messageRepository = new SqliteMessageRepository(databasePath);
     var todoRepository = new SqliteTodoRepository(databasePath);
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
+    var sources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
+        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand)
+        .ToArray();
     var pipeline = new MessageCapturePipeline(
-        adapters: CaptureAdapterFactory.CreateAdapters(CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)),
+        adapters: CaptureAdapterFactory.CreateAdapters(sources),
         messageRepository,
         todoRepository,
         offsetRepository,
@@ -783,7 +889,9 @@ static async Task TestCapturePipelineWithSavedSettingsAsync()
     };
     await settingsRepository.SaveAllAsync(savedSettings, CancellationToken.None);
 
-    var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot);
+    var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
+        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand)
+        .ToArray();
     var effectiveSources = defaultSources.Select(source =>
     {
         var saved = savedSettings.FirstOrDefault(s =>
@@ -908,11 +1016,21 @@ public sealed class FakeScreenOcrReader : IScreenOcrReader
 public sealed class FakeExternalCommandRunner : IExternalCommandRunner
 {
     private readonly ExternalCommandResult _result;
+    private readonly Action<string, IReadOnlyList<string>, string?, IReadOnlyDictionary<string, string>>? _onRun;
 
-    public FakeExternalCommandRunner(ExternalCommandResult result)
+    public FakeExternalCommandRunner(
+        ExternalCommandResult result,
+        Action<string, IReadOnlyList<string>, string?, IReadOnlyDictionary<string, string>>? onRun = null)
     {
         _result = result;
+        _onRun = onRun;
     }
+
+    public string? LastExecutablePath { get; private set; }
+
+    public IReadOnlyList<string>? LastArguments { get; private set; }
+
+    public string? LastWorkingDirectory { get; private set; }
 
     public IReadOnlyDictionary<string, string> LastEnvironment { get; private set; } =
         new Dictionary<string, string>();
@@ -924,7 +1042,11 @@ public sealed class FakeExternalCommandRunner : IExternalCommandRunner
         IReadOnlyDictionary<string, string> environment,
         CancellationToken cancellationToken)
     {
+        LastExecutablePath = executablePath;
+        LastArguments = arguments.ToArray();
+        LastWorkingDirectory = workingDirectory;
         LastEnvironment = environment;
+        _onRun?.Invoke(executablePath, LastArguments, workingDirectory, environment);
         return Task.FromResult(_result);
     }
 }
