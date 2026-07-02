@@ -5,19 +5,33 @@ using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Infrastructure.Capture;
 
+/// <summary>
+/// 可见窗口文本采集适配器：通过 UIA/OCR 读取可见窗口的文本快照，
+/// 解析其中的聊天消息（发送人、内容、时间），转换为 CapturedMessage。
+/// 采用基于偏移的增量策略：快照内容哈希不变时跳过，避免重复入库。
+/// 适用于微信等未提供本地数据库的即时通讯窗口的实时采集。
+/// </summary>
 public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
 {
+    // 采集选项：窗口标题过滤、聊天名称、忽略前缀等
     private readonly WindowTextCaptureOptions _options;
+    // 窗口文本快照提供者（UIA + OCR 组合实现）
     private readonly IWindowTextSnapshotProvider _snapshotProvider;
 
+    /// <summary>构造适配器：传入采集选项与快照提供者。</summary>
     public WindowTextCaptureAdapter(WindowTextCaptureOptions options, IWindowTextSnapshotProvider snapshotProvider)
     {
         _options = options;
         _snapshotProvider = snapshotProvider;
     }
 
+    /// <summary>适配器名称，格式为 {Source}.WindowText。</summary>
     public string Name => $"{_options.Source}.WindowText";
 
+    /// <summary>
+    /// 执行一次采集：获取窗口文本快照，按标题过滤，解析消息行，
+    /// 与上次快照偏移对比实现增量，返回新增消息批次与新的偏移哈希。
+    /// </summary>
     public async Task<CaptureBatch> CaptureAsync(CaptureContext context, CancellationToken cancellationToken)
     {
         var snapshots = await _snapshotProvider.GetSnapshotsAsync(_options, cancellationToken);
@@ -71,6 +85,10 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         return new CaptureBatch(Name, messages.Values.ToArray(), nextOffset);
     }
 
+    /// <summary>
+    /// 尝试将单行文本解析为消息：匹配"发送人:内容"或"时间 发送人:内容"格式。
+    /// 成功时输出发送人、内容与时间（时间缺省时使用快照采集时间）。
+    /// </summary>
     private bool TryParseMessageLine(
         WindowTextSnapshot snapshot,
         string line,
@@ -121,6 +139,10 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         return true;
     }
 
+    /// <summary>
+    /// 解析分行排列的消息块：支持"时间/发送人/内容"三行、"发送人/时间/内容"三行、
+    /// "发送人/内容"两行三种布局。返回解析后的消息序列。
+    /// </summary>
     private IEnumerable<ParsedVisibleMessage> ParseSplitMessageBlocks(
         WindowTextSnapshot snapshot,
         IReadOnlyList<string> lines,
@@ -168,6 +190,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         }
     }
 
+    /// <summary>将解析出的消息加入字典（按 SourceMessageKey 去重）。</summary>
     private void AddMessage(
         IDictionary<string, CapturedMessage> messages,
         WindowTextSnapshot snapshot,
@@ -191,6 +214,10 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
                 MessageType: MessageType.Text));
     }
 
+    /// <summary>
+    /// 从窗口标题推断聊天名：优先按分隔符（-、|、—）截取标题前缀，
+    /// 其次取第一个非标题/非时间/非消息行的文本，最终回退到选项中的 ChatName。
+    /// </summary>
     private string InferChatName(string windowTitle, IReadOnlyList<string> lines)
     {
         if (string.IsNullOrWhiteSpace(windowTitle))
@@ -222,6 +249,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         return _options.ChatName;
     }
 
+    /// <summary>判断是否为可跳过的行：空白、等于窗口标题/聊天名，或匹配忽略前缀。</summary>
     private bool IsSkippableLine(WindowTextSnapshot snapshot, string line)
     {
         return string.IsNullOrWhiteSpace(line) ||
@@ -230,6 +258,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
                _options.IgnoreLinePrefixes.Any(prefix => line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>判断是否为发送人行：长度≤40、非时间、非消息行、非 UI 标签、非内容。</summary>
     private static bool IsSenderLine(string line, string chatName)
     {
         return !string.IsNullOrWhiteSpace(line) &&
@@ -241,6 +270,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
                !LooksLikeMessageContent(line);
     }
 
+    /// <summary>判断是否为内容行：非空、非聊天名、非时间、非消息行、非 UI 标签。</summary>
     private static bool IsContentLine(string line, string chatName)
     {
         return !string.IsNullOrWhiteSpace(line) &&
@@ -250,6 +280,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
                !LooksLikeCommonUiLabel(line);
     }
 
+    /// <summary>启发式判断是否为消息内容：长度>8 或包含常见关键词。</summary>
     private static bool LooksLikeMessageContent(string line)
     {
         return line.Length > 8 ||
@@ -263,16 +294,19 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
                line.Contains("今天", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>判断是否为常见 UI 标签（如"微信"、"聊天"、"通讯录"等）。</summary>
     private static bool LooksLikeCommonUiLabel(string line)
     {
         return CommonUiLabels.Contains(line);
     }
 
+    /// <summary>规范化行文本：去除首尾空白并将连续空白合并为单个空格。</summary>
     private static string NormalizeLine(string value)
     {
         return string.Join(" ", value.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
     }
 
+    /// <summary>尝试解析可见时间格式（h:mm 或 hh:mm）。</summary>
     private static bool TryParseVisibleTime(string value, out TimeSpan time)
     {
         return TimeSpan.TryParseExact(
@@ -282,6 +316,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
             out time);
     }
 
+    /// <summary>将可见时间与快照日期组合为完整的时间戳。</summary>
     private static DateTimeOffset ToSnapshotDateTime(DateTimeOffset capturedAt, TimeSpan time)
     {
         return new DateTimeOffset(
@@ -294,6 +329,7 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
             capturedAt.Offset);
     }
 
+    /// <summary>计算字符串的稳定哈希（FNV-1a 64 位），返回 16 位十六进制字符串，用于偏移对比。</summary>
     private static string StableHash(string value)
     {
         var hash = 1469598103934665603UL;
@@ -306,10 +342,12 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         return hash.ToString("x16", CultureInfo.InvariantCulture);
     }
 
+    // 消息行正则：可选时间 + 发送人 + 内容，兼容中英文冒号
     private static readonly Regex MessageLineRegex = new(
         @"^(?:(?<time>\d{1,2}:\d{2})\s+)?(?<sender>[^:：]{1,40})[:：]\s*(?<content>.+)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    // 常见 UI 标签集合：用于过滤非消息文本
     private static readonly HashSet<string> CommonUiLabels = new(StringComparer.OrdinalIgnoreCase)
     {
         "微信",
@@ -334,5 +372,6 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
         "公众号"
     };
 
+    /// <summary>解析后的可见消息：发送人、内容、时间。</summary>
     private sealed record ParsedVisibleMessage(string SenderName, string Content, DateTimeOffset SentAt);
 }

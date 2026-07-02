@@ -4,6 +4,10 @@ using WechatDashboard.Domain.Entities;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 
+/// <summary>
+/// 基于 SQLite 的采集源设置仓储实现。
+/// 按 (source, kind) 唯一约束存储，支持 UPSERT。
+/// </summary>
 public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettingsRepository
 {
     private readonly string _databasePath;
@@ -13,6 +17,7 @@ public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettin
         _databasePath = databasePath;
     }
 
+    /// <summary>读取所有采集源设置，按 source、kind 排序。</summary>
     public async Task<IReadOnlyList<CaptureSourceSettings>> GetAllAsync(CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
@@ -29,6 +34,7 @@ public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettin
         return settings;
     }
 
+    /// <summary>保存单条设置（UPSERT）。</summary>
     public async Task SaveAsync(CaptureSourceSettings settings, CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
@@ -49,6 +55,7 @@ public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettin
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>批量保存设置（逐条 UPSERT）。</summary>
     public async Task SaveAllAsync(IReadOnlyList<CaptureSourceSettings> settings, CancellationToken cancellationToken)
     {
         foreach (var setting in settings)
@@ -57,6 +64,7 @@ public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettin
         }
     }
 
+    /// <summary>清空所有采集源设置。</summary>
     public async Task DeleteAllAsync(CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
@@ -65,6 +73,7 @@ public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettin
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>从 DataReader 映射为 CaptureSourceSettings 实体。</summary>
     private static CaptureSourceSettings ReadSettings(SqliteDataReader reader)
     {
         return new CaptureSourceSettings(

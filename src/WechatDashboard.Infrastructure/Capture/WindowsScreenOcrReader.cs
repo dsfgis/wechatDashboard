@@ -8,10 +8,20 @@ using Windows.Storage.Streams;
 
 namespace WechatDashboard.Infrastructure.Capture;
 
+/// <summary>
+/// 基于 Windows.Media.Ocr 的屏幕 OCR 读取器。
+/// 通过截取指定窗口的位图（按微信聊天面板区域裁剪），
+/// 调用 Windows OCR 引擎识别文本，作为 UIA 不可用时的兜底文本来源。
+/// </summary>
 public sealed class WindowsScreenOcrReader : IScreenOcrReader
 {
+    // 懒加载的 OCR 引擎，按当前用户语言创建
     private readonly Lazy<OcrEngine?> _ocrEngine = new(OcrEngine.TryCreateFromUserProfileLanguages);
 
+    /// <summary>
+    /// 读取指定窗口的文本：截屏 -> 裁剪聊天面板 -> 转 PNG -> OCR 识别 -> 拼接行文本。
+    /// 任何环节失败均返回空字符串，不抛异常。
+    /// </summary>
     public async Task<string> ReadWindowTextAsync(int nativeWindowHandle, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -47,6 +57,7 @@ public sealed class WindowsScreenOcrReader : IScreenOcrReader
         }
     }
 
+    /// <summary>截取窗口指定区域：获取窗口矩形，按微信聊天面板比例裁剪，从屏幕拷贝像素。</summary>
     private static Bitmap? CaptureWindow(int nativeWindowHandle)
     {
         var handle = new IntPtr(nativeWindowHandle);
@@ -75,6 +86,7 @@ public sealed class WindowsScreenOcrReader : IScreenOcrReader
         return bitmap;
     }
 
+    /// <summary>将 Bitmap 转为 IRandomAccessStream（PNG），供 WinRT BitmapDecoder 使用。</summary>
     private static async Task<IRandomAccessStream> ToRandomAccessStreamAsync(Bitmap bitmap, CancellationToken cancellationToken)
     {
         using var memoryStream = new MemoryStream();

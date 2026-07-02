@@ -3,6 +3,10 @@ using WechatDashboard.Application.Capture;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 
+/// <summary>
+/// 基于 SQLite 的处理偏移量仓储实现。
+/// 记录每个适配器上次采集到的位置，支持增量采集。
+/// </summary>
 public sealed class SqliteProcessingOffsetRepository : IProcessingOffsetRepository
 {
     private readonly string _databasePath;
@@ -12,6 +16,7 @@ public sealed class SqliteProcessingOffsetRepository : IProcessingOffsetReposito
         _databasePath = databasePath;
     }
 
+    /// <summary>读取所有适配器的偏移量（适配器名 -> 偏移值）。</summary>
     public async Task<IReadOnlyDictionary<string, string>> GetAllAsync(CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
@@ -28,6 +33,9 @@ public sealed class SqliteProcessingOffsetRepository : IProcessingOffsetReposito
         return offsets;
     }
 
+    /// <summary>
+    /// 保存（覆盖）指定适配器的偏移量。使用 UPSERT 语义：存在则更新，不存在则插入。
+    /// </summary>
     public async Task SaveAsync(string adapterName, string offsetValue, CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);

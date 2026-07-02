@@ -1,3 +1,19 @@
+"""微信本地数据库读取器（wechat-local-reader）。
+
+本模块用于从微信本地加密数据库（SQLCipher V4）中读取消息。
+主要流程：
+1. 提取数据库密钥（DB Key）：可从微信进程内存中扫描，或通过外部命令/导入密钥获取。
+2. 解密数据库：使用 AES-256-CBC 解密每个数据页，必要时用 zstd 解压消息内容。
+3. 读取消息：跨多个消息分片库聚合查询，按时间范围与数量过滤后输出 JSON。
+
+命令行子命令：
+- initialize : 初始化本地库（提取/校验密钥并解密所有数据库）
+- capture     : 采集最近消息（增量，基于上次偏移）
+- extract-key : 仅提取 DB Key 并写出
+
+输出统一为 JSON（写入 stdout 或文件），便于上层 C# 程序解析。
+"""
+
 import argparse
 import concurrent.futures
 import ctypes
@@ -18,7 +34,7 @@ import xml.etree.ElementTree as ET
 
 
 def configure_standard_streams():
-    """Keep Windows console encodings from breaking JSON output."""
+    """将标准输出/错误流重置为 UTF-8，避免 Windows 控制台编码破坏 JSON 输出。"""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
@@ -33,13 +49,13 @@ configure_standard_streams()
 
 
 def write_json_output(value):
+    """将 value 序列化为 JSON 写入 stdout，并追加换行。"""
     json.dump(value, sys.stdout, ensure_ascii=True)
     sys.stdout.write("\n")
 # ---------------------------------------------------------------------------
-# Optional crypto backends. The reader needs AES-256-CBC for SQLCipher V4
-# page decryption and zstd for compressed message content. Both are loaded
-# lazily so that key-extraction diagnostics still work on machines without
-# the extra packages installed.
+# 可选加密后端。读取器需要 AES-256-CBC 用于 SQLCipher V4 数据页解密，
+# 需要 zstd 用于压缩消息内容的解压。两者均延迟加载，使得在未安装
+# 这些额外依赖的机器上密钥提取诊断仍可工作。
 # ---------------------------------------------------------------------------
 
 _AES_BACKEND = None
@@ -115,6 +131,7 @@ def _load_zstd_backend():
 
 
 def aes_decrypt(key, iv, ciphertext):
+    """使用 AES-256-CBC 解密密文。自动选择可用的加密后端（pycryptodome 或 cryptography）。"""
     backend = _load_aes_backend()
     if backend is None:
         raise RuntimeError(
@@ -124,6 +141,7 @@ def aes_decrypt(key, iv, ciphertext):
 
 
 def zstd_decompress(data):
+    """使用 zstd 解压数据。自动选择可用的解压后端（zstandard 或 pyzstd）。"""
     backend = _load_zstd_backend()
     if backend is None:
         raise RuntimeError(
@@ -132,45 +150,53 @@ def zstd_decompress(data):
     return backend[1](data)
 
 
-PAGE_SIZE = 4096
-KEY_SIZE = 32
-SALT_SIZE = 16
-RESERVE_SIZE = 80
-WECHAT_V4_ROUND_COUNT = 256000
-PROCESS_VM_READ = 0x0010
-PROCESS_QUERY_INFORMATION = 0x0400
-MEM_COMMIT = 0x1000
-MEM_PRIVATE = 0x20000
-READABLE_PAGE_PROTECTIONS = {0x02, 0x04, 0x08, 0x20, 0x40, 0x80}
-MEMORY_READ_CHUNK_SIZE = 1 * 1024 * 1024
-MAX_REGION_SIZE = 200 * 1024 * 1024
-SCAN_TIMEOUT_SECONDS = 120
+# SQLite 与微信 V4 加密相关常量
+PAGE_SIZE = 4096              # SQLite 默认页大小
+KEY_SIZE = 32                 # 256 位密钥长度
+SALT_SIZE = 16                # 盐值长度
+RESERVE_SIZE = 80             # 每页保留字节数（用于 HMAC）
+WECHAT_V4_ROUND_COUNT = 256000   # SQLCipher V4 KDF 迭代轮数
+PROCESS_VM_READ = 0x0010      # 进程读内存权限
+PROCESS_QUERY_INFORMATION = 0x0400   # 进程查询信息权限
+MEM_COMMIT = 0x1000           # 已提交内存
+MEM_PRIVATE = 0x20000         # 私有内存
+READABLE_PAGE_PROTECTIONS = {0x02, 0x04, 0x08, 0x20, 0x40, 0x80}   # 可读页保护标志集
+MEMORY_READ_CHUNK_SIZE = 1 * 1024 * 1024    # 单次读内存块大小（1MB）
+MAX_REGION_SIZE = 200 * 1024 * 1024         # 单个内存区域最大扫描字节数
+SCAN_TIMEOUT_SECONDS = 120                  # 扫描超时
+# 密钥指针结构特征正则：定位微信内存中存放 DB Key 指针的结构
 KEY_POINTER_STRUCTURE = re.compile(
     b"(.{6}\\x00\\x00)"
     b"\\x00{8}\\x20\\x00{7}(.{8})",
     re.DOTALL,
 )
+# 64 位十六进制密钥（ASCII 形式）正则
 HEX_KEY_ASCII = re.compile(
     rb"(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])"
 )
+# 64 位十六进制密钥（UTF-16 形式）正则
 HEX_KEY_UTF16 = re.compile(
     rb"(?<![0-9a-fA-F]\x00)((?:[0-9a-fA-F]\x00){64})"
     rb"(?![0-9a-fA-F]\x00)"
 )
+# 96 位十六进制密钥+盐（ASCII 形式）正则
 HEX_KEY_SALT_ASCII = re.compile(
     rb"(?<![0-9a-fA-F])([0-9a-fA-F]{96})(?![0-9a-fA-F])"
 )
+# 96 位十六进制密钥+盐（UTF-16 形式）正则
 HEX_KEY_SALT_UTF16 = re.compile(
     rb"(?<![0-9a-fA-F]\x00)((?:[0-9a-fA-F]\x00){96})"
     rb"(?![0-9a-fA-F]\x00)"
 )
+# 数据库文件路径关键字正则，用于在内存中定位微信数据库相关区域
 DB_PATH_KEYWORD = re.compile(
     rb"(message_\d+\.db|session\.db|contact\.db|favorite\.db|head_image\.db|"
     rb"MicroMsg|db_storage|MsgDB|HardLink)",
     re.IGNORECASE,
 )
 
-SQLITE_HEADER = b"SQLite format 3\x00"
+SQLITE_HEADER = b"SQLite format 3\x00"   # SQLite 文件头标识
+# 历史回溯范围映射：7 天/30 天/全部
 BOOTSTRAP_RANGES = {
     "7d": 7 * 24 * 3600,
     "30d": 30 * 24 * 3600,
@@ -179,6 +205,7 @@ BOOTSTRAP_RANGES = {
 
 
 class MemoryBasicInformation(ctypes.Structure):
+    """Windows MEMORY_BASIC_INFORMATION 结构的 ctypes 映射，用于 VirtualQueryEx。"""
     _fields_ = [
         ("BaseAddress", ctypes.c_void_p),
         ("AllocationBase", ctypes.c_void_p),
@@ -192,10 +219,11 @@ class MemoryBasicInformation(ctypes.Structure):
 
 
 # ---------------------------------------------------------------------------
-# Memory scanning and key extraction (preserved from previous implementation)
+# 内存扫描与密钥提取（从既有实现保留）
 # ---------------------------------------------------------------------------
 
 def windows_kernel32():
+    """加载 kernel32 并设置 OpenProcess/ReadProcessMemory/VirtualQueryEx/CloseHandle 的签名。"""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = [
         ctypes.wintypes.DWORD,
@@ -224,6 +252,7 @@ def windows_kernel32():
 
 
 def find_key_pointer_candidates(memory):
+    """在内存中按密钥指针结构特征查找候选指针。"""
     pointers = []
     for match in KEY_POINTER_STRUCTURE.finditer(memory):
         capacity = int.from_bytes(match.group(2), "little")
@@ -233,6 +262,7 @@ def find_key_pointer_candidates(memory):
 
 
 def find_hex_key_candidates(memory):
+    """在内存中按 ASCII/UTF-16 形式查找 64 位十六进制密钥候选。"""
     values = []
     for match in HEX_KEY_ASCII.finditer(memory):
         values.append(bytes.fromhex(match.group(1).decode("ascii")))
@@ -273,6 +303,7 @@ def find_key_salt_candidates(memory):
 
 
 def find_db_path_offsets(memory):
+    """在内存中查找微信数据库路径关键字出现位置，用于定位相关内存区域。"""
     offsets = []
     for match in DB_PATH_KEYWORD.finditer(memory):
         offsets.append(match.start())
@@ -280,6 +311,7 @@ def find_db_path_offsets(memory):
 
 
 def find_raw_key_candidates(memory, stride=8):
+    """以 stride 步长扫描内存，找出形态合理的原始密钥候选（32 字节）。"""
     if len(memory) < KEY_SIZE:
         return []
     candidates = []
@@ -293,6 +325,7 @@ def find_raw_key_candidates(memory, stride=8):
 
 
 def verify_database_key(database_key, page):
+    """校验旧版（V3）密钥是否匹配数据库首页：通过 HMAC 比对页尾校验码。"""
     if len(database_key) != KEY_SIZE or len(page) < PAGE_SIZE:
         return False
 
@@ -318,6 +351,7 @@ def verify_database_key(database_key, page):
 
 
 def verify_database_key_v4(database_key, page):
+    """校验 SQLCipher V4 密钥是否匹配数据库首页，支持 64/80 两种保留字节长度。"""
     if len(database_key) != KEY_SIZE or len(page) < PAGE_SIZE:
         return False
 
@@ -344,6 +378,7 @@ def verify_database_key_v4(database_key, page):
 
 
 def try_verify_key(database_key, page):
+    """依次尝试 V3 与 V4 校验，任一通过即认为密钥有效。"""
     if verify_database_key(database_key, page):
         return True
     if verify_database_key_v4(database_key, page):
@@ -352,6 +387,7 @@ def try_verify_key(database_key, page):
 
 
 def derive_database_key(passphrase, page):
+    """由口令派生数据库密钥（V3，KDF 迭代），并校验是否匹配首页。"""
     if len(passphrase) != KEY_SIZE or len(page) < PAGE_SIZE:
         return None
 
@@ -366,6 +402,7 @@ def derive_database_key(passphrase, page):
 
 
 def derive_database_key_v4(passphrase, page):
+    """由口令派生数据库密钥（V4，KDF 迭代），并校验是否匹配首页。"""
     if len(passphrase) != KEY_SIZE or len(page) < PAGE_SIZE:
         return None
 
@@ -380,6 +417,7 @@ def derive_database_key_v4(passphrase, page):
 
 
 def list_weixin_process_ids():
+    """通过 tasklist 列出所有 Weixin.exe 进程，返回 (pid, 内存占用KB) 列表。"""
     result = subprocess.run(
         [
             "tasklist",
@@ -655,10 +693,11 @@ def find_wechat_v4_passphrase(candidate_values, validation_page):
 
 
 # ---------------------------------------------------------------------------
-# Database discovery, key derivation, and decryption
+# 数据库发现、密钥派生与解密
 # ---------------------------------------------------------------------------
 
 def collect_database_pages(database_root):
+    """遍历 database_root 下所有 .db 文件，读取首页（前 PAGE_SIZE 字节）用于后续密钥校验。"""
     pages = []
     for root, _, files in os.walk(database_root):
         for filename in files:
@@ -691,6 +730,7 @@ def normalize_database_root(path):
 
 
 def choose_validation_page(database_pages):
+    """按优先顺序选择用于校验密钥的数据库首页（收藏/头像/会话/联系人/消息）。"""
     preferred_paths = (
         "favorite/favorite_fts.db",
         "head_image/head_image.db",
@@ -934,6 +974,7 @@ def find_key_from_candidates(candidate_values, validation_page):
 
 
 def has_required_database_keys(database_keys):
+    """判断密钥集合是否包含必需的数据库（会话/联系人/至少一个消息库）。"""
     normalized_paths = {path.lower() for path in database_keys}
     return (
         "session/session.db" in normalized_paths
@@ -946,6 +987,7 @@ def has_required_database_keys(database_keys):
 
 
 def write_json_atomically(path, value):
+    """原子写入 JSON 文件：先写临时文件再替换，避免半截写入。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary_path = f"{path}.tmp"
     with open(temporary_path, "w", encoding="utf-8") as output:
@@ -954,18 +996,18 @@ def write_json_atomically(path, value):
 
 
 # ---------------------------------------------------------------------------
-# SQLCipher V4 page decryption (self-contained, no wechat_cli dependency)
+# SQLCipher V4 数据页解密（自包含，不依赖 wechat_cli）
 # ---------------------------------------------------------------------------
 
 def decrypt_database_page(page, database_key, page_number, reserve_size=RESERVE_SIZE):
-    """Decrypt one SQLCipher V4 page and return a 4096-byte plaintext page.
+    """解密单个 SQLCipher V4 数据页，返回 4096 字节的明文页。
 
-    Page layout (reserve=80):
-      page 1: salt(16) + ciphertext(4000) + iv(16) + hmac(64)
-      page N: ciphertext(4016) + iv(16) + hmac(64)
+    页面布局（reserve=80）：
+      第 1 页：salt(16) + 密文(4000) + iv(16) + hmac(64)
+      第 N 页：密文(4016) + iv(16) + hmac(64)
 
-    The plaintext page is rebuilt as a standard 4096-byte SQLite page with
-    the reserve area zeroed so that SQLite reads it as a normal file.
+    明文页被重建为标准 4096 字节 SQLite 页，保留区清零，
+    以便 SQLite 按普通文件读取。
     """
     if len(page) != PAGE_SIZE:
         return None
@@ -1587,9 +1629,9 @@ def query_messages_from_shard(
 
 
 def read_messages(decrypted_root, start_timestamp, end_timestamp=None, limit=None):
-    """Read all messages across sessions and shards since *start_timestamp*.
+    """读取自 start_timestamp 起的所有消息（跨会话与分片库）。
 
-    Returns (messages, max_timestamp, diagnostics).
+    返回 (messages, max_timestamp, diagnostics)。
     """
     diagnostics = {
         "sessions": 0,
@@ -1651,10 +1693,11 @@ def read_messages(decrypted_root, start_timestamp, end_timestamp=None, limit=Non
 
 
 # ---------------------------------------------------------------------------
-# Offset and bootstrap management
+# 偏移量与回溯范围管理
 # ---------------------------------------------------------------------------
 
 def read_offset(initial_lookback_seconds):
+    """从环境变量读取上次偏移量；缺失则回溯到 initial_lookback_seconds 前。"""
     raw_offset = os.environ.get("WECHAT_DASHBOARD_OFFSET", "").strip()
     try:
         return max(0, int(raw_offset))
@@ -1663,16 +1706,21 @@ def read_offset(initial_lookback_seconds):
 
 
 def bootstrap_lookback_seconds(value):
+    """把回溯范围标识（7d/30d/all）解析为秒数，默认 30 天。"""
     if not value:
         return 30 * 24 * 3600
     return BOOTSTRAP_RANGES.get(value, 30 * 24 * 3600)
 
 
 # ---------------------------------------------------------------------------
-# Init command (fixed: no more direct_database_keys reference; staged output)
+# 初始化命令（修复版：不再引用 direct_database_keys；分阶段输出）
 # ---------------------------------------------------------------------------
 
 def initialize_local_reader(args):
+    """初始化本地读取器：发现数据库、提取/派生密钥、解密全部数据库并写出 keys.json。
+
+    整个过程分阶段记录状态，便于上层追踪进度与诊断失败原因。
+    """
     stages = []
     started_at = time.monotonic()
     database_root = normalize_database_root(args.db_dir)
@@ -1904,20 +1952,27 @@ def initialize_local_reader(args):
 
 
 # ---------------------------------------------------------------------------
-# Capture command (self-contained, no wechat_cli dependency)
+# 采集命令（自包含，不依赖 wechat_cli）
 # ---------------------------------------------------------------------------
 
 def load_config(config_path):
+    """读取 JSON 配置文件并返回字典。"""
     with open(config_path, "r", encoding="utf-8") as config_file:
         return json.load(config_file)
 
 
 def load_keys(keys_path):
+    """读取 keys.json（含各数据库密钥与盐）。"""
     with open(keys_path, "r", encoding="utf-8") as keys_file:
         return json.load(keys_file)
 
 
 def capture(args):
+    """采集命令：解密变更数据库并按时间窗口/偏移读取消息，输出 JSON 结果。
+
+    支持增量（基于上次偏移）与分页（显式时间戳/offset/limit）两种模式。
+    输出包含 stages 进度、nextOffset、totalMessages 与 messages 列表。
+    """
     stages = []
     config = load_config(args.config)
     database_root = config["db_dir"]
@@ -1932,7 +1987,7 @@ def capture(args):
         {"stage": "keys", "status": "loaded", "key_count": len(keys)}
     )
 
-    # Decrypt changed databases.
+    # 解密发生变更的数据库
     decrypt_diag = decrypt_all_databases(database_root, decrypted_root, keys)
     stages.append(
         {
@@ -1946,8 +2001,8 @@ def capture(args):
         }
     )
 
-    # Determine the query time window. By default this remains incremental and
-    # offset-driven. Explicit timestamps are used by the WPF paged message view.
+    # 确定查询时间窗口。默认采用增量、偏移驱动；
+    # 当显式指定时间戳时，用于 WPF 分页消息视图。
     if args.start_timestamp is not None:
         last_offset = args.start_timestamp
         query_start = max(0, args.start_timestamp)
@@ -1971,7 +2026,7 @@ def capture(args):
         }
     )
 
-    # Read messages.
+    # 读取消息
     messages, max_timestamp, read_diag = read_messages(
         decrypted_root,
         query_start,
@@ -1981,6 +2036,7 @@ def capture(args):
     total_messages = len(messages)
     result_offset = max(0, args.offset)
     if paged_query:
+        # 分页模式：按 offset/limit 切片
         if args.limit > 0:
             result_messages = messages[result_offset : result_offset + args.limit]
         else:
@@ -2015,6 +2071,7 @@ def capture(args):
 
 
 def build_parser():
+    """构建命令行参数解析器，注册 capture/init/extract-key 子命令。"""
     parser = argparse.ArgumentParser(prog="wechat-local-reader")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2055,6 +2112,7 @@ def build_parser():
 
 
 def main():
+    """程序入口：解析命令行参数并分发到对应子命令；异常时输出到 stderr 并返回 1。"""
     args = build_parser().parse_args()
     try:
         args.handler(args)

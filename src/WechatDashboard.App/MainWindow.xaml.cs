@@ -16,37 +16,58 @@ using WechatDashboard.Infrastructure.Persistence;
 
 namespace WechatDashboard.App;
 
+/// <summary>
+/// 应用主窗口：承担消息看板的核心交互与编排职责。
+/// 职责包括：初始化 SQLite 数据库、加载/刷新消息流与待办、微信本地库读取器初始化、
+/// 实时监听循环、采集源设置管理、用户别名维护、可见窗口扫描诊断等。
+/// 采用 MVVM 风格：本类既是 View 的 code-behind，也充当简易 ViewModel，
+/// 通过 INotifyPropertyChanged 向 XAML 绑定推送状态变更。
+/// </summary>
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
+    // 数据库文件路径
     private readonly string _databasePath;
+    // 数据库初始化器（建表/建索引）
     private readonly SqliteDatabaseInitializer _databaseInitializer;
+    // 各仓储依赖
     private readonly SqliteMessageRepository _messageRepository;
     private readonly SqliteTodoRepository _todoRepository;
     private readonly SqliteProcessingOffsetRepository _offsetRepository;
     private readonly SqliteCaptureSourceSettingsRepository _settingsRepository;
     private readonly SqliteUserAliasRepository _aliasRepository;
+    // JSONL 采集收件箱路径
     private readonly string _captureInboxPath;
+    // 当前生效的 @我 别名集合（默认兜底）
     private IReadOnlyList<string> _currentAliases = DefaultMentionAliases.All;
+    // 微信本地读取器服务
     private readonly WeChatLocalReaderService _readerService;
+    // 采集并发控制信号量，避免实时循环与手动采集重叠
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
+    // 实时采集间隔
     private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
     private const int DefaultWeChatMessagePageSize = 50;
     private const int DefaultMessageStreamPageSize = 50;
 
+    // 实时监听取消令牌
     private CancellationTokenSource? _liveCaptureCts;
+    // 实时监听后台任务
     private Task? _liveCaptureTask;
 
+    // 顶部摘要文本
     private string _summaryText = "加载中";
+    // 监听状态文本
     private string _listenerStatusText = "微信监听未启动";
     private int _todayMessageCount;
     private int _mentionCount;
     private int _pendingTodoCount;
     private int _highPriorityTodoCount;
+    // 微信消息分页状态
     private int _wechatMessagePageNumber = 1;
     private int _wechatMessagePageSize = DefaultWeChatMessagePageSize;
     private int _wechatMessageTotalCount;
     private string _wechatMessagePageText = "第 0/0 页，共 0 条";
     private string _wechatMessageStatusText = "默认读取当天微信消息。请先提取 DB Key 并初始化本地库。";
+    // 消息流分页状态
     private int _messageStreamPageNumber = 1;
     private int _messageStreamPageSize = DefaultMessageStreamPageSize;
     private int _messageStreamTotalCount;
@@ -56,6 +77,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         InitializeComponent();
 
+        // 数据库文件位于 tools/result/data 目录下
         _databasePath = Path.Combine(
             ProjectToolPaths.DataDirectory,
             "wechat-dashboard.db");
@@ -70,9 +92,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;
+        // 设置数据上下文为本窗口，使 XAML 绑定生效
         DataContext = this;
     }
 
+    // 属性变更通知事件，供 WPF 绑定监听
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public string DatabasePath { get; }
@@ -139,22 +163,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         private set => SetField(ref _messageStreamStatusText, value);
     }
 
+    // 待办列表（UI 绑定）
     public ObservableCollection<TodoRow> Todos { get; } = new();
 
+    // 消息流列表（UI 绑定）
     public ObservableCollection<MessageRow> Messages { get; } = new();
 
+    // 微信原生消息列表（UI 绑定）
     public ObservableCollection<WeChatMessageRow> WeChatMessages { get; } = new();
 
+    // 项目汇总列表（UI 绑定）
     public ObservableCollection<ProjectSummaryRow> ProjectSummaries { get; } = new();
 
+    // 采集诊断列表（UI 绑定）
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
 
+    // 窗口快照列表（UI 绑定）
     public ObservableCollection<WindowSnapshotRow> WindowSnapshots { get; } = new();
 
+    // 采集源设置列表（UI 绑定）
     public ObservableCollection<CaptureSourceSettingRow> CaptureSourceSettings { get; } = new();
 
+    // 用户别名列表（UI 绑定）
     public ObservableCollection<UserAliasRow> Aliases { get; } = new();
 
+    /// <summary>窗口加载完成：初始化数据库、加载采集源设置，并在读取器就绪时读取当天消息。</summary>
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await InitializeAndRefreshAsync(seedIfEmpty: true);
@@ -165,16 +198,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>点击"刷新"按钮：重新初始化并刷新（不播种示例数据）。</summary>
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         await InitializeAndRefreshAsync(seedIfEmpty: false);
     }
 
+    /// <summary>点击"读取当天微信消息"按钮：必要时初始化读取器后读取首页。</summary>
     private async void LoadTodayWeChatMessagesButton_Click(object sender, RoutedEventArgs e)
     {
         await LoadTodayWeChatMessagesAsync(1, ensureInitialized: true);
     }
 
+    /// <summary>微信消息上一页：已是首页时给出提示。</summary>
     private async void PreviousWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_wechatMessagePageNumber <= 1)
@@ -186,6 +222,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadTodayWeChatMessagesAsync(_wechatMessagePageNumber - 1, ensureInitialized: true);
     }
 
+    /// <summary>微信消息下一页：已是末页时给出提示。</summary>
     private async void NextWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_wechatMessagePageNumber >= CalculateWeChatMessagePageCount(_wechatMessageTotalCount))
@@ -197,6 +234,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadTodayWeChatMessagesAsync(_wechatMessagePageNumber + 1, ensureInitialized: true);
     }
 
+    /// <summary>跳到首页。</summary>
     private async void FirstWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_wechatMessagePageNumber <= 1)
@@ -208,6 +246,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadTodayWeChatMessagesAsync(1, ensureInitialized: true);
     }
 
+    /// <summary>跳到末页。</summary>
     private async void LastWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
     {
         var pageCount = CalculateWeChatMessagePageCount(_wechatMessageTotalCount);
@@ -220,6 +259,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadTodayWeChatMessagesAsync(pageCount, ensureInitialized: true);
     }
 
+    /// <summary>跳转到指定页码（解析输入框的页号）。</summary>
     private async void GoToWeChatMessagesPageButton_Click(object sender, RoutedEventArgs e)
     {
         var requestedPage = ReadRequestedWeChatMessagePage();
@@ -231,6 +271,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadTodayWeChatMessagesAsync(requestedPage.Value, ensureInitialized: true);
     }
 
+    /// <summary>每页条数变化：尽量保持当前可视行，重新计算页码并刷新。</summary>
     private async void WeChatMessagePageSizeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var selectedPageSize = ReadSelectedWeChatMessagePageSize();
@@ -239,11 +280,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        // 保留当前首行所在页，避免跳回第一页
         var firstRowIndex = Math.Max(0, (_wechatMessagePageNumber - 1) * _wechatMessagePageSize);
         _wechatMessagePageSize = selectedPageSize;
         var targetPage = firstRowIndex / _wechatMessagePageSize + 1;
         UpdateWeChatMessagePagingText();
 
+        // 窗口尚未加载完成则不触发查询
         if (!IsLoaded)
         {
             return;
@@ -258,14 +301,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadTodayWeChatMessagesAsync(targetPage, ensureInitialized: true);
     }
 
+    /// <summary>播种示例消息用于首次体验。</summary>
     private async void SeedButton_Click(object sender, RoutedEventArgs e)
     {
         await SeedSampleMessagesAsync();
         await RefreshAsync();
     }
 
+    /// <summary>手动采集：必要时先初始化读取器，再执行一次采集并刷新。</summary>
     private async void CaptureButton_Click(object sender, RoutedEventArgs e)
     {
+        // 读取器未初始化但可用时，先尝试初始化
         if (!_readerService.IsInitialized && _readerService.IsAvailable)
         {
             ApplyBootstrapRange();
@@ -291,6 +337,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>提取微信 DB Key：提示用户 5 分钟内重新登录微信。</summary>
     private async void ExtractDatabaseKeyButton_Click(object sender, RoutedEventArgs e)
     {
         SummaryText = "正在自动提取微信 DB Key。请在 5 分钟内在微信里重新登录，不要关闭微信进程...";
@@ -310,11 +357,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
+            // 无论成功失败都恢复按钮可用
             ExtractDatabaseKeyButton.IsEnabled = true;
             InitLocalDatabaseButton.IsEnabled = true;
         }
     }
 
+    /// <summary>初始化微信本地数据库读取器。</summary>
     private async void InitLocalDatabaseButton_Click(object sender, RoutedEventArgs e)
     {
         if (!_readerService.IsAvailable)
@@ -347,6 +396,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>从 UI 控件把引导参数同步到读取器服务。</summary>
     private void ApplyBootstrapRange()
     {
         if (BootstrapRangeComboBox?.SelectedItem is ComboBoxItem item &&
@@ -360,6 +410,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _readerService.ExternalKeyFile = ExternalKeyFileTextBox?.Text;
     }
 
+    /// <summary>启动微信实时监听循环。</summary>
     private void StartWeChatListenerButton_Click(object sender, RoutedEventArgs e)
     {
         if (_liveCaptureTask is { IsCompleted: false })
@@ -373,11 +424,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ListenerStatusText = $"微信监听运行中，间隔 {_liveCaptureInterval.TotalSeconds:0} 秒";
     }
 
+    /// <summary>停止微信实时监听。</summary>
     private async void StopWeChatListenerButton_Click(object sender, RoutedEventArgs e)
     {
         await StopLiveCaptureAsync();
     }
 
+    /// <summary>扫描微信可见窗口并填充快照列表。</summary>
     private async void ScanWeChatWindowsButton_Click(object sender, RoutedEventArgs e)
     {
         var service = new WindowCaptureDiagnosticsService(CreateWindowTextSnapshotProvider());
@@ -394,17 +447,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"扫描到 {rows.Count} 个微信可见窗口快照";
     }
 
+    /// <summary>窗口关闭时停止监听，避免后台任务泄漏。</summary>
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
         await StopLiveCaptureAsync();
     }
 
+    /// <summary>初始化数据库并刷新；seedIfEmpty 控制首次空库时是否播种示例。</summary>
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
     {
         await _databaseInitializer.InitializeAsync(CancellationToken.None);
         await LoadUserAliasesAsync();
         if (seedIfEmpty)
         {
+            // 空库时播种示例，便于首次体验
             var existingMessages = await _messageRepository.GetRecentAsync(1, CancellationToken.None);
             if (existingMessages.Count == 0)
             {
@@ -415,13 +471,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await RefreshAsync();
     }
 
+    /// <summary>
+    /// 刷新整个看板：从仓储重新读取最近消息、待办、采集源状态、汇总数据，
+    /// 并重新计算各 Tab 的分页文本与顶部摘要。
+    /// 该方法会触发多次数据库查询，UI 变更通过数据绑定自动反映。
+    /// </summary>
     private async Task RefreshAsync()
     {
+        // 取最近 100 条入库消息用于首页展示与摘要统计
         var recentMessages = await _messageRepository.GetRecentAsync(100, CancellationToken.None);
+        // 取所有未完成待办，用于待办列表与项目汇总
         var pendingTodos = await _todoRepository.GetPendingAsync(CancellationToken.None);
+        // 采集源：微信本地数据库（基于 wechat-local-reader 解密）
         var localDatabaseSource = CaptureAdapterFactory.CreateWeChatLocalDatabaseSource(_readerService);
         var localDatabaseConfigPath = CaptureAdapterFactory.GetWeChatLocalDatabaseConfigPath();
+        // 微信数据目录（db_storage），用于初始化本地数据库采集源
         var dataDir = WeChatDataDirectoryLocator.Locate();
+        // 计算本地数据库采集源的状态文案
         var localDbStatus = localDatabaseSource.IsEnabled ? "已就绪"
             : _readerService.IsAvailable ? (_readerService.LastError ?? "等待初始化")
             : "未安装";
@@ -433,6 +499,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     ? "未检测到微信数据目录，请确认微信正在运行"
                     : localDatabaseSource.Location;
 
+        // 待办列表绑定数据
         Replace(Todos, pendingTodos.Select(todo => new TodoRow(
             todo.Id,
             todo.Priority.ToString(),
@@ -441,6 +508,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             todo.Title,
             todo.SourceMessageId?.ToString() ?? "")));
 
+        // 项目汇总：按项目分组统计待办数量与高优先级数量
         Replace(ProjectSummaries, pendingTodos
             .GroupBy(todo => ProjectName(todo.ProjectId))
             .Select(group => new ProjectSummaryRow(
@@ -448,6 +516,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 group.Count(),
                 group.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1))));
 
+        // 采集诊断列表：展示各采集源的可用性与状态
         Replace(Diagnostics, new[]
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
@@ -465,20 +534,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
 
+        // 顶部摘要统计：今日消息数、@我数、待办理数、高优先级待办数
         TodayMessageCount = recentMessages.Count(message => message.SentAt.LocalDateTime.Date == DateTime.Today);
         MentionCount = recentMessages.Count(message => message.IsMentionMe);
         PendingTodoCount = pendingTodos.Count;
         HighPriorityTodoCount = pendingTodos.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1);
 
+        // 刷新消息流分页（强制重新计算总数）
         await LoadMessageStreamPageAsync(_messageStreamPageNumber, refreshCount: true);
         SummaryText = $"消息 {_messageStreamTotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
     }
 
+    /// <summary>重载消息流分页（默认不刷新总数）。</summary>
     private async Task LoadMessageStreamPageAsync(int pageNumber)
     {
         await LoadMessageStreamPageAsync(pageNumber, refreshCount: false);
     }
 
+    /// <summary>
+    /// 加载消息流分页数据。
+    /// refreshCount=true 时强制重新查询总数；否则复用已知总数以减少 COUNT(*) 查询开销。
+    /// 处理边界情况：页码越界自动回退到末页。
+    /// </summary>
     private async Task LoadMessageStreamPageAsync(int pageNumber, bool refreshCount)
     {
         var safePage = Math.Max(1, pageNumber);
@@ -514,6 +591,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : $"已加载本页 {page.Messages.Count} 条消息。";
     }
 
+    /// <summary>消息流跳到首页：已是首页时给出提示。</summary>
     private async void FirstMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_messageStreamPageNumber <= 1)
@@ -525,6 +603,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadMessageStreamPageAsync(1);
     }
 
+    /// <summary>消息流上一页：已是首页时给出提示。</summary>
     private async void PreviousMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_messageStreamPageNumber <= 1)
@@ -536,6 +615,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadMessageStreamPageAsync(_messageStreamPageNumber - 1);
     }
 
+    /// <summary>消息流下一页：已是末页时给出提示。</summary>
     private async void NextMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_messageStreamPageNumber >= CalculateMessageStreamPageCount(_messageStreamTotalCount))
@@ -547,6 +627,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadMessageStreamPageAsync(_messageStreamPageNumber + 1);
     }
 
+    /// <summary>消息流跳到末页：已是末页时给出提示。</summary>
     private async void LastMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
     {
         var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
@@ -559,6 +640,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadMessageStreamPageAsync(pageCount);
     }
 
+    /// <summary>消息流跳转到指定页码（解析输入框的页号）。</summary>
     private async void GoToMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
     {
         var requestedPage = ReadRequestedMessageStreamPage();
@@ -570,6 +652,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadMessageStreamPageAsync(requestedPage.Value);
     }
 
+    /// <summary>消息流每页条数变化：保留当前首行所在页，重新计算页码并刷新。</summary>
     private async void MessageStreamPageSizeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var selectedPageSize = ReadSelectedMessageStreamPageSize();
@@ -591,11 +674,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadMessageStreamPageAsync(targetPage);
     }
 
+    /// <summary>根据总条数与每页大小计算消息流总页数，至少为 1。</summary>
     private int CalculateMessageStreamPageCount(int totalCount)
     {
         return Math.Max(1, (int)Math.Ceiling(totalCount / (double)_messageStreamPageSize));
     }
 
+    /// <summary>从下拉框读取用户选择的消息流每页条数，限制在 1-200 之间。</summary>
     private int ReadSelectedMessageStreamPageSize()
     {
         if (MessageStreamPageSizeComboBox?.SelectedItem is ComboBoxItem item)
@@ -610,6 +695,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return _messageStreamPageSize;
     }
 
+    /// <summary>读取页码输入框并校验，返回 1 到总页数之间的合法页码；非法时给出提示并返回 null。</summary>
     private int? ReadRequestedMessageStreamPage()
     {
         var rawPage = MessageStreamPageNumberTextBox?.Text?.Trim();
@@ -623,6 +709,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return Math.Clamp(requestedPage, 1, pageCount);
     }
 
+    /// <summary>更新消息流分页文本与页码输入框，反映当前页/总页数/总条数/每页条数。</summary>
     private void UpdateMessageStreamPagingText()
     {
         var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
@@ -633,6 +720,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 加载当天微信消息分页。
+    /// ensureInitialized=true 时若读取器未初始化则自动尝试初始化（耗时操作），
+    /// ensureInitialized=false 时仅提示用户先初始化，不发起耗时操作。
+    /// </summary>
     private async Task LoadTodayWeChatMessagesAsync(int pageNumber, bool ensureInitialized)
     {
         if (!_readerService.IsAvailable)
@@ -697,11 +789,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"今天微信消息 {page.TotalCount} 条，当前第 {_wechatMessagePageNumber}/{CalculateWeChatMessagePageCount(page.TotalCount)} 页";
     }
 
+    /// <summary>根据总条数与每页大小计算总页数，至少为 1。</summary>
     private int CalculateWeChatMessagePageCount(int totalCount)
     {
         return Math.Max(1, (int)Math.Ceiling(totalCount / (double)_wechatMessagePageSize));
     }
 
+    /// <summary>从下拉框读取用户选择的微信消息每页条数，限制在 1-200 之间。</summary>
     private int ReadSelectedWeChatMessagePageSize()
     {
         if (WeChatMessagePageSizeComboBox?.SelectedItem is ComboBoxItem item)
@@ -716,6 +810,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return _wechatMessagePageSize;
     }
 
+    /// <summary>读取页码输入框并校验，返回 1 到总页数之间的合法页码；非法时给出提示并返回 null。</summary>
     private int? ReadRequestedWeChatMessagePage()
     {
         var rawPage = WeChatMessagePageNumberTextBox?.Text?.Trim();
@@ -729,6 +824,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return Math.Clamp(requestedPage, 1, pageCount);
     }
 
+    /// <summary>更新微信消息分页文本与页码输入框，反映当前页/总页数/总条数/每页条数。</summary>
     private void UpdateWeChatMessagePagingText()
     {
         var pageCount = CalculateWeChatMessagePageCount(_wechatMessageTotalCount);
@@ -739,6 +835,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 播种示例消息：构造 3 条带 @我 与项目关键词的样本消息，
+    /// 走完 @我检测、项目分类、紧急度评分、待办创建的完整流程，便于首次体验与调试。
+    /// </summary>
     private async Task SeedSampleMessagesAsync()
     {
         var mentionDetector = new MentionDetector(_currentAliases);
@@ -773,6 +873,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 从仓储加载采集源设置，并与默认采集源合并：
+    /// 已保存的设置覆盖默认开关，未保存的采用默认值。结果填充到 UI 列表。
+    /// </summary>
     private async Task LoadCaptureSourceSettingsAsync()
     {
         var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
@@ -798,6 +902,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(CaptureSourceSettings, rows);
     }
 
+    /// <summary>
+    /// 加载用户别名：若库为空则播种默认别名集合。
+    /// 同时更新当前生效的 @我 别名集合与 UI 列表。
+    /// </summary>
     private async Task LoadUserAliasesAsync()
     {
         var aliases = await _aliasRepository.GetAllAsync(CancellationToken.None);
@@ -815,6 +923,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(Aliases, aliases.Select(alias => new UserAliasRow(alias.Id, alias.Alias)));
     }
 
+    /// <summary>保存采集源设置：清空旧设置后批量写入当前 UI 列表中的设置项。</summary>
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var now = DateTimeOffset.Now;
@@ -833,6 +942,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"采集源设置已保存，共 {settings.Count} 个源";
     }
 
+    /// <summary>添加别名：校验非空后保存并刷新别名列表与当前生效集合。</summary>
     private async void AddAliasButton_Click(object sender, RoutedEventArgs e)
     {
         var alias = NewAliasTextBox?.Text?.Trim();
@@ -851,6 +961,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"已添加别名「{alias}」，新采集将按更新后的别名识别 @我。";
     }
 
+    /// <summary>删除别名：需先在列表中选中一行，删除后刷新别名集合。</summary>
     private async void DeleteAliasButton_Click(object sender, RoutedEventArgs e)
     {
         if (AliasesGrid?.SelectedItem is not UserAliasRow row)
@@ -864,6 +975,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"已删除别名「{row.Alias}」。";
     }
 
+    /// <summary>
+    /// 构造消息采集管线：合并默认采集源与用户保存的开关设置，
+    /// 装配适配器、仓储、@我检测器、项目分类器、紧急度评分器等依赖。
+    /// </summary>
     private MessageCapturePipeline CreateCapturePipeline()
     {
         _readerService.ResetInitializationState();
@@ -894,6 +1009,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 priorityProjectIds: new[] { 1L, 2L }));
     }
 
+    /// <summary>
+    /// 执行一次采集：通过信号量串行化避免与实时监听循环重叠，
+    /// 确保数据库已初始化、采集收件箱目录存在，然后运行管线并返回结果。
+    /// </summary>
     private async Task<CaptureRunResult> RunCaptureOnceAsync(CancellationToken cancellationToken)
     {
         await _captureSemaphore.WaitAsync(cancellationToken);
@@ -910,6 +1029,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 实时采集后台循环：周期性执行采集，刷新 UI 状态文本与摘要。
+    /// 捕获异常后继续循环，仅取消令牌触发时退出，循环间隔由 _liveCaptureInterval 控制。
+    /// </summary>
     private async Task RunLiveCaptureLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -952,6 +1075,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 停止实时监听：取消循环令牌，等待后台任务结束，释放资源并更新状态文本。
+    /// </summary>
     private async Task StopLiveCaptureAsync()
     {
         if (_liveCaptureCts is null)
@@ -980,6 +1106,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 在 UI 线程刷新看板：若当前已在 UI 线程则直接刷新，
+    /// 否则通过 Dispatcher 切换到 UI 线程后刷新。
+    /// </summary>
     private async Task RefreshOnUiThreadAsync()
     {
         if (Dispatcher.CheckAccess())
@@ -992,6 +1122,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await refreshTask;
     }
 
+    /// <summary>构造窗口文本快照提供者：组合 UI 自动化读取器与屏幕 OCR 读取器。</summary>
     private static IWindowTextSnapshotProvider CreateWindowTextSnapshotProvider()
     {
         return new WindowsOcrWindowTextSnapshotProvider(
@@ -999,6 +1130,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new WindowsScreenOcrReader());
     }
 
+    /// <summary>构造微信可见窗口采集选项：匹配标题含"微信"的窗口，排除本看板自身。</summary>
     private static WindowTextCaptureOptions CreateWeChatWindowTextOptions()
     {
         return new WindowTextCaptureOptions(
@@ -1012,6 +1144,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         };
     }
 
+    /// <summary>构造示例消息：按给定偏移分钟数设置发送时间，生成唯一 SourceMessageKey。</summary>
     private static Message CreateSampleMessage(string key, string chatName, string senderName, string content, int minutesOffset)
     {
         var sentAt = DateTimeOffset.Now.AddMinutes(minutesOffset);
@@ -1029,6 +1162,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             IsMentionMe: false);
     }
 
+    /// <summary>根据项目 ID 返回项目名称，未匹配返回"未分类"。</summary>
     private static string ProjectName(long? projectId)
     {
         return projectId switch
@@ -1040,6 +1174,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         };
     }
 
+    /// <summary>清空集合并依次追加新项，用于 ObservableCollection 的批量替换。</summary>
     private static void Replace<T>(ObservableCollection<T> collection, IEnumerable<T> items)
     {
         collection.Clear();
@@ -1049,6 +1184,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 设置属性字段并在值变更时触发 PropertyChanged 事件，
+    /// 利用 [CallerMemberName] 自动推断属性名，供 WPF 数据绑定监听。
+    /// </summary>
     private void SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value))
@@ -1061,25 +1200,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 }
 
+/// <summary>待办列表行数据：用于 UI 绑定展示单条待办。</summary>
 public sealed record TodoRow(long Id, string Priority, string Status, string Project, string Title, string SourceMessageId);
 
+/// <summary>消息流列表行数据：用于 UI 绑定展示单条入库消息。</summary>
 public sealed record MessageRow(string SentAt, string ChatName, string SenderName, string IsMentionMe, string Content);
 
+/// <summary>微信消息列表行数据：用于 UI 绑定展示单条微信原生消息。</summary>
 public sealed record WeChatMessageRow(string Content, string ChatName, string SenderName);
 
+/// <summary>项目汇总行数据：按项目聚合的待办数量与高优先级数量。</summary>
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
 
+/// <summary>采集诊断行数据：展示各采集适配器的状态与最近成功时间。</summary>
 public sealed record DiagnosticRow(string Adapter, string Status, string LastSuccessAt, string Detail);
 
+/// <summary>窗口快照行数据：展示扫描到的微信可见窗口文本快照。</summary>
 public sealed record WindowSnapshotRow(string WindowTitle, string CapturedAt, int TextLength, string Preview);
 
+/// <summary>采集源设置行数据：用于 UI 编辑各采集源的启用状态。</summary>
 public sealed record CaptureSourceSettingRow
 {
+    // 采集源标识（如 WeChat.LocalDatabase）
     public string Source { get; set; } = "";
+    // 显示名称
     public string DisplayName { get; set; } = "";
+    // 采集源类型
     public string Kind { get; set; } = "";
+    // 采集源位置/路径
     public string Location { get; set; } = "";
+    // 是否启用
     public bool IsEnabled { get; set; }
 }
 
+/// <summary>用户别名行数据：用于 UI 展示与删除操作。</summary>
 public sealed record UserAliasRow(long Id, string Alias);

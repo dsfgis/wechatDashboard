@@ -1,3 +1,13 @@
+"""wechat_local_reader 模块的单元测试。
+
+测试覆盖三大核心能力：
+1. 微信密钥提取（WeChatKeyExtractionTests）：内存扫描候选定位、密钥派生与校验。
+2. SQLCipher V4 数据库读取（WeChatV4SchemaReaderTests）：页面解密、SQLite 结构重建、消息查询。
+3. 采集命令流程（WeChatCaptureCommandTests）：capture 子命令的输出格式与增量偏移。
+
+测试使用桩（stub）数据与临时数据库，不依赖真实微信环境。
+"""
+
 import hashlib
 import hmac
 import io
@@ -13,6 +23,7 @@ import wechat_local_reader
 
 
 class WeChatKeyExtractionTests(unittest.TestCase):
+    """微信密钥提取相关函数的测试集。"""
     def test_find_key_pointer_candidates_reads_pointer_from_v4_stub(self):
         pointer = 0x000001D234567890
         stub = (
@@ -476,7 +487,7 @@ class WeChatKeyExtractionTests(unittest.TestCase):
 
 
 class WeChatV4SchemaReaderTests(unittest.TestCase):
-    """Tests for the self-contained V4 schema reading (no wechat_cli)."""
+    """SQLCipher V4 数据库读取与解密相关函数的测试集（不依赖 wechat_cli）。"""
 
     def test_md5_hex_lower_produces_table_suffix(self):
         result = wechat_local_reader.md5_hex_lower("test_user")
@@ -1009,7 +1020,7 @@ class WeChatV4SchemaReaderTests(unittest.TestCase):
             self.assertEqual(1700000500, max_ts)
 
 class WeChatCaptureCommandTests(unittest.TestCase):
-    """Tests for the capture command's config loading and offset handling."""
+    """capture 子命令的输出格式与增量偏移行为的测试集。"""
 
     def test_write_json_output_escapes_non_gbk_characters(self):
         stdout = io.StringIO()
