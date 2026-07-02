@@ -1430,14 +1430,18 @@ def summarize_xml_message(text, local_type):
     if appmsg is not None:
         title = xml_text(appmsg, "title")
         des = xml_text(appmsg, "des")
+        url = xml_text(appmsg, "url")
         app_type = xml_text(appmsg, "type")
-        if title and des:
-            return f"[链接] {title} - {des}"
-        if title:
-            return f"[链接] {title}"
         if app_type == "6":
             return "[文件]"
-        return "[链接]"
+        parts = ["[链接]"]
+        if title:
+            parts.append(title)
+        if des:
+            parts.append(f"- {des}")
+        if url:
+            parts.append(url)
+        return " ".join(parts) if len(parts) > 1 else "[链接]"
 
     location = root.find(".//location")
     if location is not None:

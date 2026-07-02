@@ -10,7 +10,7 @@ namespace WechatDashboard.Application.Mentions;
 public static class MessageHighlighter
 {
     private static readonly Regex UrlRegex = new(
-        @"https?://[^\s\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+(?<![.,;:!?)""'\]\}>）】》])",
+        @"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
