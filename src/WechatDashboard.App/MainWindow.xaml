@@ -242,6 +242,22 @@
                         <TextBlock Text="2. 消息中 @ 到关注的人名时，该名字会以红色粗体高亮显示" FontSize="13" Foreground="#4B5563" Margin="0,0,0,2" />
                         <TextBlock Text="3. 新采集的消息将使用更新后的名单进行匹配" FontSize="13" Foreground="#4B5563" Margin="0,0,0,2" />
                         <TextBlock Text="4. 支持中文昵称、英文名等多种格式" FontSize="13" Foreground="#4B5563" />
+
+                        <Separator Margin="0,16,0,12" />
+                        <TextBlock Text="关注群设置（只展示关注群的消息）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock Text="输入群名称，支持添加多个。添加后，消息流和微信消息将只显示关注的群。留空则显示所有群。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <TextBox x:Name="NewFollowedChatTextBox" Width="260" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入群名称" />
+                            <Button Content="添加" Click="AddFollowedChatButton_Click" Margin="0,0,8,0" Padding="16,4" />
+                            <Button Content="删除选中" Click="DeleteFollowedChatButton_Click" Padding="16,4" />
+                        </StackPanel>
+                        <DataGrid x:Name="FollowedChatsGrid" ItemsSource="{Binding FollowedChats}" Height="180" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
+                                <DataGridTextColumn Header="群名称" Binding="{Binding ChatName}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
                         <TextBlock Text="{Binding CaptureInboxPath, StringFormat=采集目录：{0}}" FontSize="13" Foreground="#9CA3AF" Margin="0,12,0,0" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>

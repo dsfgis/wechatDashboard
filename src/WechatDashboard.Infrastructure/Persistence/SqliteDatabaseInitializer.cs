@@ -166,6 +166,14 @@ public sealed class SqliteDatabaseInitializer
             UNIQUE(source, kind)
         );
 
+        -- 关注群表（只展示关注群的消息）
+        CREATE TABLE IF NOT EXISTS followed_chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
         -- 审计日志表
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
