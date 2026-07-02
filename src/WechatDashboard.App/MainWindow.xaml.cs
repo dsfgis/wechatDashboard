@@ -169,8 +169,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 消息流列表（UI 绑定）
     public ObservableCollection<MessageRow> Messages { get; } = new();
 
+    // 支持高亮的消息流列表（UI 绑定）
+    public ObservableCollection<HighlightableMessageRow> HighlightableMessages { get; } = new();
+
     // 微信原生消息列表（UI 绑定）
     public ObservableCollection<WeChatMessageRow> WeChatMessages { get; } = new();
+
+    // 支持高亮的微信消息列表（UI 绑定）
+    public ObservableCollection<HighlightableWeChatMessageRow> HighlightableWeChatMessages { get; } = new();
 
     // 项目汇总列表（UI 绑定）
     public ObservableCollection<ProjectSummaryRow> ProjectSummaries { get; } = new();
@@ -499,14 +505,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     ? "未检测到微信数据目录，请确认微信正在运行"
                     : localDatabaseSource.Location;
 
-        // 待办列表绑定数据
-        Replace(Todos, pendingTodos.Select(todo => new TodoRow(
-            todo.Id,
-            todo.Priority.ToString(),
-            todo.Status.ToString(),
-            ProjectName(todo.ProjectId),
-            todo.Title,
-            todo.SourceMessageId?.ToString() ?? "")));
+        // 待办列表绑定数据：通过 SourceMessageId 关联消息获取群名和发送时间
+        var messageLookup = recentMessages.ToDictionary(m => m.Id);
+        Replace(Todos, pendingTodos.Select(todo =>
+        {
+            // 默认使用待办创建时间
+            var sentAt = todo.CreatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+            var chatName = ProjectName(todo.ProjectId);
+
+            // 若能找到关联消息，则取消息的群名和发送时间
+            if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
+            {
+                chatName = msg.ChatName;
+                sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+            }
+
+            return new TodoRow(
+                todo.Id,
+                todo.Priority.ToString(),
+                todo.Status.ToString(),
+                chatName,
+                todo.Title,
+                todo.SourceMessageId?.ToString() ?? "",
+                sentAt);
+        }));
 
         // 项目汇总：按项目分组统计待办数量与高优先级数量
         Replace(ProjectSummaries, pendingTodos
@@ -579,12 +601,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _messageStreamPageNumber = page.PageNumber;
         _messageStreamTotalCount = page.TotalCount;
+        
+        // 创建高亮检测器
+        var mentionDetector = new MentionDetector(_currentAliases);
+        
         Replace(Messages, page.Messages.Select(message => new MessageRow(
             message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
             message.ChatName,
             message.SenderName,
             message.IsMentionMe ? "是" : "否",
             message.Content)));
+        
+        // 同时更新高亮版本的消息列表
+        Replace(HighlightableMessages, page.Messages.Select(message =>
+        {
+            var segments = WechatDashboard.Application.Mentions.MessageHighlighter.HighlightMentions(
+                message.Content,
+                mentionDetector.ExtractMentionedAliases(message.Content));
+            
+            return new HighlightableMessageRow
+            {
+                SentAt = message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+                ChatName = message.ChatName,
+                SenderName = message.SenderName,
+                IsMentionMe = message.IsMentionMe ? "是" : "否",
+                RawContent = message.Content,
+                ContentSegments = segments
+            };
+        }));
+        
         UpdateMessageStreamPagingText();
         MessageStreamStatusText = page.Messages.Count == 0
             ? "暂无消息。"
@@ -779,10 +824,32 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _wechatMessagePageNumber = page.PageNumber;
         _wechatMessageTotalCount = page.TotalCount;
+        
+        // 创建高亮检测器
+        var mentionDetector = new MentionDetector(_currentAliases);
+        
         Replace(WeChatMessages, page.Messages.Select(message => new WeChatMessageRow(
             message.Content,
             message.ChatName,
             message.SenderName)));
+        
+        // 同时更新高亮版本的微信消息列表
+        Replace(HighlightableWeChatMessages, page.Messages.Select(message =>
+        {
+            var segments = WechatDashboard.Application.Mentions.MessageHighlighter.HighlightMentions(
+                message.Content,
+                mentionDetector.ExtractMentionedAliases(message.Content));
+            
+            return new HighlightableWeChatMessageRow
+            {
+                Content = message.Content,
+                ChatName = message.ChatName,
+                SenderName = message.SenderName,
+                SentAt = message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+                ContentSegments = segments
+            };
+        }));
+        
         UpdateWeChatMessagePagingText();
         TodayMessageCount = page.TotalCount;
         WeChatMessageStatusText = $"已读取今天微信消息 {page.Messages.Count} 条，本页最多 {_wechatMessagePageSize} 条。";
@@ -1201,13 +1268,114 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 }
 
 /// <summary>待办列表行数据：用于 UI 绑定展示单条待办。</summary>
-public sealed record TodoRow(long Id, string Priority, string Status, string Project, string Title, string SourceMessageId);
+public sealed record TodoRow(long Id, string Priority, string Status, string ChatName, string Title, string SourceMessageId, string SentAt);
 
 /// <summary>消息流列表行数据：用于 UI 绑定展示单条入库消息。</summary>
 public sealed record MessageRow(string SentAt, string ChatName, string SenderName, string IsMentionMe, string Content);
 
 /// <summary>微信消息列表行数据：用于 UI 绑定展示单条微信原生消息。</summary>
 public sealed record WeChatMessageRow(string Content, string ChatName, string SenderName);
+
+/// <summary>支持富文本高亮的消息行：用于显示带 @ 高亮的消息内容。</summary>
+public sealed class HighlightableMessageRow : INotifyPropertyChanged
+{
+    private string _sentAt = "";
+    private string _chatName = "";
+    private string _senderName = "";
+    private string _isMentionMe = "";
+    private string _rawContent = "";
+    private IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> _contentSegments = Array.Empty<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment>();
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public string SentAt
+    {
+        get => _sentAt;
+        set { _sentAt = value; OnPropertyChanged(); }
+    }
+
+    public string ChatName
+    {
+        get => _chatName;
+        set { _chatName = value; OnPropertyChanged(); }
+    }
+
+    public string SenderName
+    {
+        get => _senderName;
+        set { _senderName = value; OnPropertyChanged(); }
+    }
+
+    public string IsMentionMe
+    {
+        get => _isMentionMe;
+        set { _isMentionMe = value; OnPropertyChanged(); }
+    }
+
+    public string RawContent
+    {
+        get => _rawContent;
+        set { _rawContent = value; OnPropertyChanged(); }
+    }
+
+    public IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> ContentSegments
+    {
+        get => _contentSegments;
+        set { _contentSegments = value; OnPropertyChanged(); }
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}
+
+/// <summary>支持富文本高亮的微信消息行。</summary>
+public sealed class HighlightableWeChatMessageRow : INotifyPropertyChanged
+{
+    private string _content = "";
+    private string _chatName = "";
+    private string _senderName = "";
+    private string _sentAt = "";
+    private IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> _contentSegments = Array.Empty<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment>();
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public string Content
+    {
+        get => _content;
+        set { _content = value; OnPropertyChanged(); }
+    }
+
+    public string ChatName
+    {
+        get => _chatName;
+        set { _chatName = value; OnPropertyChanged(); }
+    }
+
+    public string SentAt
+    {
+        get => _sentAt;
+        set { _sentAt = value; OnPropertyChanged(); }
+    }
+
+    public string SenderName
+    {
+        get => _senderName;
+        set { _senderName = value; OnPropertyChanged(); }
+    }
+
+    public IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> ContentSegments
+    {
+        get => _contentSegments;
+        set { _contentSegments = value; OnPropertyChanged(); }
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}
 
 /// <summary>项目汇总行数据：按项目聚合的待办数量与高优先级数量。</summary>
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
