@@ -42,6 +42,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private IReadOnlyList<string> _currentAliases = DefaultMentionAliases.All;
     // 当前生效的关注群名称集合（空列表表示不过滤）
     private IReadOnlyList<string> _currentFollowedChats = Array.Empty<string>();
+    // 关注群过滤模式：Include=只显示列表内群，Exclude=排除列表内群
+    private FollowedChatFilterMode _followedChatFilterMode = FollowedChatFilterMode.Include;
     // 微信本地读取器服务
     private readonly WeChatLocalReaderService _readerService;
     // 采集并发控制信号量，避免实时循环与手动采集重叠
@@ -589,33 +591,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task LoadMessageStreamPageAsync(int pageNumber, bool refreshCount)
     {
         var safePage = Math.Max(1, pageNumber);
+        IReadOnlyCollection<string>? chatFilter = _currentFollowedChats.Count > 0 ? _currentFollowedChats : null;
+        var include = _followedChatFilterMode == FollowedChatFilterMode.Include;
         MessagePage page;
         if (refreshCount || _messageStreamTotalCount == 0)
         {
-            page = await _messageRepository.GetPageAsync(safePage, _messageStreamPageSize, CancellationToken.None);
+            page = await _messageRepository.GetPageAsync(safePage, _messageStreamPageSize, chatFilter, include, CancellationToken.None);
         }
         else
         {
             page = await _messageRepository.GetPageWithKnownCountAsync(
-                safePage, _messageStreamPageSize, _messageStreamTotalCount, CancellationToken.None);
+                safePage, _messageStreamPageSize, _messageStreamTotalCount, chatFilter, include, CancellationToken.None);
         }
 
-        // 按关注群过滤消息（若配置了关注群）
-        var filteredMessages = page.Messages;
-        var filteredTotalCount = page.TotalCount;
-        if (_currentFollowedChats.Count > 0)
-        {
-            var chatSet = new HashSet<string>(_currentFollowedChats, StringComparer.OrdinalIgnoreCase);
-            filteredMessages = page.Messages.Where(m => chatSet.Contains(m.ChatName)).ToList();
-            // 过滤后总数需要按比例估算（近似值）
-            if (page.TotalCount > 0 && page.Messages.Count > 0)
-            {
-                var ratio = (double)filteredMessages.Count / page.Messages.Count;
-                filteredTotalCount = (int)Math.Ceiling(page.TotalCount * ratio);
-            }
-        }
-
-        var pageCount = CalculateMessageStreamPageCount(filteredTotalCount);
+        var pageCount = CalculateMessageStreamPageCount(page.TotalCount);
         if (page.Messages.Count == 0 && page.TotalCount > 0 && safePage > pageCount)
         {
             await LoadMessageStreamPageAsync(pageCount, refreshCount);
@@ -623,12 +612,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _messageStreamPageNumber = page.PageNumber;
-        _messageStreamTotalCount = filteredTotalCount;
+        _messageStreamTotalCount = page.TotalCount;
 
         // 创建高亮检测器
         var mentionDetector = new MentionDetector(_currentAliases);
 
-        Replace(Messages, filteredMessages.Select(message => new MessageRow(
+        Replace(Messages, page.Messages.Select(message => new MessageRow(
             message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
             message.ChatName,
             message.SenderName,
@@ -636,7 +625,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             message.Content)));
 
         // 同时更新高亮版本的消息列表
-        Replace(HighlightableMessages, filteredMessages.Select(message =>
+        Replace(HighlightableMessages, page.Messages.Select(message =>
         {
             var segments = WechatDashboard.Application.Mentions.MessageHighlighter.HighlightMentions(
                 message.Content,
@@ -654,9 +643,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }));
 
         UpdateMessageStreamPagingText();
-        MessageStreamStatusText = filteredMessages.Count == 0
-            ? _currentFollowedChats.Count > 0 ? "暂无关注群消息，请在关注群设置中添加群名。" : "暂无消息。"
-            : $"已加载本页 {filteredMessages.Count} 条消息。";
+        var modeText = _followedChatFilterMode == FollowedChatFilterMode.Exclude ? "排除" : "关注";
+        MessageStreamStatusText = page.Messages.Count == 0
+            ? _currentFollowedChats.Count > 0 ? $"暂无{modeText}群消息，请在关注群设置中调整群名或模式。" : "暂无消息。"
+            : $"已加载本页 {page.Messages.Count} 条消息。";
     }
 
     /// <summary>消息流跳到首页：已是首页时给出提示。</summary>
@@ -848,12 +838,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _wechatMessagePageNumber = page.PageNumber;
         _wechatMessageTotalCount = page.TotalCount;
 
+        // 将本页读取到的微信消息同步入库：去重持久化，并为 @我 的消息自动创建待办。
+        // 复用采集管线的"去重 -> 分类 -> 评分 -> 建待办"流程，SourceMessageKey 去重避免重复建待办。
+        // 处理的是本地读取器原始消息（未经过关注群过滤），与采集管线行为保持一致。
+        // 通过 _captureSemaphore 串行化，避免与实时监听循环并发写入导致重复入库/重复建待办。
+        int syncedTodos = 0;
+        int syncedPersisted = 0;
+        if (page.Messages.Count > 0)
+        {
+            await _captureSemaphore.WaitAsync(CancellationToken.None);
+            try
+            {
+                var syncPipeline = CreateCapturePipeline();
+                var syncResult = await syncPipeline.ProcessAsync(page.Messages, CancellationToken.None);
+                syncedPersisted = syncResult.PersistedCount;
+                syncedTodos = syncResult.CreatedTodoCount;
+            }
+            finally
+            {
+                _captureSemaphore.Release();
+            }
+        }
+
         // 按关注群过滤消息（若配置了关注群）
         var filteredMessages = page.Messages;
         if (_currentFollowedChats.Count > 0)
         {
             var chatSet = new HashSet<string>(_currentFollowedChats, StringComparer.OrdinalIgnoreCase);
-            filteredMessages = page.Messages.Where(m => chatSet.Contains(m.ChatName)).ToList();
+            filteredMessages = _followedChatFilterMode == FollowedChatFilterMode.Exclude
+                ? page.Messages.Where(m => !chatSet.Contains(m.ChatName)).ToList()
+                : page.Messages.Where(m => chatSet.Contains(m.ChatName)).ToList();
         }
 
         // 创建高亮检测器
@@ -883,10 +897,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         UpdateWeChatMessagePagingText();
         TodayMessageCount = filteredMessages.Count;
+        var modeText2 = _followedChatFilterMode == FollowedChatFilterMode.Exclude ? "排除" : "关注";
         WeChatMessageStatusText = filteredMessages.Count == 0
-            ? _currentFollowedChats.Count > 0 ? "暂无关注群消息，请在关注群设置中添加群名。" : "暂无消息。"
+            ? _currentFollowedChats.Count > 0 ? $"暂无{modeText2}群消息，请在关注群设置中调整群名或模式。" : "暂无消息。"
             : $"已读取今天微信消息 {filteredMessages.Count} 条。";
-        SummaryText = $"今天微信消息 {filteredMessages.Count} 条，当前第 {_wechatMessagePageNumber}/{CalculateWeChatMessagePageCount(page.TotalCount)} 页";
+        // 若有新消息入库或新待办创建，刷新待办列表与顶部摘要，使 @我 同步结果即时可见
+        if (syncedPersisted > 0 || syncedTodos > 0)
+        {
+            await RefreshAsync();
+        }
+
+        // 状态文案追加本次同步的待办数，便于用户感知 @我 消息已落入待办
+        var syncHint = syncedTodos > 0
+            ? $"（本次同步新增待办 {syncedTodos} 条）"
+            : syncedPersisted > 0
+                ? "（本次同步无新增 @我 待办）"
+                : string.Empty;
+        SummaryText = $"今天微信消息 {filteredMessages.Count} 条，当前第 {_wechatMessagePageNumber}/{CalculateWeChatMessagePageCount(page.TotalCount)} 页{syncHint}";
     }
 
     /// <summary>根据总条数与每页大小计算总页数，至少为 1。</summary>
@@ -1030,7 +1057,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         var chats = await _followedChatRepository.GetAllAsync(CancellationToken.None);
         _currentFollowedChats = chats.Select(c => c.ChatName).ToArray();
+        _followedChatFilterMode = await _followedChatRepository.GetFilterModeAsync(CancellationToken.None);
         Replace(FollowedChats, chats.Select(c => new FollowedChatRow(c.Id, c.ChatName)));
+        if (FollowedChatFilterModeCheckBox is not null)
+        {
+            FollowedChatFilterModeCheckBox.IsChecked = _followedChatFilterMode == FollowedChatFilterMode.Exclude;
+        }
     }
 
     /// <summary>添加关注群：校验非空后保存并刷新列表。</summary>
@@ -1064,6 +1096,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _followedChatRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedChatsAsync();
         SummaryText = $"已删除关注群「{row.ChatName}」。";
+    }
+
+    /// <summary>切换关注群过滤模式：勾选=排除列表内群（黑名单），未勾选=只显示列表内群（白名单）。</summary>
+    private async void FollowedChatFilterModeCheckBox_CheckedChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox cb)
+        {
+            return;
+        }
+
+        var newMode = cb.IsChecked == true ? FollowedChatFilterMode.Exclude : FollowedChatFilterMode.Include;
+        if (newMode == _followedChatFilterMode)
+        {
+            return;
+        }
+
+        _followedChatFilterMode = newMode;
+        await _followedChatRepository.SetFilterModeAsync(newMode, CancellationToken.None);
+        await LoadMessageStreamPageAsync(1, refreshCount: true);
+        SummaryText = newMode == FollowedChatFilterMode.Exclude
+            ? "已切换为排除模式：将不显示列表中的群消息。"
+            : "已切换为只显示模式：将仅显示列表中的群消息。";
     }
 
     /// <summary>保存采集源设置：清空旧设置后批量写入当前 UI 列表中的设置项。</summary>

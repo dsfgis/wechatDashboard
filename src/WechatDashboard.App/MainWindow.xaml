@@ -221,8 +221,9 @@
                         </DataGrid.Columns>
                     </DataGrid>
                 </TabItem>
-                <TabItem Header="关注@人名">
+                <TabItem Header="关注设置">
                     <Border Background="White" Padding="16">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel>
                         <TextBlock Text="关注的 @ 人名字（消息中 @ 到这些名字时会高亮显示，并标记为重点关注）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
                         <TextBlock Text="输入微信昵称或姓名，支持添加多个。添加后，消息中 @ 到这些名字时将红色高亮。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
@@ -244,8 +245,9 @@
                         <TextBlock Text="4. 支持中文昵称、英文名等多种格式" FontSize="13" Foreground="#4B5563" />
 
                         <Separator Margin="0,16,0,12" />
-                        <TextBlock Text="关注群设置（只展示关注群的消息）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
-                        <TextBlock Text="输入群名称，支持添加多个。添加后，消息流和微信消息将只显示关注的群。留空则显示所有群。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
+                        <TextBlock Text="关注群设置（按群名过滤消息）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock Text="输入群名称，支持添加多个。默认仅显示列表中的群；勾选下方复选框可切换为排除列表中的群。留空则显示所有群。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
+                        <CheckBox x:Name="FollowedChatFilterModeCheckBox" Content="排除列表中的群（黑名单模式：不显示列表内群消息）" Click="FollowedChatFilterModeCheckBox_CheckedChanged" Margin="0,0,0,12" FontSize="13" ToolTip="未勾选=只显示列表内群（白名单）；勾选=排除列表内群（黑名单）" />
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
                             <TextBox x:Name="NewFollowedChatTextBox" Width="260" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入群名称" />
                             <Button Content="添加" Click="AddFollowedChatButton_Click" Margin="0,0,8,0" Padding="16,4" />
@@ -260,6 +262,7 @@
 
                         <TextBlock Text="{Binding CaptureInboxPath, StringFormat=采集目录：{0}}" FontSize="13" Foreground="#9CA3AF" Margin="0,12,0,0" TextWrapping="Wrap" />
                     </StackPanel>
+                    </ScrollViewer>
                 </Border>
                 </TabItem>
                 <TabItem Header="采集源设置">

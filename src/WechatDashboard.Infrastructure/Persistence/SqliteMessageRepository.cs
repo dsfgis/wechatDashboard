@@ -80,7 +80,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
         return result is not null;
     }
 
-    /// <summary>获取最近 N 条消息（按采集时间倒序）。</summary>
+    /// <summary>获取最近 N 条消息（按发送时间倒序）。</summary>
     public async Task<IReadOnlyList<Message>> GetRecentAsync(int limit, CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
@@ -99,7 +99,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 captured_at,
                 is_mention_me
             FROM messages
-            ORDER BY captured_at DESC, id DESC
+            ORDER BY sent_at DESC, id DESC
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$limit", limit);
@@ -115,10 +115,29 @@ public sealed class SqliteMessageRepository : IMessageRepository
     }
 
     /// <summary>
-    /// 分页查询消息（按采集时间倒序）。
+    /// 分页查询消息（按发送时间倒序）。
     /// 在后台线程执行以避免阻塞 UI；内部先 COUNT 再取页数据。
     /// </summary>
     public Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken)
+    {
+        return GetPageAsync(pageNumber, pageSize, chatNames: null, cancellationToken);
+    }
+
+    /// <summary>
+    /// 分页查询消息并按指定群名过滤（仅返回关注群的消息），按发送时间倒序。
+    /// chatNames 为 null 或空时退化为不过滤。
+    /// </summary>
+    public Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, IReadOnlyCollection<string>? chatNames, CancellationToken cancellationToken)
+    {
+        return GetPageAsync(pageNumber, pageSize, chatNames, include: true, cancellationToken);
+    }
+
+    /// <summary>
+    /// 分页查询消息并按指定群名过滤，按发送时间倒序。
+    /// include=true 时仅返回列表内群（白名单），include=false 时排除列表内群（黑名单）。
+    /// chatNames 为 null 或空时退化为不过滤。
+    /// </summary>
+    public Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, IReadOnlyCollection<string>? chatNames, bool include, CancellationToken cancellationToken)
     {
         return Task.Run(async () =>
         {
@@ -128,14 +147,18 @@ public sealed class SqliteMessageRepository : IMessageRepository
             var offset = (safePage - 1) * safeSize;
 
             await using var connection = SqliteConnectionFactory.Open(_databasePath);
+            var whereClause = BuildChatNameFilter(chatNames, include);
 
             // 先查总数
             await using var countCommand = connection.CreateCommand();
-            countCommand.CommandText = "SELECT COUNT(*) FROM messages;";
+            countCommand.CommandText = string.IsNullOrEmpty(whereClause)
+                ? "SELECT COUNT(*) FROM messages;"
+                : $"SELECT COUNT(*) FROM messages WHERE {whereClause};";
+            AddChatNameParameters(countCommand, chatNames);
             var totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
 
             // 再查本页
-            var messages = await ReadPageAsync(connection, safeSize, offset, cancellationToken);
+            var messages = await ReadPageAsync(connection, safeSize, offset, chatNames, include, cancellationToken);
             return new MessagePage(messages, totalCount, safePage, safeSize);
         }, cancellationToken);
     }
@@ -146,6 +169,15 @@ public sealed class SqliteMessageRepository : IMessageRepository
     /// </summary>
     public Task<MessagePage> GetPageWithKnownCountAsync(int pageNumber, int pageSize, int totalCount, CancellationToken cancellationToken)
     {
+        return GetPageWithKnownCountAsync(pageNumber, pageSize, totalCount, chatNames: null, include: true, cancellationToken);
+    }
+
+    /// <summary>
+    /// 分页查询消息并按指定群名过滤，跳过 COUNT 查询（总数由调用方传入）。
+    /// include=true 时仅返回列表内群（白名单），include=false 时排除列表内群（黑名单）。
+    /// </summary>
+    public Task<MessagePage> GetPageWithKnownCountAsync(int pageNumber, int pageSize, int totalCount, IReadOnlyCollection<string>? chatNames, bool include, CancellationToken cancellationToken)
+    {
         return Task.Run(async () =>
         {
             var safePage = Math.Max(1, pageNumber);
@@ -153,7 +185,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
             var offset = (safePage - 1) * safeSize;
 
             await using var connection = SqliteConnectionFactory.Open(_databasePath);
-            var messages = await ReadPageAsync(connection, safeSize, offset, cancellationToken);
+            var messages = await ReadPageAsync(connection, safeSize, offset, chatNames, include, cancellationToken);
             return new MessagePage(messages, totalCount, safePage, safeSize);
         }, cancellationToken);
     }
@@ -161,22 +193,85 @@ public sealed class SqliteMessageRepository : IMessageRepository
     /// <summary>获取消息总数。</summary>
     public Task<int> GetMessageCountAsync(CancellationToken cancellationToken)
     {
+        return GetMessageCountAsync(chatNames: null, cancellationToken);
+    }
+
+    /// <summary>获取指定群名集合内的消息总数。chatNames 为 null 或空时返回全部消息总数。</summary>
+    public Task<int> GetMessageCountAsync(IReadOnlyCollection<string>? chatNames, CancellationToken cancellationToken)
+    {
+        return GetMessageCountAsync(chatNames, include: true, cancellationToken);
+    }
+
+    /// <summary>获取消息总数。include=true 时统计列表内群，false 时统计列表外群。</summary>
+    public Task<int> GetMessageCountAsync(IReadOnlyCollection<string>? chatNames, bool include, CancellationToken cancellationToken)
+    {
         return Task.Run(async () =>
         {
             await using var connection = SqliteConnectionFactory.Open(_databasePath);
+            var whereClause = BuildChatNameFilter(chatNames, include);
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT COUNT(*) FROM messages;";
+            command.CommandText = string.IsNullOrEmpty(whereClause)
+                ? "SELECT COUNT(*) FROM messages;"
+                : $"SELECT COUNT(*) FROM messages WHERE {whereClause};";
+            AddChatNameParameters(command, chatNames);
             return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         }, cancellationToken);
     }
 
     /// <summary>
-    /// 读取指定页数据（LIMIT/OFFSET），按采集时间倒序。
+    /// 构建 chat_name 过滤子句。
+    /// include=true：chat_name IN (...)（白名单）
+    /// include=false：chat_name NOT IN (...)（黑名单）
+    /// chatNames 为空或 null 时返回空字符串（不过滤）。
     /// </summary>
-    private static async Task<List<Message>> ReadPageAsync(SqliteConnection connection, int limit, int offset, CancellationToken cancellationToken)
+    private static string BuildChatNameFilter(IReadOnlyCollection<string>? chatNames, bool include)
     {
+        if (chatNames is null || chatNames.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var names = chatNames.Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (names.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var placeholders = new List<string>(names.Count);
+        for (var i = 0; i < names.Count; i++)
+        {
+            placeholders.Add($"$cn{i}");
+        }
+        var op = include ? "IN" : "NOT IN";
+        return $"chat_name {op} ({string.Join(", ", placeholders)})";
+    }
+
+    /// <summary>将 chatNames 按占位符顺序绑定到命令参数。</summary>
+    private static void AddChatNameParameters(SqliteCommand command, IReadOnlyCollection<string>? chatNames)
+    {
+        if (chatNames is null || chatNames.Count == 0)
+        {
+            return;
+        }
+
+        var idx = 0;
+        foreach (var name in chatNames.Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            command.Parameters.AddWithValue($"$cn{idx}", name);
+            idx++;
+        }
+    }
+
+    /// <summary>
+    /// 读取指定页数据（LIMIT/OFFSET），按发送时间倒序。
+    /// </summary>
+    private static async Task<List<Message>> ReadPageAsync(SqliteConnection connection, int limit, int offset, IReadOnlyCollection<string>? chatNames, bool include, CancellationToken cancellationToken)
+    {
+        var whereClause = BuildChatNameFilter(chatNames, include);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
+        var hasFilter = !string.IsNullOrEmpty(whereClause);
+        command.CommandText = hasFilter
+            ? $"""
             SELECT
                 id,
                 source,
@@ -190,11 +285,30 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 captured_at,
                 is_mention_me
             FROM messages
-            ORDER BY captured_at DESC, id DESC
+            WHERE {whereClause}
+            ORDER BY sent_at DESC, id DESC
+            LIMIT $limit OFFSET $offset;
+            """
+            : """
+            SELECT
+                id,
+                source,
+                source_message_key,
+                chat_session_id,
+                chat_name,
+                sender_name,
+                content,
+                message_type,
+                sent_at,
+                captured_at,
+                is_mention_me
+            FROM messages
+            ORDER BY sent_at DESC, id DESC
             LIMIT $limit OFFSET $offset;
             """;
         command.Parameters.AddWithValue("$limit", limit);
         command.Parameters.AddWithValue("$offset", offset);
+        AddChatNameParameters(command, chatNames);
 
         var messages = new List<Message>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

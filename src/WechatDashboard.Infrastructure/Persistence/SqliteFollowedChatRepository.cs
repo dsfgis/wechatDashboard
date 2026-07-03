@@ -81,6 +81,33 @@ public sealed class SqliteFollowedChatRepository : IFollowedChatRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>读取关注群过滤模式（默认 Include）。</summary>
+    public async Task<FollowedChatFilterMode> GetFilterModeAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM app_settings WHERE key = 'followed_chat_filter_mode';";
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result is string s && int.TryParse(s, out var v) && Enum.IsDefined(typeof(FollowedChatFilterMode), v))
+        {
+            return (FollowedChatFilterMode)v;
+        }
+        return FollowedChatFilterMode.Include;
+    }
+
+    /// <summary>保存关注群过滤模式。</summary>
+    public async Task SetFilterModeAsync(FollowedChatFilterMode mode, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO app_settings (key, value) VALUES ('followed_chat_filter_mode', $value)
+            ON CONFLICT(key) DO UPDATE SET value = $value;
+            """;
+        command.Parameters.AddWithValue("$value", ((int)mode).ToString());
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     /// <summary>从 DataReader 映射为 FollowedChat 实体。</summary>
     private static FollowedChat ReadChat(SqliteDataReader reader)
     {

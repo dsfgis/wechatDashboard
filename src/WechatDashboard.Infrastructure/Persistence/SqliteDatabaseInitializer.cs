@@ -174,6 +174,12 @@ public sealed class SqliteDatabaseInitializer
             created_at TEXT NOT NULL
         );
 
+        -- 应用设置表（key-value 存储，用于关注群过滤模式等开关）
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         -- 审计日志表
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,7 +194,8 @@ public sealed class SqliteDatabaseInitializer
         CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
         CREATE INDEX IF NOT EXISTS idx_messages_chat_session ON messages(chat_session_id);
         CREATE INDEX IF NOT EXISTS idx_messages_mention ON messages(is_mention_me, sent_at);
-        CREATE INDEX IF NOT EXISTS idx_messages_captured_at_id ON messages(captured_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_sent_at_id ON messages(sent_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_chat_name ON messages(chat_name);
         CREATE INDEX IF NOT EXISTS idx_messages_source_key ON messages(source, source_message_key);
         CREATE INDEX IF NOT EXISTS idx_todo_status_priority ON todo_items(status, priority, due_at);
         CREATE INDEX IF NOT EXISTS idx_classification_project ON message_classifications(project_id, category);

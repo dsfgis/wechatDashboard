@@ -1575,7 +1575,7 @@ def query_messages_from_shard(
         if end_timestamp is not None:
             query += f" AND {quote_identifier(create_time_col)} < ?"
             params.append(end_timestamp)
-        query += f" ORDER BY {quote_identifier(create_time_col)} ASC"
+        query += f" ORDER BY {quote_identifier(create_time_col)} DESC"
         if limit:
             query += " LIMIT ?"
             params.append(limit)
@@ -1692,7 +1692,7 @@ def read_messages(decrypted_root, start_timestamp, end_timestamp=None, limit=Non
                     max_timestamp = message["sentAt"]
 
     diagnostics["rows_read"] = len(messages)
-    messages.sort(key=lambda item: (item["sentAt"], item["id"]))
+    messages.sort(key=lambda item: (item["sentAt"], item["id"]), reverse=True)
     return messages, max_timestamp, diagnostics
 
 

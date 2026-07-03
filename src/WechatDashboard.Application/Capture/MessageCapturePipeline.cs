@@ -70,35 +70,64 @@ public sealed class MessageCapturePipeline
 
             captured += batch.Messages.Count;
 
-            // 逐条去重并持久化
-            foreach (var capturedMessage in batch.Messages)
-            {
-                if (await _messageRepository.ExistsAsync(capturedMessage.Source, capturedMessage.SourceMessageKey, cancellationToken))
-                {
-                    duplicates++;
-                    continue;
-                }
-
-                // 判断是否 @我
-                var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
-                var message = ToMessage(capturedMessage, isMentionMe);
-                var savedMessage = await _messageRepository.SaveAsync(message, cancellationToken);
-                persisted++;
-
-                // 分类 + 紧急度评分
-                var classification = _projectClassifier.Classify(savedMessage);
-                var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
-
-                // @我 的消息自动创建待办
-                if (isMentionMe)
-                {
-                    await _todoRepository.SaveAsync(TodoService.CreateFromMention(savedMessage, classification, urgency), cancellationToken);
-                    createdTodos++;
-                }
-            }
+            // 复用统一的"去重 -> 持久化 -> 分类 -> 评分 -> 建待办"流程
+            var batchResult = await ProcessAsync(batch.Messages, cancellationToken);
+            persisted += batchResult.PersistedCount;
+            duplicates += batchResult.DuplicateCount;
+            createdTodos += batchResult.CreatedTodoCount;
 
             // 保存本适配器最新偏移量，支持增量采集
             await _offsetRepository.SaveAsync(adapter.Name, batch.NextOffset, cancellationToken);
+        }
+
+        return new CaptureRunResult(captured, persisted, duplicates, createdTodos);
+    }
+
+    /// <summary>
+    /// 处理一批已采集的消息：去重 -> 持久化 -> 项目分类 -> 紧急度评分 -> @我 自动建待办。
+    /// 该方法与 <see cref="RunOnceAsync"/> 共享同一套单消息处理逻辑，
+    /// 亦可供外部入口（如"读取当天微信消息"按钮）直接复用，无需经过适配器采集环节。
+    /// 通过 Source+SourceMessageKey 去重，保证同一消息多次读取不会重复入库或重复建待办。
+    /// </summary>
+    /// <param name="messages">待处理的消息列表。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>本批处理统计：CapturedCount=入参总数，PersistedCount=新入库数，DuplicateCount=已存在跳过数，CreatedTodoCount=新建待办数。</returns>
+    public async Task<CaptureRunResult> ProcessAsync(
+        IEnumerable<CapturedMessage> messages,
+        CancellationToken cancellationToken)
+    {
+        var captured = 0;
+        var persisted = 0;
+        var duplicates = 0;
+        var createdTodos = 0;
+
+        foreach (var capturedMessage in messages)
+        {
+            captured++;
+
+            // 去重：同来源+同消息键已入库则跳过，避免重复建待办
+            if (await _messageRepository.ExistsAsync(capturedMessage.Source, capturedMessage.SourceMessageKey, cancellationToken))
+            {
+                duplicates++;
+                continue;
+            }
+
+            // 判断是否 @我
+            var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
+            var message = ToMessage(capturedMessage, isMentionMe);
+            var savedMessage = await _messageRepository.SaveAsync(message, cancellationToken);
+            persisted++;
+
+            // 分类 + 紧急度评分
+            var classification = _projectClassifier.Classify(savedMessage);
+            var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
+
+            // @我 的消息自动创建待办
+            if (isMentionMe)
+            {
+                await _todoRepository.SaveAsync(TodoService.CreateFromMention(savedMessage, classification, urgency), cancellationToken);
+                createdTodos++;
+            }
         }
 
         return new CaptureRunResult(captured, persisted, duplicates, createdTodos);
