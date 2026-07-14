@@ -55,6 +55,18 @@ Current handoff update (2026-06-30):
 - XML media payloads are no longer shown raw in the UI; they are converted to user-facing summaries before JSON output.
 - Generated key/config/decrypted files are constrained to `tools\result`; `.gitignore` excludes that directory.
 - The current test baseline in this worktree is Python reader tests 47 passed, .NET console tests 24 passed, and WPF app build succeeded to `tools\result\build-check\WechatDashboard.App`.
+
+Current handoff update (2026-07-03):
+
+- Added full message pagination: `微信消息` and `消息流` tabs both support first/prev/next/last/jump-to-page navigation with configurable page sizes, plus `GetPageWithKnownCountAsync` to skip redundant `COUNT(*)` queries.
+- Added configurable user mention aliases: `user_aliases` table, `SqliteUserAliasRepository`, `IUserAliasRepository`, and a `关注@人名` (Follow @Names) tab to add/remove the aliases used by `MentionDetector`.
+- Added `@我` highlighting and clickable URL hyperlinks in both `消息流` and `微信消息` tabs via `HighlightTextBlock`, `MessageHighlighter`, and an improved URL regex that excludes CJK/full-width characters and strips trailing punctuation.
+- Fixed WeChat link-card messages so their URLs are extracted into clickable hyperlinks instead of showing raw XML.
+- Added a followed-chats filter with whitelist/blacklist toggle (checkbox + `app_settings` table + `GetFilterModeAsync`/`SetFilterModeAsync`); `SqliteMessageRepository` now supports `IN`/`NOT IN` chat-name filtering across paged reads and counts.
+- Messages now sort by `sent_at DESC` (DB index `idx_messages_sent_at_id`, `ORDER BY` clauses, and the Python reader) so display order matches the shown time column.
+- Added a `时间` column to the `待办理` and `微信消息` tabs; renamed `项目` to `群名` in `待办理`.
+- Reading WeChat messages now syncs into the main pipeline: `MessageCapturePipeline.ProcessAsync` (extracted for reuse) dedups, persists, classifies, scores urgency, and auto-creates a Todo for every `@我` message, guarded by `_captureSemaphore` to avoid races with the live capture loop; `SourceMessageKey` dedup prevents duplicate Todos on re-reads.
+- Added Chinese comments across the codebase to reach the project's 20% comment-rate target, with a `check-comments.ps1` verification script.
 Known gaps:
 
 - Real Windows UI Automation + OCR snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
@@ -235,14 +247,16 @@ Purpose: let the user enable, disable, and inspect capture sources without editi
 - Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
 
-- [ ] Step 1: Add tests for saving and loading enabled capture sources.
-- [ ] Step 2: Add a `capture_source_settings` table.
-- [ ] Step 3: Add a simple WPF settings view showing source name, adapter kind, path, and enabled state.
-- [ ] Step 4: Build the capture pipeline from saved settings.
+- [x] Step 1: Add tests for saving and loading enabled capture sources.
+- [x] Step 2: Add a `capture_source_settings` table.
+- [x] Step 3: Add a simple WPF settings view showing source name, adapter kind, path, and enabled state.
+- [x] Step 4: Build the capture pipeline from saved settings.
 
 ## Milestone 4: Project Rules and Alias Management
 
 Purpose: remove hardcoded user aliases and project rules.
+
+> Progress note (2026-07-03): User-alias management is complete — `user_aliases` table, `SqliteUserAliasRepository` + tests, and the `关注@人名` tab wired into `MentionDetector`. Project rules remain hardcoded in `CreateCapturePipeline`; `SqliteProjectRuleRepository` and the rules UI are still pending.
 
 **Files:**
 
@@ -334,3 +348,34 @@ Recommended next branch/worktree handoff:
 3. Follow `design/wechat-local-database-system-test.md` for local DB validation.
 4. If the UI shows XML again, check `summarize_message_content` in `tools\wechat-local-reader\wechat_local_reader.py` and confirm `query_messages_from_shard` calls it before appending messages.
 5. If DB Key extraction fails, do not debug OCR first; inspect the key tool path, `Weixin` PID selection, key file creation, and key/database-directory match.
+
+### 当前进度更新（2026-07-03）
+
+Completed since the 2026-06-30 snapshot:
+
+- Message pagination: first/prev/next/last/jump-to-page navigation for both `微信消息` and `消息流` tabs, with page-size controls and `GetPageWithKnownCountAsync` to skip redundant `COUNT(*)` between page turns (`c653788`, `f4eb402`).
+- Configurable user mention aliases (Milestone 4 partial): `user_aliases` table, `SqliteUserAliasRepository` + `IUserAliasRepository`, `TestUserAliasRepositoryAsync`, and the `关注@人名` tab that drives `MentionDetector` at runtime (`feb0d66`).
+- `@我` highlighting and clickable links: `HighlightTextBlock` custom control + `MessageHighlighter` render configured aliases in red bold on a light-red background, and URLs as blue clickable hyperlinks in both `消息流` and `微信消息` (`bfa9a9a`).
+- WeChat link-card fix: link-card messages now extract the real URL into a clickable hyperlink instead of displaying raw XML; URL regex hardened to exclude CJK/full-width characters and strip trailing punctuation (`db18cfa`).
+- Followed-chats filter with blacklist/whitelist toggle: `app_settings` table + `GetFilterModeAsync`/`SetFilterModeAsync`, an `排除列表中的群` checkbox, and `IN`/`NOT IN` chat-name filtering across paged reads and counts (`c3166e4`).
+- `sent_at DESC` ordering: DB index `idx_messages_sent_at_id`, `ORDER BY sent_at DESC, id DESC` in `GetRecentAsync`/`ReadPageAsync`, and matching sort in the Python reader so display order matches the shown time column.
+- Time/group-name columns: `时间` column added to `待办理` (via `SourceMessageId` -> `SentAt` fallback) and `微信消息`; `项目` renamed to `群名` in `待办理`.
+- Read-path pipeline unification: `MessageCapturePipeline.ProcessAsync` extracted for reuse and invoked from `LoadTodayWeChatMessagesAsync` so reading WeChat messages now persists messages, classifies, scores urgency, and auto-creates a Todo for every `@我` message. Guarded by `_captureSemaphore` against the live capture loop; `SourceMessageKey` dedup prevents duplicate Todos on re-reads. This closes prior "Still open" item #3 (`3f0e7b5`).
+- Code-comment coverage: Chinese comments added across the codebase to meet the 20% comment-rate target, with `check-comments.ps1` for verification (`7c169ce`).
+
+Milestone status:
+
+- Milestone 3 (Capture Source Settings UI): complete — `capture_source_settings` table, `SqliteCaptureSourceSettingsRepository` + test, WPF source list, and pipeline built from saved settings.
+- Milestone 4 (Project Rules and Alias Management): alias half complete; project rules remain hardcoded (`SqliteProjectRuleRepository` and rules UI pending).
+
+Still open (updated):
+
+1. (Unchanged) Decide `tools\wx-key-tools` tooling commit policy.
+2. (Unchanged) Finish manual `db_storage` selection, DB Key import, and reinit UI.
+3. (Closed by `3f0e7b5`) ~~Unify `微信消息` read path with the pipeline.~~
+4. (Unchanged) Improve per-stage WeChat diagnostics.
+5. (Unchanged) Re-run system test on a fresh worktree without printing real message content.
+6. (Unchanged) Validate minimized-WeChat incremental capture with a known test message.
+7. (Unchanged) Keep raw DB Keys / decrypted DBs / capture JSON out of Git and logs.
+8. (New) Implement `SqliteProjectRuleRepository` + rules UI so project rules are configurable rather than hardcoded.
+9. (New) Validate dedup correctness when the same @me message is seen both via live capture and via the read button within one session.

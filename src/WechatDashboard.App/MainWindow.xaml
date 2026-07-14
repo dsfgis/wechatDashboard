@@ -15,7 +15,32 @@
         </Style>
         <Style TargetType="Button">
             <Setter Property="Padding" Value="12,7" />
-            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="Margin" Value="0,0,8,8" />
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="#D1D5DB" />
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Height" Value="32" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderBrush" Value="#D1D5DB" />
+        </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="Height" Value="32" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderBrush" Value="#D1D5DB" />
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Height" Value="32" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderBrush" Value="#D1D5DB" />
+        </Style>
+        <Style x:Key="FieldLabelTextStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#6B7280" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Margin" Value="0,0,0,4" />
         </Style>
         <Style TargetType="DataGrid">
             <Setter Property="AutoGenerateColumns" Value="False" />
@@ -23,6 +48,11 @@
             <Setter Property="IsReadOnly" Value="True" />
             <Setter Property="GridLinesVisibility" Value="Horizontal" />
             <Setter Property="HeadersVisibility" Value="Column" />
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="#E5E7EB" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="AlternatingRowBackground" Value="#F9FAFB" />
+            <Setter Property="RowHeight" Value="34" />
         </Style>
     </Window.Resources>
 
@@ -69,51 +99,65 @@
                     <TextBlock Text="{Binding SummaryText}" Margin="0,6,0,0" Foreground="#4B5563" />
                     <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
                 </StackPanel>
-                <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right" MaxWidth="720">
-                    <TextBlock Text="历史导入范围：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
-                    <ComboBox x:Name="BootstrapRangeComboBox" Width="90" Margin="0,0,8,0" SelectedIndex="1">
-                        <ComboBoxItem Content="7天" Tag="7d" />
-                        <ComboBoxItem Content="30天" Tag="30d" />
-                        <ComboBoxItem Content="全部" Tag="all" />
-                    </ComboBox>
-                    <TextBlock Text="DB Key：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
-                    <PasswordBox x:Name="ImportedDatabaseKeyBox" Width="220" Margin="0,0,8,0" />
-                    <TextBlock Text="Key工具：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
-                    <TextBox x:Name="ExternalKeyCommandTextBox" Width="240" Margin="0,0,8,0"
-                             ToolTip="例如：&quot;D:\tools\DbkeyHookCMD.exe&quot; -pid {pid}" />
-                    <TextBlock Text="Key文件：" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
-                    <TextBox x:Name="ExternalKeyFileTextBox" Width="180" Margin="0,0,8,0"
-                             ToolTip="外部工具写出的 dbkey.txt，可留空" />
-                    <Button x:Name="ExtractDatabaseKeyButton" Content="自动提取Key" Click="ExtractDatabaseKeyButton_Click" Margin="0,0,8,0" />
-                    <Button x:Name="InitLocalDatabaseButton" Content="初始化本地库" Click="InitLocalDatabaseButton_Click" Margin="0,0,8,0" />
-                    <Button Content="刷新" Click="RefreshButton_Click" />
-                    <Button Content="采集一次" Click="CaptureButton_Click" />
-                    <Button Content="开始微信监听" Click="StartWeChatListenerButton_Click" />
-                    <Button Content="停止监听" Click="StopWeChatListenerButton_Click" />
-                    <Button Content="写入示例消息" Click="SeedButton_Click" />
-                </WrapPanel>
+                <Border DockPanel.Dock="Right" Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="12" MaxWidth="760">
+                    <StackPanel>
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <StackPanel Width="104" Margin="0,0,10,8">
+                                <TextBlock Text="历史范围" Style="{StaticResource FieldLabelTextStyle}" />
+                                <ComboBox x:Name="BootstrapRangeComboBox" SelectedIndex="1">
+                                    <ComboBoxItem Content="7天" Tag="7d" />
+                                    <ComboBoxItem Content="30天" Tag="30d" />
+                                    <ComboBoxItem Content="全部" Tag="all" />
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Width="180" Margin="0,0,10,8">
+                                <TextBlock Text="DB Key" Style="{StaticResource FieldLabelTextStyle}" />
+                                <PasswordBox x:Name="ImportedDatabaseKeyBox" />
+                            </StackPanel>
+                            <StackPanel Width="230" Margin="0,0,10,8">
+                                <TextBlock Text="Key 工具" Style="{StaticResource FieldLabelTextStyle}" />
+                                <TextBox x:Name="ExternalKeyCommandTextBox"
+                                         ToolTip="例如：&quot;D:\tools\DbkeyHookCMD.exe&quot; -pid {pid}" />
+                            </StackPanel>
+                            <StackPanel Width="180" Margin="0,0,0,8">
+                                <TextBlock Text="Key 文件" Style="{StaticResource FieldLabelTextStyle}" />
+                                <TextBox x:Name="ExternalKeyFileTextBox"
+                                         ToolTip="外部工具写出的 dbkey.txt，可留空" />
+                            </StackPanel>
+                        </WrapPanel>
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
+                            <Button x:Name="ExtractDatabaseKeyButton" Content="自动提取 Key" Click="ExtractDatabaseKeyButton_Click" />
+                            <Button x:Name="InitLocalDatabaseButton" Content="初始化本地库" Click="InitLocalDatabaseButton_Click" />
+                            <Button Content="刷新" Click="RefreshButton_Click" />
+                            <Button Content="采集一次" Click="CaptureButton_Click" />
+                            <Button Content="开始监听" Click="StartWeChatListenerButton_Click" />
+                            <Button Content="停止监听" Click="StopWeChatListenerButton_Click" />
+                            <Button Content="示例消息" Click="SeedButton_Click" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
             </DockPanel>
 
             <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,16">
-                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16" Margin="0,0,12,0">
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,0,12,0">
                     <StackPanel>
                         <TextBlock Text="今日消息" Foreground="#6B7280" />
                         <TextBlock Text="{Binding TodayMessageCount}" FontSize="26" FontWeight="SemiBold" />
                     </StackPanel>
                 </Border>
-                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16" Margin="0,0,12,0">
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,0,12,0">
                     <StackPanel>
                         <TextBlock Text="@我" Foreground="#6B7280" />
                         <TextBlock Text="{Binding MentionCount}" FontSize="26" FontWeight="SemiBold" />
                     </StackPanel>
                 </Border>
-                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16" Margin="0,0,12,0">
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,0,12,0">
                     <StackPanel>
                         <TextBlock Text="待办理" Foreground="#6B7280" />
                         <TextBlock Text="{Binding PendingTodoCount}" FontSize="26" FontWeight="SemiBold" />
                     </StackPanel>
                 </Border>
-                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="16">
+                <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="16">
                     <StackPanel>
                         <TextBlock Text="P0/P1" Foreground="#6B7280" />
                         <TextBlock Text="{Binding HighPriorityTodoCount}" FontSize="26" FontWeight="SemiBold" />
@@ -213,13 +257,48 @@
                     </DockPanel>
                 </TabItem>
                 <TabItem Header="项目看板">
-                    <DataGrid ItemsSource="{Binding ProjectSummaries}">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="项目" Binding="{Binding Project}" Width="180" />
-                            <DataGridTextColumn Header="待办理" Binding="{Binding PendingTodos}" Width="100" />
-                            <DataGridTextColumn Header="P0/P1" Binding="{Binding HighPriorityTodos}" Width="100" />
-                        </DataGrid.Columns>
-                    </DataGrid>
+                    <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="16">
+                        <DockPanel>
+                            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                                <StackPanel DockPanel.Dock="Left">
+                                    <TextBlock Text="项目统计" FontSize="17" FontWeight="SemiBold" Foreground="#111827" />
+                                    <TextBlock Text="{Binding DashboardStatusText}" Margin="0,4,0,0" Foreground="#6B7280" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <TextBlock Text="统计维度" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
+                                    <ComboBox x:Name="DashboardDimensionComboBox" Width="120" SelectedIndex="0" SelectionChanged="DashboardDimensionComboBox_SelectionChanged">
+                                        <ComboBoxItem Content="按项目" Tag="project" />
+                                        <ComboBoxItem Content="按时间" Tag="time" />
+                                        <ComboBoxItem Content="按群名" Tag="chat" />
+                                    </ComboBox>
+                                </WrapPanel>
+                            </DockPanel>
+
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsControl ItemsSource="{Binding DashboardChartRows}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,0,0,10">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="190" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="80" />
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                </Grid.RowDefinitions>
+                                                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Label}" Foreground="#111827" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                <ProgressBar Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Percent}" Height="18" Margin="0,2,12,0" />
+                                                <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding CountText}" Foreground="#111827" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                                                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Text="{Binding Detail}" Foreground="#6B7280" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
                 </TabItem>
                 <TabItem Header="关注设置">
                     <Border Background="White" Padding="16">
@@ -257,6 +336,21 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
                                 <DataGridTextColumn Header="群名称" Binding="{Binding ChatName}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <Separator Margin="0,16,0,12" />
+                        <TextBlock Text="关注项目设置（群名包含项目名时重点关注）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock Text="输入项目名称，支持添加多个。群名包含任一项目名时，该群消息将标记为重点关注。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <TextBox x:Name="NewFollowedProjectTextBox" Width="260" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入项目名称" />
+                            <Button x:Name="AddFollowedProjectButton" Content="添加" Click="AddFollowedProjectButton_Click" Margin="0,0,8,0" Padding="16,4" />
+                            <Button x:Name="DeleteFollowedProjectButton" Content="删除选中" Click="DeleteFollowedProjectButton_Click" Padding="16,4" />
+                        </StackPanel>
+                        <DataGrid x:Name="FollowedProjectsGrid" ItemsSource="{Binding FollowedProjects}" Height="180" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
+                                <DataGridTextColumn Header="项目名称" Binding="{Binding ProjectName}" Width="*" />
                             </DataGrid.Columns>
                         </DataGrid>
 

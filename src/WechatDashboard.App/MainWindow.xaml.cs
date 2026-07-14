@@ -36,6 +36,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteCaptureSourceSettingsRepository _settingsRepository;
     private readonly SqliteUserAliasRepository _aliasRepository;
     private readonly SqliteFollowedChatRepository _followedChatRepository;
+    private readonly SqliteFollowedProjectRepository _followedProjectRepository;
     // JSONL 采集收件箱路径
     private readonly string _captureInboxPath;
     // 当前生效的 @我 别名集合（默认兜底）
@@ -44,6 +45,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private IReadOnlyList<string> _currentFollowedChats = Array.Empty<string>();
     // 关注群过滤模式：Include=只显示列表内群，Exclude=排除列表内群
     private FollowedChatFilterMode _followedChatFilterMode = FollowedChatFilterMode.Include;
+    // 当前生效的关注项目名称集合（群名包含项目名时，该群消息重点关注）
+    private IReadOnlyList<string> _currentFollowedProjects = Array.Empty<string>();
     // 微信本地读取器服务
     private readonly WeChatLocalReaderService _readerService;
     // 采集并发控制信号量，避免实时循环与手动采集重叠
@@ -52,6 +55,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
     private const int DefaultWeChatMessagePageSize = 50;
     private const int DefaultMessageStreamPageSize = 50;
+    private const int DashboardMessageSampleLimit = 5000;
 
     // 实时监听取消令牌
     private CancellationTokenSource? _liveCaptureCts;
@@ -78,6 +82,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private int _messageStreamTotalCount;
     private string _messageStreamPageText = "第 0/0 页，共 0 条";
     private string _messageStreamStatusText = "正在加载消息流...";
+    private string _dashboardStatusText = "按项目统计最近消息。";
     public MainWindow()
     {
         InitializeComponent();
@@ -93,6 +98,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _settingsRepository = new SqliteCaptureSourceSettingsRepository(_databasePath);
         _aliasRepository = new SqliteUserAliasRepository(_databasePath);
         _followedChatRepository = new SqliteFollowedChatRepository(_databasePath);
+        _followedProjectRepository = new SqliteFollowedProjectRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
 
@@ -169,6 +175,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         private set => SetField(ref _messageStreamStatusText, value);
     }
 
+    public string DashboardStatusText
+    {
+        get => _dashboardStatusText;
+        private set => SetField(ref _dashboardStatusText, value);
+    }
+
     // 待办列表（UI 绑定）
     public ObservableCollection<TodoRow> Todos { get; } = new();
 
@@ -187,6 +199,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 项目汇总列表（UI 绑定）
     public ObservableCollection<ProjectSummaryRow> ProjectSummaries { get; } = new();
 
+    // 项目看板统计图行（UI 绑定）
+    public ObservableCollection<DashboardChartRow> DashboardChartRows { get; } = new();
+
     // 采集诊断列表（UI 绑定）
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
 
@@ -201,6 +216,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // 关注群列表（UI 绑定）
     public ObservableCollection<FollowedChatRow> FollowedChats { get; } = new();
+
+    // 关注项目列表（UI 绑定）
+    public ObservableCollection<FollowedProjectRow> FollowedProjects { get; } = new();
 
     /// <summary>窗口加载完成：初始化数据库、加载采集源设置，并在读取器就绪时读取当天消息。</summary>
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -474,6 +492,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _databaseInitializer.InitializeAsync(CancellationToken.None);
         await LoadUserAliasesAsync();
         await LoadFollowedChatsAsync();
+        await LoadFollowedProjectsAsync();
         if (seedIfEmpty)
         {
             // 空库时播种示例，便于首次体验
@@ -572,9 +591,154 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         PendingTodoCount = pendingTodos.Count;
         HighPriorityTodoCount = pendingTodos.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1);
 
-        // 刷新消息流分页（强制重新计算总数）
+        // 刷新项目看板图表和消息流分页（强制重新计算总数）
+        await LoadProjectDashboardAsync();
         await LoadMessageStreamPageAsync(_messageStreamPageNumber, refreshCount: true);
         SummaryText = $"消息 {_messageStreamTotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
+    }
+
+    /// <summary>项目看板维度切换：按项目、时间或群名重新统计。</summary>
+    private async void DashboardDimensionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await LoadProjectDashboardAsync();
+    }
+
+    /// <summary>加载项目看板统计图，默认统计最近一批入库消息。</summary>
+    private async Task LoadProjectDashboardAsync()
+    {
+        var messages = await _messageRepository.GetRecentAsync(DashboardMessageSampleLimit, CancellationToken.None);
+        var dimension = ReadSelectedDashboardDimension();
+        var rows = BuildDashboardRows(messages, dimension);
+        Replace(DashboardChartRows, rows);
+
+        var dimensionText = dimension switch
+        {
+            "time" => "时间",
+            "chat" => "群名",
+            _ => "项目"
+        };
+        DashboardStatusText = rows.Count == 0
+            ? $"暂无可统计消息。当前维度：按{dimensionText}。"
+            : $"按{dimensionText}统计最近 {messages.Count} 条入库消息，显示前 {rows.Count} 项。";
+    }
+
+    private string ReadSelectedDashboardDimension()
+    {
+        if (DashboardDimensionComboBox?.SelectedItem is ComboBoxItem item &&
+            item.Tag is string tag)
+        {
+            return tag;
+        }
+
+        return "project";
+    }
+
+    private IReadOnlyList<DashboardChartRow> BuildDashboardRows(IReadOnlyList<Message> messages, string dimension)
+    {
+        if (messages.Count == 0)
+        {
+            return Array.Empty<DashboardChartRow>();
+        }
+
+        var aggregates = dimension switch
+        {
+            "time" => BuildTimeDashboardAggregates(messages),
+            "chat" => BuildChatDashboardAggregates(messages),
+            _ => BuildProjectDashboardAggregates(messages)
+        };
+
+        var materialized = aggregates.ToList();
+        if (materialized.Count == 0)
+        {
+            return Array.Empty<DashboardChartRow>();
+        }
+
+        var maxCount = Math.Max(1, materialized.Max(row => row.Count));
+        return materialized
+            .Select(row => new DashboardChartRow(
+                row.Label,
+                row.Count,
+                $"{row.Count} 条",
+                row.Detail,
+                Math.Round(row.Count * 100.0 / maxCount, 1)))
+            .ToArray();
+    }
+
+    private IReadOnlyList<DashboardAggregate> BuildProjectDashboardAggregates(IReadOnlyList<Message> messages)
+    {
+        return messages
+            .GroupBy(ResolveDashboardProjectName, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var chats = group
+                    .Select(message => message.ChatName)
+                    .Where(chatName => !string.IsNullOrWhiteSpace(chatName))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(chatName => chatName, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var sampleChats = chats.Take(3).ToArray();
+                var detail = chats.Length == 0
+                    ? "未识别群名"
+                    : $"覆盖 {chats.Length} 个群：{string.Join("、", sampleChats)}{(chats.Length > sampleChats.Length ? " 等" : "")}";
+                return new DashboardAggregate(group.Key, group.Count(), detail);
+            })
+            .OrderByDescending(row => row.Count)
+            .ThenBy(row => row.Label, StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .ToArray();
+    }
+
+    private IReadOnlyList<DashboardAggregate> BuildTimeDashboardAggregates(IReadOnlyList<Message> messages)
+    {
+        return messages
+            .GroupBy(message => message.SentAt.LocalDateTime.Date)
+            .OrderByDescending(group => group.Key)
+            .Take(14)
+            .Select(group =>
+            {
+                var mentionCount = group.Count(message => message.IsMentionMe);
+                var chatCount = group.Select(message => message.ChatName).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+                return new DashboardAggregate(
+                    group.Key.ToString("MM-dd"),
+                    group.Count(),
+                    $"{group.Key:yyyy-MM-dd}，{chatCount} 个群，@我 {mentionCount} 条");
+            })
+            .ToArray();
+    }
+
+    private IReadOnlyList<DashboardAggregate> BuildChatDashboardAggregates(IReadOnlyList<Message> messages)
+    {
+        return messages
+            .GroupBy(message => string.IsNullOrWhiteSpace(message.ChatName) ? "未命名群聊" : message.ChatName, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var projectName = ResolveDashboardProjectName(group.First());
+                var mentionCount = group.Count(message => message.IsMentionMe);
+                return new DashboardAggregate(
+                    group.Key,
+                    group.Count(),
+                    $"项目：{projectName}，@我 {mentionCount} 条");
+            })
+            .OrderByDescending(row => row.Count)
+            .ThenBy(row => row.Label, StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .ToArray();
+    }
+
+    private string ResolveDashboardProjectName(Message message)
+    {
+        var followedProjectName = MatchFollowedProject(message.ChatName);
+        if (!string.IsNullOrWhiteSpace(followedProjectName))
+        {
+            return followedProjectName;
+        }
+
+        return CreateProjectClassifier().Classify(message).ProjectName;
     }
 
     /// <summary>重载消息流分页（默认不刷新总数）。</summary>
@@ -1120,6 +1284,73 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : "已切换为只显示模式：将仅显示列表中的群消息。";
     }
 
+    /// <summary>
+    /// 加载关注项目列表：同时更新当前生效的关注项目名称集合与 UI 列表。
+    /// </summary>
+    private async Task LoadFollowedProjectsAsync()
+    {
+        var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+        _currentFollowedProjects = projects.Select(p => p.ProjectName).ToArray();
+        Replace(FollowedProjects, projects.Select(p => new FollowedProjectRow(p.Id, p.ProjectName)));
+    }
+
+    /// <summary>添加关注项目：校验非空后保存并刷新列表。</summary>
+    private async void AddFollowedProjectButton_Click(object sender, RoutedEventArgs e)
+    {
+        var projectName = NewFollowedProjectTextBox?.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(projectName))
+        {
+            SummaryText = "请输入要添加的项目名称。";
+            return;
+        }
+
+        await _followedProjectRepository.SaveAsync(projectName, CancellationToken.None);
+        if (NewFollowedProjectTextBox is not null)
+        {
+            NewFollowedProjectTextBox.Text = "";
+        }
+        await LoadFollowedProjectsAsync();
+        await LoadProjectDashboardAsync();
+        SummaryText = $"已添加关注项目「{projectName}」，群名包含该项目名的消息将重点关注。";
+    }
+
+    /// <summary>删除关注项目：需先在列表中选中一行，删除后刷新列表。</summary>
+    private async void DeleteFollowedProjectButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (FollowedProjectsGrid?.SelectedItem is not FollowedProjectRow row)
+        {
+            SummaryText = "请先选中要删除的关注项目。";
+            return;
+        }
+
+        await _followedProjectRepository.DeleteAsync(row.Id, CancellationToken.None);
+        await LoadFollowedProjectsAsync();
+        await LoadProjectDashboardAsync();
+        SummaryText = $"已删除关注项目「{row.ProjectName}」。";
+    }
+
+    /// <summary>
+    /// 判断群名是否包含某个关注项目名，返回匹配到的项目名（无匹配返回空字符串）。
+    /// 用于在消息列表中标记"重点关注"。
+    /// </summary>
+    private string MatchFollowedProject(string chatName)
+    {
+        if (string.IsNullOrWhiteSpace(chatName) || _currentFollowedProjects.Count == 0)
+        {
+            return "";
+        }
+
+        foreach (var projectName in _currentFollowedProjects)
+        {
+            if (chatName.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+            {
+                return projectName;
+            }
+        }
+
+        return "";
+    }
+
     /// <summary>保存采集源设置：清空旧设置后批量写入当前 UI 列表中的设置项。</summary>
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -1195,12 +1426,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _todoRepository,
             _offsetRepository,
             new MentionDetector(_currentAliases),
-            new ProjectClassifier(new[]
-            {
-                new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
-                new ProjectRule(2, "支付平台", ProjectRuleType.Keyword, "支付", 80),
-                new ProjectRule(3, "数据中台", ProjectRuleType.Keyword, "数据", 70)
-            }),
+            CreateProjectClassifier(),
+
             new UrgencyRanker(
                 priorityContacts: new[] { "王经理", "赵经理" },
                 priorityProjectIds: new[] { 1L, 2L }));
@@ -1359,6 +1586,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             IsMentionMe: false);
     }
 
+    private static ProjectClassifier CreateProjectClassifier()
+    {
+        return new ProjectClassifier(new[]
+        {
+            new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
+            new ProjectRule(2, "支付平台", ProjectRuleType.Keyword, "支付", 80),
+            new ProjectRule(3, "数据中台", ProjectRuleType.Keyword, "数据", 70)
+        });
+    }
     /// <summary>根据项目 ID 返回项目名称，未匹配返回"未分类"。</summary>
     private static string ProjectName(long? projectId)
     {
@@ -1510,6 +1746,11 @@ public sealed class HighlightableWeChatMessageRow : INotifyPropertyChanged
 /// <summary>项目汇总行数据：按项目聚合的待办数量与高优先级数量。</summary>
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
 
+/// <summary>项目看板统计图行数据。</summary>
+public sealed record DashboardChartRow(string Label, int Count, string CountText, string Detail, double Percent);
+
+internal sealed record DashboardAggregate(string Label, int Count, string Detail);
+
 /// <summary>采集诊断行数据：展示各采集适配器的状态与最近成功时间。</summary>
 public sealed record DiagnosticRow(string Adapter, string Status, string LastSuccessAt, string Detail);
 
@@ -1536,3 +1777,6 @@ public sealed record UserAliasRow(long Id, string Alias);
 
 /// <summary>关注群行数据：用于 UI 展示与删除操作。</summary>
 public sealed record FollowedChatRow(long Id, string ChatName);
+
+/// <summary>关注项目行数据：用于 UI 展示与删除操作。</summary>
+public sealed record FollowedProjectRow(long Id, string ProjectName);

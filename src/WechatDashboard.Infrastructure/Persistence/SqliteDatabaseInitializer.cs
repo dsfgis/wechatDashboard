@@ -174,6 +174,14 @@ public sealed class SqliteDatabaseInitializer
             created_at TEXT NOT NULL
         );
 
+        -- 关注项目表（群名包含项目名时，该群消息重点关注）
+        CREATE TABLE IF NOT EXISTS followed_projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
         -- 应用设置表（key-value 存储，用于关注群过滤模式等开关）
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
