@@ -63,7 +63,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
     }
 
     /// <summary>
-    /// 查询所有待办理状态的待办，按优先级（P0 优先）与创建时间倒序排列。
+    /// 查询所有待办理状态的待办，按原消息发送时间倒序排列。
     /// </summary>
     public async Task<IReadOnlyList<TodoItem>> GetPendingAsync(CancellationToken cancellationToken)
     {
@@ -87,13 +87,16 @@ public sealed class SqliteTodoRepository : ITodoRepository
             FROM todo_items
             WHERE status = $status
             ORDER BY
+                COALESCE(
+                    (SELECT julianday(sent_at) FROM messages WHERE messages.id = todo_items.source_message_id),
+                    julianday(created_at)
+                ) DESC,
                 CASE priority
                     WHEN 'P0' THEN 0
                     WHEN 'P1' THEN 1
                     WHEN 'P2' THEN 2
                     ELSE 3
-                END,
-                created_at DESC;
+                END;
             """;
         command.Parameters.AddWithValue("$status", TodoStatus.Pending.ToString());
 
@@ -105,6 +108,88 @@ public sealed class SqliteTodoRepository : ITodoRepository
         }
 
         return todos;
+    }
+
+    /// <summary>查询所有已办理的待办，按完成时间倒序排列。</summary>
+    public async Task<IReadOnlyList<TodoItem>> GetCompletedAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                id,
+                source_message_id,
+                project_id,
+                title,
+                description,
+                status,
+                priority,
+                due_at,
+                created_at,
+                updated_at,
+                completed_at,
+                is_auto_created
+            FROM todo_items
+            WHERE status = $status
+            ORDER BY completed_at DESC, updated_at DESC;
+            """;
+        command.Parameters.AddWithValue("$status", TodoStatus.Done.ToString());
+
+        var todos = new List<TodoItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            todos.Add(ReadTodo(reader));
+        }
+
+        return todos;
+    }
+
+    /// <summary>将一条待办理记录更新为已办理，并写入完成时间。</summary>
+    public async Task<bool> MarkCompletedAsync(
+        long id,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE todo_items
+            SET
+                status = $completedStatus,
+                updated_at = $completedAt,
+                completed_at = $completedAt
+            WHERE id = $id
+              AND status = $pendingStatus;
+            """;
+        command.Parameters.AddWithValue("$completedStatus", TodoStatus.Done.ToString());
+        command.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$pendingStatus", TodoStatus.Pending.ToString());
+
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    /// <summary>将全部待办理记录原子更新为已办理，并返回更新数量。</summary>
+    public async Task<int> MarkAllCompletedAsync(
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE todo_items
+            SET
+                status = $completedStatus,
+                updated_at = $completedAt,
+                completed_at = $completedAt
+            WHERE status = $pendingStatus;
+            """;
+        command.Parameters.AddWithValue("$completedStatus", TodoStatus.Done.ToString());
+        command.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
+        command.Parameters.AddWithValue("$pendingStatus", TodoStatus.Pending.ToString());
+
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>绑定待办参数到 INSERT 命令。</summary>

@@ -54,6 +54,21 @@
             <Setter Property="AlternatingRowBackground" Value="#F9FAFB" />
             <Setter Property="RowHeight" Value="34" />
         </Style>
+        <DataTemplate x:Key="TodoMessageContentTemplate">
+            <TextBlock Text="{Binding MessageContent}"
+                       TextTrimming="CharacterEllipsis"
+                       VerticalAlignment="Center"
+                       ToolTipService.ShowDuration="60000">
+                <TextBlock.ToolTip>
+                    <ToolTip MaxWidth="700"
+                             DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                        <TextBlock Text="{Binding MessageContent}"
+                                   TextWrapping="Wrap" />
+                    </ToolTip>
+                </TextBlock.ToolTip>
+            </TextBlock>
+        </DataTemplate>
+
     </Window.Resources>
 
     <Grid Background="#F4F6F8">
@@ -72,6 +87,7 @@
                            Margin="0,0,0,24" />
                 <StackPanel DockPanel.Dock="Top">
                     <TextBlock Text="待办理" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
+                    <TextBlock Text="已办理" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
                     <TextBlock Text="消息流" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
                     <TextBlock Text="项目" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
                     <TextBlock Text="看板" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
@@ -169,12 +185,43 @@
                 <TabItem Header="待办理">
                     <DataGrid ItemsSource="{Binding Todos}">
                         <DataGrid.Columns>
+                            <DataGridTemplateColumn Header="办理" Width="70">
+                                <DataGridTemplateColumn.HeaderTemplate>
+                                    <DataTemplate>
+                                        <CheckBox HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  Content="全选"
+                                                  ToolTip="将全部待办理记录转入已办理页面"
+                                                  Click="SelectAllTodosCheckBox_Click" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.HeaderTemplate>
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  ToolTip="勾选后转入已办理页面"
+                                                  Tag="{Binding}"
+                                                  Click="CompleteTodoCheckBox_Click" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                             <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="150" />
                             <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
                             <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
-                            <DataGridTextColumn Header="群名" Binding="{Binding ChatName}" Width="140" />
-                            <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" />
-                            <DataGridTextColumn Header="来源消息" Binding="{Binding SourceMessageId}" Width="100" />
+                            <DataGridTextColumn Header="来源消息" Binding="{Binding SourceChatName}" Width="160" />
+                            <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
+                            <DataGridTemplateColumn Header="消息内容" CellTemplate="{StaticResource TodoMessageContentTemplate}" Width="*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </TabItem>
+                <TabItem Header="已办理">
+                    <DataGrid ItemsSource="{Binding CompletedTodos}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="完成时间" Binding="{Binding CompletedAt}" Width="150" />
+                            <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
+                            <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
+                            <DataGridTextColumn Header="来源消息" Binding="{Binding SourceChatName}" Width="160" />
+                            <DataGridTemplateColumn Header="消息内容" CellTemplate="{StaticResource TodoMessageContentTemplate}" Width="*" />
                         </DataGrid.Columns>
                     </DataGrid>
                 </TabItem>
@@ -209,7 +256,17 @@
                                 <DataGridTemplateColumn Header="内容" Width="*">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}" TextWrapping="Wrap" />
+                                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}"
+                                                                      TextWrapping="Wrap"
+                                                                      ToolTipService.ShowDuration="60000">
+                                                <local:HighlightTextBlock.ToolTip>
+                                                    <ToolTip MaxWidth="700"
+                                                             DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                        <TextBlock Text="{Binding RawContent}"
+                                                                   TextWrapping="Wrap" />
+                                                    </ToolTip>
+                                                </local:HighlightTextBlock.ToolTip>
+                                            </local:HighlightTextBlock>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
@@ -246,7 +303,17 @@
                                 <DataGridTemplateColumn Header="消息内容" Width="*">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}" TextWrapping="Wrap" />
+                                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}"
+                                                                      TextWrapping="Wrap"
+                                                                      ToolTipService.ShowDuration="60000">
+                                                <local:HighlightTextBlock.ToolTip>
+                                                    <ToolTip MaxWidth="700"
+                                                             DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                        <TextBlock Text="{Binding Content}"
+                                                                   TextWrapping="Wrap" />
+                                                    </ToolTip>
+                                                </local:HighlightTextBlock.ToolTip>
+                                            </local:HighlightTextBlock>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>

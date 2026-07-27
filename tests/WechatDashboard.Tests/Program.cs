@@ -15,6 +15,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
+    ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
+    ("Todo repository sorts pending todos by source message time descending", TestTodoOrderByMessageTimeAsync),
     ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("Capture adapter factory creates live WeChat visible-window adapters", TestLiveCaptureAdapterFactoryAsync),
@@ -185,11 +187,149 @@ static async Task TestSqliteRoundTripAsync()
     var savedTodo = await todoRepository.SaveAsync(todo, CancellationToken.None);
     var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
     var recentMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
+    var messagesById = await messageRepository.GetByIdsAsync(new[] { savedMessage.Id, long.MaxValue }, CancellationToken.None);
 
     AssertTrue(savedMessage.Id > 0, "Saved message should get a database id.");
     AssertTrue(savedTodo.Id > 0, "Saved todo should get a database id.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should round-trip.");
     AssertEqual("@张三 请今天处理线上故障", recentMessages.Single().Content, "Recent message content should round-trip.");
+    AssertEqual(1, messagesById.Count, "ID lookup should return only matching messages.");
+    AssertEqual(savedMessage.SentAt, messagesById.Single().SentAt, "ID lookup should preserve the original message time.");
+}
+
+static async Task TestTodoCompletionAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var now = DateTimeOffset.UtcNow;
+    var todo = new TodoItem(
+        Id: 0,
+        SourceMessageId: null,
+        ProjectId: null,
+        Title: "确认测试记录",
+        Description: null,
+        Status: TodoStatus.Pending,
+        Priority: PriorityLevel.P2,
+        DueAt: null,
+        CreatedAt: now.AddMinutes(-5),
+        UpdatedAt: now.AddMinutes(-5),
+        CompletedAt: null,
+        IsAutoCreated: false);
+
+    var savedTodo = await todoRepository.SaveAsync(todo, CancellationToken.None);
+    var completionTime = now.AddSeconds(1);
+    var updated = await todoRepository.MarkCompletedAsync(savedTodo.Id, completionTime, CancellationToken.None);
+    var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+    var completedTodos = await todoRepository.GetCompletedAsync(CancellationToken.None);
+
+    AssertTrue(updated, "Pending todo should be updated exactly once.");
+    AssertEqual(0, pendingTodos.Count, "Completed todo should leave the pending list.");
+    AssertEqual(1, completedTodos.Count, "Completed todo should appear in the completed list.");
+    AssertEqual(TodoStatus.Done, completedTodos.Single().Status, "Completed todo should have Done status.");
+    AssertEqual(completionTime, completedTodos.Single().CompletedAt, "Completion time should be persisted.");
+    AssertFalse(
+        await todoRepository.MarkCompletedAsync(savedTodo.Id, completionTime, CancellationToken.None),
+        "Completing the same todo twice should not update it again.");
+
+    await todoRepository.SaveAsync(
+        todo with
+        {
+            Id = 0,
+            Title = "批量办理记录一",
+            UpdatedAt = now,
+            CompletedAt = null
+        },
+        CancellationToken.None);
+    await todoRepository.SaveAsync(
+        todo with
+        {
+            Id = 0,
+            Title = "批量办理记录二",
+            UpdatedAt = now,
+            CompletedAt = null
+        },
+        CancellationToken.None);
+
+    var bulkCompletionTime = now.AddSeconds(2);
+    var bulkUpdatedCount = await todoRepository.MarkAllCompletedAsync(bulkCompletionTime, CancellationToken.None);
+    var remainingPendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+    var allCompletedTodos = await todoRepository.GetCompletedAsync(CancellationToken.None);
+
+    AssertEqual(2, bulkUpdatedCount, "Bulk completion should update every pending todo.");
+    AssertEqual(0, remainingPendingTodos.Count, "Bulk completion should leave no pending todos.");
+    AssertEqual(3, allCompletedTodos.Count, "Individually and bulk completed todos should all be returned.");
+    AssertEqual(2, allCompletedTodos.Count(item => item.CompletedAt == bulkCompletionTime), "Bulk completion time should be applied consistently.");
+}
+
+static async Task TestTodoOrderByMessageTimeAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var now = DateTimeOffset.UtcNow;
+
+    var olderMessage = CreateMessage(
+        id: 0,
+        chatName: "较早消息群",
+        senderName: "发送人A",
+        content: "较早发送的消息") with
+    {
+        SentAt = now.AddHours(-2),
+        CapturedAt = now
+    };
+    var newerMessage = CreateMessage(
+        id: 0,
+        chatName: "较新消息群",
+        senderName: "发送人B",
+        content: "较晚发送的消息") with
+    {
+        SentAt = now.AddHours(-1),
+        CapturedAt = now
+    };
+
+    var savedOlderMessage = await messageRepository.SaveAsync(olderMessage, CancellationToken.None);
+    var savedNewerMessage = await messageRepository.SaveAsync(newerMessage, CancellationToken.None);
+
+    var olderTodo = new TodoItem(
+        Id: 0,
+        SourceMessageId: savedOlderMessage.Id,
+        ProjectId: null,
+        Title: olderMessage.Content,
+        Description: null,
+        Status: TodoStatus.Pending,
+        Priority: PriorityLevel.P0,
+        DueAt: null,
+        CreatedAt: now,
+        UpdatedAt: now,
+        CompletedAt: null,
+        IsAutoCreated: true);
+    var newerTodo = olderTodo with
+    {
+        SourceMessageId = savedNewerMessage.Id,
+        Title = newerMessage.Content,
+        Priority = PriorityLevel.P3,
+        CreatedAt = now.AddDays(-1),
+        UpdatedAt = now.AddDays(-1)
+    };
+
+    await todoRepository.SaveAsync(olderTodo, CancellationToken.None);
+    await todoRepository.SaveAsync(newerTodo, CancellationToken.None);
+
+    var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+
+    AssertEqual(2, pendingTodos.Count, "Both pending todos should be returned.");
+    AssertEqual(savedNewerMessage.Id, pendingTodos[0].SourceMessageId, "Newer source message should sort first.");
+    AssertEqual(savedOlderMessage.Id, pendingTodos[1].SourceMessageId, "Older source message should sort second.");
 }
 
 static Task TestCaptureAdapterFactoryAsync()

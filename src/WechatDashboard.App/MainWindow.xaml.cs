@@ -184,6 +184,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 待办列表（UI 绑定）
     public ObservableCollection<TodoRow> Todos { get; } = new();
 
+    // 已办理列表（UI 绑定）
+    public ObservableCollection<TodoRow> CompletedTodos { get; } = new();
+
     // 消息流列表（UI 绑定）
     public ObservableCollection<MessageRow> Messages { get; } = new();
 
@@ -517,6 +520,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var recentMessages = await _messageRepository.GetRecentAsync(100, CancellationToken.None);
         // 取所有未完成待办，用于待办列表与项目汇总
         var pendingTodos = await _todoRepository.GetPendingAsync(CancellationToken.None);
+        // 取所有已办理待办，用于已办理页面
+        var completedTodos = await _todoRepository.GetCompletedAsync(CancellationToken.None);
         // 采集源：微信本地数据库（基于 wechat-local-reader 解密）
         var localDatabaseSource = CaptureAdapterFactory.CreateWeChatLocalDatabaseSource(_readerService);
         var localDatabaseConfigPath = CaptureAdapterFactory.GetWeChatLocalDatabaseConfigPath();
@@ -534,29 +539,66 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     ? "未检测到微信数据目录，请确认微信正在运行"
                     : localDatabaseSource.Location;
 
-        // 待办列表绑定数据：通过 SourceMessageId 关联消息获取群名和发送时间
-        var messageLookup = recentMessages.ToDictionary(m => m.Id);
+        // 按待办关联 ID 精确查询原消息，避免旧待办因不在最近消息列表中而显示错误时间。
+        var sourceMessageIds = pendingTodos
+            .Concat(completedTodos)
+            .Where(todo => todo.SourceMessageId.HasValue)
+            .Select(todo => todo.SourceMessageId!.Value)
+            .Distinct()
+            .ToArray();
+        var sourceMessages = await _messageRepository.GetByIdsAsync(sourceMessageIds, CancellationToken.None);
+        var messageLookup = sourceMessages.ToDictionary(message => message.Id);
+
         Replace(Todos, pendingTodos.Select(todo =>
         {
-            // 默认使用待办创建时间
-            var sentAt = todo.CreatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
-            var chatName = ProjectName(todo.ProjectId);
+            var sourceChatName = "无来源消息";
+            var senderName = "-";
+            var messageContent = todo.Title;
+            var sentAt = "-";
 
-            // 若能找到关联消息，则取消息的群名和发送时间
             if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
             {
-                chatName = msg.ChatName;
+                sourceChatName = msg.ChatName;
+                senderName = msg.SenderName;
+                messageContent = msg.Content;
                 sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
             }
 
             return new TodoRow(
                 todo.Id,
                 todo.Priority.ToString(),
-                todo.Status.ToString(),
-                chatName,
-                todo.Title,
-                todo.SourceMessageId?.ToString() ?? "",
-                sentAt);
+                "待办理",
+                sourceChatName,
+                senderName,
+                messageContent,
+                sentAt,
+                "");
+        }));
+
+        Replace(CompletedTodos, completedTodos.Select(todo =>
+        {
+            var sourceChatName = "无来源消息";
+            var senderName = "-";
+            var messageContent = todo.Title;
+            var sentAt = "-";
+
+            if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
+            {
+                sourceChatName = msg.ChatName;
+                senderName = msg.SenderName;
+                messageContent = msg.Content;
+                sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+            }
+
+            return new TodoRow(
+                todo.Id,
+                todo.Priority.ToString(),
+                "已办理",
+                sourceChatName,
+                senderName,
+                messageContent,
+                sentAt,
+                todo.CompletedAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "");
         }));
 
         // 项目汇总：按项目分组统计待办数量与高优先级数量
@@ -595,6 +637,94 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadProjectDashboardAsync();
         await LoadMessageStreamPageAsync(_messageStreamPageNumber, refreshCount: true);
         SummaryText = $"消息 {_messageStreamTotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
+    }
+
+    /// <summary>勾选待办后将其持久化为已办理，并刷新两个列表。</summary>
+    private async void CompleteTodoCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox { IsChecked: true, Tag: TodoRow todoRow } checkBox)
+        {
+            return;
+        }
+
+        checkBox.IsEnabled = false;
+        try
+        {
+            var updated = await _todoRepository.MarkCompletedAsync(
+                todoRow.Id,
+                DateTimeOffset.Now,
+                CancellationToken.None);
+
+            if (!updated)
+            {
+                MessageBox.Show(
+                    "该记录可能已经办理或已被更新，请刷新后重试。",
+                    "办理失败",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            checkBox.IsChecked = false;
+            checkBox.IsEnabled = true;
+            MessageBox.Show(
+                $"办理记录时发生错误：{ex.Message}",
+                "办理失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>确认后将当前全部待办理记录批量转入已办理。</summary>
+    private async void SelectAllTodosCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox { IsChecked: true } checkBox)
+        {
+            return;
+        }
+
+        var todoCount = Todos.Count;
+        if (todoCount == 0)
+        {
+            checkBox.IsChecked = false;
+            return;
+        }
+
+        var confirmation = MessageBox.Show(
+            $"确定将当前 {todoCount} 条待办理记录全部转入已办理吗？",
+            "批量办理",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (confirmation != MessageBoxResult.Yes)
+        {
+            checkBox.IsChecked = false;
+            return;
+        }
+
+        checkBox.IsEnabled = false;
+        try
+        {
+            await _todoRepository.MarkAllCompletedAsync(
+                DateTimeOffset.Now,
+                CancellationToken.None);
+            await RefreshAsync();
+            checkBox.IsChecked = false;
+            checkBox.IsEnabled = true;
+        }
+        catch (Exception ex)
+        {
+            checkBox.IsChecked = false;
+            checkBox.IsEnabled = true;
+            MessageBox.Show(
+                $"批量办理记录时发生错误：{ex.Message}",
+                "办理失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
     }
 
     /// <summary>项目看板维度切换：按项目、时间或群名重新统计。</summary>
@@ -1634,7 +1764,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 }
 
 /// <summary>待办列表行数据：用于 UI 绑定展示单条待办。</summary>
-public sealed record TodoRow(long Id, string Priority, string Status, string ChatName, string Title, string SourceMessageId, string SentAt);
+public sealed record TodoRow(
+    long Id,
+    string Priority,
+    string Status,
+    string SourceChatName,
+    string SenderName,
+    string MessageContent,
+    string SentAt,
+    string CompletedAt);
 
 /// <summary>消息流列表行数据：用于 UI 绑定展示单条入库消息。</summary>
 public sealed record MessageRow(string SentAt, string ChatName, string SenderName, string IsMentionMe, string Content);

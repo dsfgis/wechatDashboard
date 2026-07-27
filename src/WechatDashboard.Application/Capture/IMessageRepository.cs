@@ -17,6 +17,9 @@ public interface IMessageRepository
     /// <summary>获取最近 N 条消息（按采集时间倒序）。</summary>
     Task<IReadOnlyList<Message>> GetRecentAsync(int limit, CancellationToken cancellationToken);
 
+    /// <summary>按消息 ID 集合精确查询消息。</summary>
+    Task<IReadOnlyList<Message>> GetByIdsAsync(IReadOnlyCollection<long> ids, CancellationToken cancellationToken);
+
     /// <summary>分页查询消息（按发送时间倒序）。</summary>
     Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken);
 

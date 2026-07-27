@@ -114,6 +114,61 @@ public sealed class SqliteMessageRepository : IMessageRepository
         return messages;
     }
 
+    /// <summary>按消息 ID 集合精确查询消息，自动分批避免 SQLite 参数数量限制。</summary>
+    public async Task<IReadOnlyList<Message>> GetByIdsAsync(
+        IReadOnlyCollection<long> ids,
+        CancellationToken cancellationToken)
+    {
+        var distinctIds = ids
+            .Where(id => id > 0)
+            .Distinct()
+            .ToArray();
+
+        if (distinctIds.Length == 0)
+        {
+            return Array.Empty<Message>();
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        var messages = new List<Message>(distinctIds.Length);
+
+        foreach (var batch in distinctIds.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = batch.Select((_, index) => $"$id{index}").ToArray();
+
+            command.CommandText = $"""
+                SELECT
+                    id,
+                    source,
+                    source_message_key,
+                    chat_session_id,
+                    chat_name,
+                    sender_name,
+                    content,
+                    message_type,
+                    sent_at,
+                    captured_at,
+                    is_mention_me
+                FROM messages
+                WHERE id IN ({string.Join(", ", placeholders)});
+                """;
+
+            for (var index = 0; index < batch.Length; index++)
+            {
+                command.Parameters.AddWithValue(placeholders[index], batch[index]);
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                messages.Add(ReadMessage(reader));
+            }
+        }
+
+        return messages;
+    }
+
     /// <summary>
     /// 分页查询消息（按发送时间倒序）。
     /// 在后台线程执行以避免阻塞 UI；内部先 COUNT 再取页数据。

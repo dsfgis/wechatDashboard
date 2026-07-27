@@ -13,4 +13,13 @@ public interface ITodoRepository
 
     /// <summary>获取所有未完成的待办（按优先级和时间排序）。</summary>
     Task<IReadOnlyList<TodoItem>> GetPendingAsync(CancellationToken cancellationToken);
+
+    /// <summary>获取所有已办理的待办（按完成时间倒序排列）。</summary>
+    Task<IReadOnlyList<TodoItem>> GetCompletedAsync(CancellationToken cancellationToken);
+
+    /// <summary>将指定待办标记为已办理，并记录完成时间。</summary>
+    Task<bool> MarkCompletedAsync(long id, DateTimeOffset completedAt, CancellationToken cancellationToken);
+
+    /// <summary>将所有待办理记录标记为已办理，并返回更新数量。</summary>
+    Task<int> MarkAllCompletedAsync(DateTimeOffset completedAt, CancellationToken cancellationToken);
 }
