@@ -21,7 +21,7 @@ public static class CaptureAdapterFactory
         };
     }
 
-    /// <summary>创建默认的实时采集源（含 JSONL + 微信本地导出/数据库/窗口）。</summary>
+    /// <summary>创建默认的实时采集源（含 JSONL、微信本地源和石化通本地数据库）。</summary>
     public static IReadOnlyList<CaptureSourceDefinition> CreateDefaultLiveSources(string captureRootPath)
     {
         var readerService = new WeChatLocalReaderService();
@@ -38,7 +38,8 @@ public static class CaptureAdapterFactory
             {
                 CreateWeChatLocalExportSource(captureRootPath),
                 CreateWeChatLocalDatabaseSource(readerService),
-                CreateWeChatWindowTextSource()
+                CreateWeChatWindowTextSource(),
+                CreateShihuatongLocalDatabaseSource(),
             })
             .ToArray();
     }
@@ -106,6 +107,17 @@ public static class CaptureAdapterFactory
             IsEnabled: readerService.IsAvailable && readerService.IsInitialized);
     }
 
+    /// <summary>创建石化通本地数据库采集源；读取时不依赖可见窗口。</summary>
+    public static CaptureSourceDefinition CreateShihuatongLocalDatabaseSource()
+    {
+        return new CaptureSourceDefinition(
+            Source: "Shihuatong",
+            DisplayName: "石化通本地数据库",
+            Kind: CaptureSourceKind.ShihuatongLocalDatabase,
+            Location: "自动发现（只读本地数据库）",
+            IsEnabled: true);
+    }
+
     /// <summary>获取微信本地数据库配置文件路径。</summary>
     public static string GetWeChatLocalDatabaseConfigPath()
     {
@@ -135,6 +147,7 @@ public static class CaptureAdapterFactory
             }),
             CaptureSourceKind.WeChatLocalCommand => CreateLocalCommandAdapter(source),
             CaptureSourceKind.WindowText => CreateWindowTextAdapter(source, windowTextSnapshotProvider),
+            CaptureSourceKind.ShihuatongLocalDatabase => new ShihuatongLocalDatabaseCaptureAdapter(),
             _ => throw new NotSupportedException($"Capture source kind '{source.Kind}' is not implemented for source '{source.Source}'.")
         };
     }

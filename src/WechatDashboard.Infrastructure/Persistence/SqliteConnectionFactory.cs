@@ -20,11 +20,7 @@ internal static class SqliteConnectionFactory
     /// <param name="databasePath">数据库文件路径。</param>
     public static SqliteConnection Open(string databasePath)
     {
-        // 首次调用时初始化 SQLitePCL
-        if (Interlocked.Exchange(ref _sqliteInitialized, 1) == 0)
-        {
-            SQLitePCL.Batteries_V2.Init();
-        }
+        EnsureSqliteInitialized();
 
         // 确保数据库目录存在
         var directory = Path.GetDirectoryName(databasePath);
@@ -50,5 +46,14 @@ internal static class SqliteConnectionFactory
             pragmaCommand.ExecuteNonQuery();
         }
         return connection;
+    }
+
+    /// <summary>确保普通 SQLite 与 SQLCipher 共用的原生提供器仅初始化一次。</summary>
+    internal static void EnsureSqliteInitialized()
+    {
+        if (Interlocked.Exchange(ref _sqliteInitialized, 1) == 0)
+        {
+            SQLitePCL.Batteries_V2.Init();
+        }
     }
 }

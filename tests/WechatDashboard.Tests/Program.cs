@@ -20,6 +20,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("Capture adapter factory creates live WeChat visible-window adapters", TestLiveCaptureAdapterFactoryAsync),
+    ("Shihuatong protobuf decoder reads text content", TestShihuatongMessageContentDecoderAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
     ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
@@ -379,6 +380,7 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(definitions.Any(source => source.Source == "Feishu" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep future Feishu JSONL import.");
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WeChatLocalExport && source.IsEnabled), "Live capture should enable WeChat local export source.");
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText && source.IsEnabled), "Live capture should enable visible-window source by default.");
+    AssertTrue(definitions.Any(source => source.Source == "Shihuatong" && source.Kind == CaptureSourceKind.ShihuatongLocalDatabase && source.IsEnabled), "Live capture should enable Shihuatong local database source.");
 
     var adapters = CaptureAdapterFactory.CreateAdapters(
         definitions,
@@ -388,9 +390,25 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.WindowText"), "Live adapters should include WeChat visible-window adapter when provider is available.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "Live adapters should still include WeChat JSONL adapter.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.LocalDatabase"), "Live adapters should include Shihuatong local database adapter.");
 
     return Task.CompletedTask;
 }
+
+static Task TestShihuatongMessageContentDecoderAsync()
+{
+    var text = "石化通本地消息";
+    var textBytes = System.Text.Encoding.UTF8.GetBytes(text);
+    var nested = new byte[] { 0x0A, (byte)textBytes.Length }.Concat(textBytes).ToArray();
+    var payload = new byte[] { 0x12, (byte)nested.Length }.Concat(nested).ToArray();
+
+    var decoded = ShihuatongMessageContentDecoder.TryDecodeText(payload);
+
+    AssertEqual(text, decoded, "Decoder should read field 2 CoreIMTextMessage field 1 text.");
+    AssertEqual<string?>(null, ShihuatongMessageContentDecoder.TryDecodeText(Array.Empty<byte>()), "Empty payload should not produce text.");
+    return Task.CompletedTask;
+}
+
 
 static async Task TestWindowTextCaptureAdapterAsync()
 {
@@ -934,7 +952,8 @@ static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
     var todoRepository = new SqliteTodoRepository(databasePath);
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
     var sources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
-        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand)
+        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand &&
+                         source.Kind != CaptureSourceKind.ShihuatongLocalDatabase)
         .ToArray();
     var pipeline = new MessageCapturePipeline(
         adapters: CaptureAdapterFactory.CreateAdapters(sources),
@@ -1031,7 +1050,8 @@ static async Task TestCapturePipelineWithSavedSettingsAsync()
     await settingsRepository.SaveAllAsync(savedSettings, CancellationToken.None);
 
     var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
-        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand)
+        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand &&
+                         source.Kind != CaptureSourceKind.ShihuatongLocalDatabase)
         .ToArray();
     var effectiveSources = defaultSources.Select(source =>
     {

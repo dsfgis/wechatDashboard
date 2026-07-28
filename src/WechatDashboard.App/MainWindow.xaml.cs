@@ -610,6 +610,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 group.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1))));
 
         // 采集诊断列表：展示各采集源的可用性与状态
+        var shihuatongLocalDatabaseReady = ShihuatongLocalDatabaseCaptureAdapter.IsProcessRunning;
         Replace(Diagnostics, new[]
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
@@ -622,6 +623,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 localDbDetail),
             new DiagnosticRow("Feishu.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Feishu")),
             new DiagnosticRow("Shihuatong.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "Shihuatong")),
+            new DiagnosticRow(
+                "Shihuatong.LocalDatabase",
+                shihuatongLocalDatabaseReady ? "已就绪" : "等待石化通运行",
+                shihuatongLocalDatabaseReady ? DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm") : "-",
+                "只读获取进程内数据库密钥并读取本地加密消息库，不使用可见窗口"),
             new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),
             new DiagnosticRow("WeChat.WindowText", "已启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "UIA+OCR 读取可见微信窗口，实时采集，窗口最小化后不可用"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
