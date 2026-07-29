@@ -552,12 +552,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(Todos, pendingTodos.Select(todo =>
         {
             var sourceChatName = "无来源消息";
+            var source = "-";
             var senderName = "-";
             var messageContent = todo.Title;
             var sentAt = "-";
 
             if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
             {
+                source = FormatMessageSource(msg.Source);
                 sourceChatName = msg.ChatName;
                 senderName = msg.SenderName;
                 messageContent = msg.Content;
@@ -568,6 +570,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 todo.Id,
                 todo.Priority.ToString(),
                 "待办理",
+                source,
                 sourceChatName,
                 senderName,
                 messageContent,
@@ -578,12 +581,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(CompletedTodos, completedTodos.Select(todo =>
         {
             var sourceChatName = "无来源消息";
+            var source = "-";
             var senderName = "-";
             var messageContent = todo.Title;
             var sentAt = "-";
 
             if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
             {
+                source = FormatMessageSource(msg.Source);
                 sourceChatName = msg.ChatName;
                 senderName = msg.SenderName;
                 messageContent = msg.Content;
@@ -594,6 +599,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 todo.Id,
                 todo.Priority.ToString(),
                 "已办理",
+                source,
                 sourceChatName,
                 senderName,
                 messageContent,
@@ -919,6 +925,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         Replace(Messages, page.Messages.Select(message => new MessageRow(
             message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+            FormatMessageSource(message.Source),
             message.ChatName,
             message.SenderName,
             message.IsMentionMe ? "是" : "否",
@@ -934,6 +941,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return new HighlightableMessageRow
             {
                 SentAt = message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+                Source = FormatMessageSource(message.Source),
                 ChatName = message.ChatName,
                 SenderName = message.SenderName,
                 IsMentionMe = message.IsMentionMe ? "是" : "否",
@@ -1722,6 +1730,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             IsMentionMe: false);
     }
 
+    /// <summary>将内部来源标识转换为界面显示名称。</summary>
+    private static string FormatMessageSource(string source)
+    {
+        var value = source.Trim();
+        return value.ToUpperInvariant() switch
+        {
+            "WECHAT" => "微信",
+            "SHIHUATONG" => "石化通",
+            "FEISHU" => "飞书",
+            "DINGTALK" => "钉钉",
+            "SAMPLE" => "示例",
+            "" => "未知",
+            _ => value
+        };
+    }
+
     private static ProjectClassifier CreateProjectClassifier()
     {
         return new ProjectClassifier(new[]
@@ -1774,6 +1798,7 @@ public sealed record TodoRow(
     long Id,
     string Priority,
     string Status,
+    string Source,
     string SourceChatName,
     string SenderName,
     string MessageContent,
@@ -1781,7 +1806,7 @@ public sealed record TodoRow(
     string CompletedAt);
 
 /// <summary>消息流列表行数据：用于 UI 绑定展示单条入库消息。</summary>
-public sealed record MessageRow(string SentAt, string ChatName, string SenderName, string IsMentionMe, string Content);
+public sealed record MessageRow(string SentAt, string Source, string ChatName, string SenderName, string IsMentionMe, string Content);
 
 /// <summary>微信消息列表行数据：用于 UI 绑定展示单条微信原生消息。</summary>
 public sealed record WeChatMessageRow(string Content, string ChatName, string SenderName);
@@ -1790,6 +1815,7 @@ public sealed record WeChatMessageRow(string Content, string ChatName, string Se
 public sealed class HighlightableMessageRow : INotifyPropertyChanged
 {
     private string _sentAt = "";
+    private string _source = "";
     private string _chatName = "";
     private string _senderName = "";
     private string _isMentionMe = "";
@@ -1802,6 +1828,12 @@ public sealed class HighlightableMessageRow : INotifyPropertyChanged
     {
         get => _sentAt;
         set { _sentAt = value; OnPropertyChanged(); }
+    }
+
+    public string Source
+    {
+        get => _source;
+        set { _source = value; OnPropertyChanged(); }
     }
 
     public string ChatName

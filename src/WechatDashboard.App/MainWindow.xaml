@@ -208,6 +208,7 @@
                             <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="150" />
                             <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
                             <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
+                            <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="90" />
                             <DataGridTextColumn Header="来源消息" Binding="{Binding SourceChatName}" Width="160" />
                             <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
                             <DataGridTemplateColumn Header="消息内容" CellTemplate="{StaticResource TodoMessageContentTemplate}" Width="*" />
@@ -220,6 +221,7 @@
                             <DataGridTextColumn Header="完成时间" Binding="{Binding CompletedAt}" Width="150" />
                             <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
                             <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
+                            <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="90" />
                             <DataGridTextColumn Header="来源消息" Binding="{Binding SourceChatName}" Width="160" />
                             <DataGridTemplateColumn Header="消息内容" CellTemplate="{StaticResource TodoMessageContentTemplate}" Width="*" />
                         </DataGrid.Columns>
@@ -250,6 +252,7 @@
                         <DataGrid ItemsSource="{Binding HighlightableMessages}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="170" />
+                                <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="90" />
                                 <DataGridTextColumn Header="群聊" Binding="{Binding ChatName}" Width="160" />
                                 <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
                                 <DataGridTextColumn Header="@我" Binding="{Binding IsMentionMe}" Width="70" />
