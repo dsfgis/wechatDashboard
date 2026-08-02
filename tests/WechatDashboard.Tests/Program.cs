@@ -37,7 +37,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
     ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync),
-    ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync)
+    ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync),
+    ("Project keyword repository supports multiple keywords per project", TestFollowedProjectKeywordRepositoryAsync),
 };
 
 var failures = new List<string>();
@@ -1114,6 +1115,33 @@ static async Task TestUserAliasRepositoryAsync()
     var afterDelete = await repository.GetAllAsync(CancellationToken.None);
     AssertEqual(1, afterDelete.Count, "Deleted alias should no longer be returned.");
     AssertEqual("白驹过隙", afterDelete.Single().Alias, "Remaining alias should be the one not deleted.");
+}
+
+static async Task TestFollowedProjectKeywordRepositoryAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
+    var keywordRepository = new SqliteFollowedProjectKeywordRepository(databasePath);
+    var project = await projectRepository.SaveAsync("智能管线", CancellationToken.None);
+    await keywordRepository.SaveAsync(project.Id, "管线提升", CancellationToken.None);
+    await keywordRepository.SaveAsync(project.Id, "WMS联调", CancellationToken.None);
+    await keywordRepository.SaveAsync(project.Id, "wms联调", CancellationToken.None);
+
+    var keywords = await keywordRepository.GetAllAsync(CancellationToken.None);
+    AssertEqual(2, keywords.Count, "Duplicate keywords for the same project should not create another row.");
+    AssertTrue(keywords.All(keyword => keyword.ProjectName == "智能管线"), "All keywords should retain their owning project name.");
+
+    var classifier = new ProjectClassifier(keywords.Select(keyword =>
+        new ProjectRule(keyword.ProjectId, keyword.ProjectName, ProjectRuleType.Keyword, keyword.Keyword, 170)));
+    var result = classifier.Classify(CreateMessage(100, "实施群", "王工", "请确认 WMS联调 计划"));
+    AssertEqual(project.Id, result.ProjectId, "Any keyword of one project should classify the message into that project.");
+    AssertEqual("智能管线", result.ProjectName, "Keyword classification should return the shared project name.");
+
+    await keywordRepository.DeleteByProjectIdAsync(project.Id, CancellationToken.None);
+    AssertEqual(0, (await keywordRepository.GetAllAsync(CancellationToken.None)).Count, "Deleting a project keyword set should remove all its keywords.");
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)

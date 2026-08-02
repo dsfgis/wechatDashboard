@@ -341,32 +341,18 @@
                                         <ComboBoxItem Content="按时间" Tag="time" />
                                         <ComboBoxItem Content="按群名" Tag="chat" />
                                     </ComboBox>
+                                    <TextBlock Text="图表类型" VerticalAlignment="Center" Foreground="#4B5563" Margin="14,0,6,8" />
+                                    <ComboBox x:Name="DashboardChartTypeComboBox" Width="128" SelectedIndex="0" SelectionChanged="DashboardChartTypeComboBox_SelectionChanged">
+                                        <ComboBoxItem Content="横向柱状图" Tag="bar" />
+                                        <ComboBoxItem Content="环形占比图" Tag="pie" />
+                                        <ComboBoxItem Content="趋势折线图" Tag="line" />
+                                    </ComboBox>
                                 </WrapPanel>
                             </DockPanel>
 
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <ItemsControl ItemsSource="{Binding DashboardChartRows}">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Margin="0,0,0,10">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="190" />
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="80" />
-                                                </Grid.ColumnDefinitions>
-                                                <Grid.RowDefinitions>
-                                                    <RowDefinition Height="Auto" />
-                                                    <RowDefinition Height="Auto" />
-                                                </Grid.RowDefinitions>
-                                                <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Label}" Foreground="#111827" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                                <ProgressBar Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Percent}" Height="18" Margin="0,2,12,0" />
-                                                <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding CountText}" Foreground="#111827" FontWeight="SemiBold" HorizontalAlignment="Right" />
-                                                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Text="{Binding Detail}" Foreground="#6B7280" FontSize="12" Margin="0,3,0,0" TextWrapping="Wrap" />
-                                            </Grid>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                            </ScrollViewer>
+                            <local:DashboardChartControl ItemsSource="{Binding DashboardChartRows}"
+                                                         ChartType="{Binding DashboardChartType}"
+                                                         MinHeight="330" />
                         </DockPanel>
                     </Border>
                 </TabItem>
@@ -410,17 +396,31 @@
                         </DataGrid>
 
                         <Separator Margin="0,16,0,12" />
-                        <TextBlock Text="关注项目设置（群名包含项目名时重点关注）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
-                        <TextBlock Text="输入项目名称，支持添加多个。群名包含任一项目名时，该群消息将标记为重点关注。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
+                        <TextBlock Text="项目设置" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock Text="先创建项目，再为项目添加多个关键字。群名或消息正文包含任一关键字时，消息将归入该项目。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
                             <TextBox x:Name="NewFollowedProjectTextBox" Width="260" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入项目名称" />
-                            <Button x:Name="AddFollowedProjectButton" Content="添加" Click="AddFollowedProjectButton_Click" Margin="0,0,8,0" Padding="16,4" />
+                            <Button x:Name="AddFollowedProjectButton" Content="添加项目" Click="AddFollowedProjectButton_Click" Margin="0,0,8,0" Padding="16,4" />
                             <Button x:Name="DeleteFollowedProjectButton" Content="删除选中" Click="DeleteFollowedProjectButton_Click" Padding="16,4" />
                         </StackPanel>
-                        <DataGrid x:Name="FollowedProjectsGrid" ItemsSource="{Binding FollowedProjects}" Height="180" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
+                        <DataGrid x:Name="FollowedProjectsGrid" ItemsSource="{Binding FollowedProjects}" Height="130" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
                                 <DataGridTextColumn Header="项目名称" Binding="{Binding ProjectName}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <TextBlock Text="项目关键字" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <ComboBox x:Name="ProjectKeywordProjectComboBox" Width="190" ItemsSource="{Binding FollowedProjects}" DisplayMemberPath="ProjectName" SelectedValuePath="Id" Margin="0,0,8,0" ToolTip="选择要添加关键字的项目" />
+                            <TextBox x:Name="NewFollowedProjectKeywordTextBox" Width="180" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入匹配关键字" />
+                            <Button Content="添加关键字" Click="AddFollowedProjectKeywordButton_Click" Margin="0,0,8,0" Padding="16,4" />
+                            <Button Content="删除关键字" Click="DeleteFollowedProjectKeywordButton_Click" Padding="16,4" />
+                        </StackPanel>
+                        <DataGrid x:Name="FollowedProjectKeywordsGrid" ItemsSource="{Binding FollowedProjectKeywords}" Height="180" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="项目" Binding="{Binding ProjectName}" Width="180" />
+                                <DataGridTextColumn Header="关键字" Binding="{Binding Keyword}" Width="*" />
                             </DataGrid.Columns>
                         </DataGrid>
 

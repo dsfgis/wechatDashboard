@@ -182,6 +182,16 @@ public sealed class SqliteDatabaseInitializer
             created_at TEXT NOT NULL
         );
 
+
+        -- 关注项目关键字表：同一个项目可配置多个匹配关键字
+        CREATE TABLE IF NOT EXISTS followed_project_keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            keyword TEXT NOT NULL COLLATE NOCASE,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_id, keyword),
+            FOREIGN KEY(project_id) REFERENCES followed_projects(id) ON DELETE CASCADE
+        );
         -- 应用设置表（key-value 存储，用于关注群过滤模式等开关）
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -202,6 +212,7 @@ public sealed class SqliteDatabaseInitializer
         CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
         CREATE INDEX IF NOT EXISTS idx_messages_chat_session ON messages(chat_session_id);
         CREATE INDEX IF NOT EXISTS idx_messages_mention ON messages(is_mention_me, sent_at);
+        CREATE INDEX IF NOT EXISTS idx_followed_project_keywords_project ON followed_project_keywords(project_id);
         CREATE INDEX IF NOT EXISTS idx_messages_sent_at_id ON messages(sent_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_chat_name ON messages(chat_name);
         CREATE INDEX IF NOT EXISTS idx_messages_source_key ON messages(source, source_message_key);

@@ -37,6 +37,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteUserAliasRepository _aliasRepository;
     private readonly SqliteFollowedChatRepository _followedChatRepository;
     private readonly SqliteFollowedProjectRepository _followedProjectRepository;
+    private readonly SqliteFollowedProjectKeywordRepository _followedProjectKeywordRepository;
     // JSONL 采集收件箱路径
     private readonly string _captureInboxPath;
     // 当前生效的 @我 别名集合（默认兜底）
@@ -47,6 +48,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private FollowedChatFilterMode _followedChatFilterMode = FollowedChatFilterMode.Include;
     // 当前生效的关注项目名称集合（群名包含项目名时，该群消息重点关注）
     private IReadOnlyList<string> _currentFollowedProjects = Array.Empty<string>();
+    private IReadOnlyList<FollowedProjectKeyword> _currentFollowedProjectKeywords = Array.Empty<FollowedProjectKeyword>();
     // 微信本地读取器服务
     private readonly WeChatLocalReaderService _readerService;
     // 采集并发控制信号量，避免实时循环与手动采集重叠
@@ -83,6 +85,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _messageStreamPageText = "第 0/0 页，共 0 条";
     private string _messageStreamStatusText = "正在加载消息流...";
     private string _dashboardStatusText = "按项目统计最近消息。";
+    private string _dashboardChartType = "bar";
     public MainWindow()
     {
         InitializeComponent();
@@ -99,6 +102,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _aliasRepository = new SqliteUserAliasRepository(_databasePath);
         _followedChatRepository = new SqliteFollowedChatRepository(_databasePath);
         _followedProjectRepository = new SqliteFollowedProjectRepository(_databasePath);
+        _followedProjectKeywordRepository = new SqliteFollowedProjectKeywordRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
 
@@ -180,6 +184,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         get => _dashboardStatusText;
         private set => SetField(ref _dashboardStatusText, value);
     }
+    public string DashboardChartType
+    {
+        get => _dashboardChartType;
+        private set => SetField(ref _dashboardChartType, value);
+    }
+
 
     // 待办列表（UI 绑定）
     public ObservableCollection<TodoRow> Todos { get; } = new();
@@ -222,6 +232,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // 关注项目列表（UI 绑定）
     public ObservableCollection<FollowedProjectRow> FollowedProjects { get; } = new();
+    // 项目关键字列表（UI 绑定）
+    public ObservableCollection<FollowedProjectKeywordRow> FollowedProjectKeywords { get; } = new();
 
     /// <summary>窗口加载完成：初始化数据库、加载采集源设置，并在读取器就绪时读取当天消息。</summary>
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -749,6 +761,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         await LoadProjectDashboardAsync();
     }
+    /// <summary>项目看板图表类型切换：柱状、环形占比或趋势折线图。</summary>
+    private async void DashboardChartTypeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        DashboardChartType = ReadSelectedDashboardChartType();
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await LoadProjectDashboardAsync();
+    }
+
 
     /// <summary>加载项目看板统计图，默认统计最近一批入库消息。</summary>
     private async Task LoadProjectDashboardAsync()
@@ -756,6 +780,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var messages = await _messageRepository.GetRecentAsync(DashboardMessageSampleLimit, CancellationToken.None);
         var dimension = ReadSelectedDashboardDimension();
         var rows = BuildDashboardRows(messages, dimension);
+        if (dimension == "time" && DashboardChartType == "line")
+        {
+            // 时间聚合默认按最近日期优先；折线图需要按时间正序连接数据点。
+            rows = rows.Reverse().ToArray();
+        }
+
         Replace(DashboardChartRows, rows);
 
         var dimensionText = dimension switch
@@ -764,9 +794,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             "chat" => "群名",
             _ => "项目"
         };
+        var chartTypeText = DashboardChartType switch
+        {
+            "pie" => "环形占比图",
+            "line" => "趋势折线图",
+            _ => "横向柱状图"
+        };
         DashboardStatusText = rows.Count == 0
             ? $"暂无可统计消息。当前维度：按{dimensionText}。"
-            : $"按{dimensionText}统计最近 {messages.Count} 条入库消息，显示前 {rows.Count} 项。";
+            : $"按{dimensionText}统计最近 {messages.Count} 条入库消息，使用{chartTypeText}显示前 {rows.Count} 项。";
     }
 
     private string ReadSelectedDashboardDimension()
@@ -778,6 +814,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         return "project";
+    }
+
+    private string ReadSelectedDashboardChartType()
+    {
+        if (DashboardChartTypeComboBox?.SelectedItem is ComboBoxItem item &&
+            item.Tag is string tag)
+        {
+            return tag;
+        }
+
+        return "bar";
     }
 
     private IReadOnlyList<DashboardChartRow> BuildDashboardRows(IReadOnlyList<Message> messages, string dimension)
@@ -874,7 +921,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private string ResolveDashboardProjectName(Message message)
     {
-        var followedProjectName = MatchFollowedProject(message.ChatName);
+        var followedProjectName = MatchFollowedProject(message);
         if (!string.IsNullOrWhiteSpace(followedProjectName))
         {
             return followedProjectName;
@@ -1428,17 +1475,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : "已切换为只显示模式：将仅显示列表中的群消息。";
     }
 
-    /// <summary>
-    /// 加载关注项目列表：同时更新当前生效的关注项目名称集合与 UI 列表。
-    /// </summary>
+    /// <summary>加载项目及其关键字，并为旧项目补充以项目名为关键字的兼容项。</summary>
     private async Task LoadFollowedProjectsAsync()
     {
         var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
-        _currentFollowedProjects = projects.Select(p => p.ProjectName).ToArray();
-        Replace(FollowedProjects, projects.Select(p => new FollowedProjectRow(p.Id, p.ProjectName)));
+        var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+        var addedDefaultKeyword = false;
+        foreach (var project in projects.Where(project => keywords.All(keyword => keyword.ProjectId != project.Id)))
+        {
+            await _followedProjectKeywordRepository.SaveAsync(project.Id, project.ProjectName, CancellationToken.None);
+            addedDefaultKeyword = true;
+        }
+        if (addedDefaultKeyword)
+        {
+            keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+        }
+
+        _currentFollowedProjects = projects.Select(project => project.ProjectName).ToArray();
+        _currentFollowedProjectKeywords = keywords;
+        Replace(FollowedProjects, projects.Select(project => new FollowedProjectRow(project.Id, project.ProjectName)));
+        Replace(FollowedProjectKeywords, keywords.Select(keyword => new FollowedProjectKeywordRow(keyword.Id, keyword.ProjectId, keyword.ProjectName, keyword.Keyword)));
     }
 
-    /// <summary>添加关注项目：校验非空后保存并刷新列表。</summary>
+    /// <summary>添加项目，并将项目名称作为初始关键字以保持既有匹配方式。</summary>
     private async void AddFollowedProjectButton_Click(object sender, RoutedEventArgs e)
     {
         var projectName = NewFollowedProjectTextBox?.Text?.Trim();
@@ -1448,51 +1507,85 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        await _followedProjectRepository.SaveAsync(projectName, CancellationToken.None);
-        if (NewFollowedProjectTextBox is not null)
-        {
-            NewFollowedProjectTextBox.Text = "";
-        }
+        var project = await _followedProjectRepository.SaveAsync(projectName, CancellationToken.None);
+        await _followedProjectKeywordRepository.SaveAsync(project.Id, projectName, CancellationToken.None);
+        if (NewFollowedProjectTextBox is not null) NewFollowedProjectTextBox.Text = "";
         await LoadFollowedProjectsAsync();
+        ProjectKeywordProjectComboBox.SelectedValue = project.Id;
         await LoadProjectDashboardAsync();
-        SummaryText = $"已添加关注项目「{projectName}」，群名包含该项目名的消息将重点关注。";
+        SummaryText = $"已添加项目「{projectName}」，可继续为它添加多个关键字。";
     }
 
-    /// <summary>删除关注项目：需先在列表中选中一行，删除后刷新列表。</summary>
+    /// <summary>删除项目以及它关联的所有关键字。</summary>
     private async void DeleteFollowedProjectButton_Click(object sender, RoutedEventArgs e)
     {
         if (FollowedProjectsGrid?.SelectedItem is not FollowedProjectRow row)
         {
-            SummaryText = "请先选中要删除的关注项目。";
+            SummaryText = "请先选中要删除的项目。";
             return;
         }
 
+        await _followedProjectKeywordRepository.DeleteByProjectIdAsync(row.Id, CancellationToken.None);
         await _followedProjectRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedProjectsAsync();
         await LoadProjectDashboardAsync();
-        SummaryText = $"已删除关注项目「{row.ProjectName}」。";
+        SummaryText = $"已删除项目「{row.ProjectName}」及其关键字。";
     }
 
-    /// <summary>
-    /// 判断群名是否包含某个关注项目名，返回匹配到的项目名（无匹配返回空字符串）。
-    /// 用于在消息列表中标记"重点关注"。
-    /// </summary>
-    private string MatchFollowedProject(string chatName)
+    /// <summary>向选中项目追加关键字。</summary>
+    private async void AddFollowedProjectKeywordButton_Click(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(chatName) || _currentFollowedProjects.Count == 0)
+        if (ProjectKeywordProjectComboBox?.SelectedItem is not FollowedProjectRow project)
         {
-            return "";
+            SummaryText = "请先选择要添加关键字的项目。";
+            return;
+        }
+        var keyword = NewFollowedProjectKeywordTextBox?.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(keyword))
+        {
+            SummaryText = "请输入项目关键字。";
+            return;
         }
 
-        foreach (var projectName in _currentFollowedProjects)
+        await _followedProjectKeywordRepository.SaveAsync(project.Id, keyword, CancellationToken.None);
+        if (NewFollowedProjectKeywordTextBox is not null) NewFollowedProjectKeywordTextBox.Text = "";
+        await LoadFollowedProjectsAsync();
+        ProjectKeywordProjectComboBox.SelectedValue = project.Id;
+        await LoadProjectDashboardAsync();
+        SummaryText = $"已为「{project.ProjectName}」添加关键字「{keyword}」。";
+    }
+
+    /// <summary>删除选中的关键字；每个项目至少保留一个匹配关键字。</summary>
+    private async void DeleteFollowedProjectKeywordButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (FollowedProjectKeywordsGrid?.SelectedItem is not FollowedProjectKeywordRow row)
         {
-            if (chatName.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-            {
-                return projectName;
-            }
+            SummaryText = "请先选中要删除的关键字。";
+            return;
+        }
+        if (_currentFollowedProjectKeywords.Count(keyword => keyword.ProjectId == row.ProjectId) <= 1)
+        {
+            SummaryText = "每个项目至少保留一个关键字；如不再需要，请删除该项目。";
+            return;
         }
 
-        return "";
+        await _followedProjectKeywordRepository.DeleteAsync(row.Id, CancellationToken.None);
+        await LoadFollowedProjectsAsync();
+        ProjectKeywordProjectComboBox.SelectedValue = row.ProjectId;
+        await LoadProjectDashboardAsync();
+        SummaryText = $"已删除项目「{row.ProjectName}」的关键字「{row.Keyword}」。";
+    }
+
+    /// <summary>按最长关键字优先匹配群名和消息正文，返回归属项目名称。</summary>
+    private string MatchFollowedProject(Message message)
+    {
+        var match = _currentFollowedProjectKeywords
+            .Where(keyword => message.ChatName.Contains(keyword.Keyword, StringComparison.OrdinalIgnoreCase)
+                || message.Content.Contains(keyword.Keyword, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(keyword => keyword.Keyword.Length)
+            .ThenBy(keyword => keyword.ProjectName, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        return match?.ProjectName ?? "";
     }
 
     /// <summary>保存采集源设置：清空旧设置后批量写入当前 UI 列表中的设置项。</summary>
@@ -1746,14 +1839,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         };
     }
 
-    private static ProjectClassifier CreateProjectClassifier()
+    private ProjectClassifier CreateProjectClassifier()
     {
-        return new ProjectClassifier(new[]
+        var configuredRules = _currentFollowedProjectKeywords.SelectMany(keyword => new[]
+        {
+            new ProjectRule(keyword.ProjectId, keyword.ProjectName, ProjectRuleType.ChatName, keyword.Keyword, 180),
+            new ProjectRule(keyword.ProjectId, keyword.ProjectName, ProjectRuleType.Keyword, keyword.Keyword, 170)
+        });
+        var defaultRules = new[]
         {
             new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
             new ProjectRule(2, "支付平台", ProjectRuleType.Keyword, "支付", 80),
             new ProjectRule(3, "数据中台", ProjectRuleType.Keyword, "数据", 70)
-        });
+        };
+        return new ProjectClassifier(configuredRules.Concat(defaultRules));
     }
     /// <summary>根据项目 ID 返回项目名称，未匹配返回"未分类"。</summary>
     private static string ProjectName(long? projectId)
@@ -1956,3 +2055,4 @@ public sealed record FollowedChatRow(long Id, string ChatName);
 
 /// <summary>关注项目行数据：用于 UI 展示与删除操作。</summary>
 public sealed record FollowedProjectRow(long Id, string ProjectName);
+public sealed record FollowedProjectKeywordRow(long Id, long ProjectId, string ProjectName, string Keyword);
