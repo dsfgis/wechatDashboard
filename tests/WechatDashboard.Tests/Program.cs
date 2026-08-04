@@ -16,6 +16,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
+    ("Todo repository deletes only completed todos", TestDeleteCompletedTodosAsync),
     ("Todo repository sorts pending todos by source message time descending", TestTodoOrderByMessageTimeAsync),
     ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
@@ -23,6 +24,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Shihuatong protobuf decoder reads text content", TestShihuatongMessageContentDecoderAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
+    ("Window text adapter ignores dashboard status when inferring chat name", TestWindowTextCaptureAdapterSkipsStatusChatNameAsync),
+    ("Window text adapter rejects dashboard snapshots", TestWindowTextCaptureAdapterRejectsDashboardSnapshotAsync),
     ("Windows UI Automation snapshot provider filters windows and aggregates visible text", TestWindowsUiAutomationSnapshotProviderAsync),
     ("WeChat OCR crop calculator focuses the chat panel", TestWeChatOcrCropCalculatorAsync),
     ("Windows OCR snapshot provider reads WeChat text when UIA exposes only chrome", TestWindowsOcrSnapshotProviderAsync),
@@ -268,6 +271,61 @@ static async Task TestTodoCompletionAsync()
     AssertEqual(2, allCompletedTodos.Count(item => item.CompletedAt == bulkCompletionTime), "Bulk completion time should be applied consistently.");
 }
 
+static async Task TestDeleteCompletedTodosAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var now = DateTimeOffset.UtcNow;
+    var pendingTodo = new TodoItem(
+        Id: 0,
+        SourceMessageId: null,
+        ProjectId: null,
+        Title: "保留的待办理记录",
+        Description: null,
+        Status: TodoStatus.Pending,
+        Priority: PriorityLevel.P2,
+        DueAt: null,
+        CreatedAt: now,
+        UpdatedAt: now,
+        CompletedAt: null,
+        IsAutoCreated: false);
+
+    await todoRepository.SaveAsync(pendingTodo, CancellationToken.None);
+    await todoRepository.SaveAsync(
+        pendingTodo with
+        {
+            Id = 0,
+            Title = "删除的已办理记录一",
+            Status = TodoStatus.Done,
+            CompletedAt = now
+        },
+        CancellationToken.None);
+    await todoRepository.SaveAsync(
+        pendingTodo with
+        {
+            Id = 0,
+            Title = "删除的已办理记录二",
+            Status = TodoStatus.Done,
+            CompletedAt = now
+        },
+        CancellationToken.None);
+
+    var deletedCount = await todoRepository.DeleteCompletedAsync(CancellationToken.None);
+    var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+    var completedTodos = await todoRepository.GetCompletedAsync(CancellationToken.None);
+
+    AssertEqual(2, deletedCount, "Clearing completed todos should delete every completed record.");
+    AssertEqual(1, pendingTodos.Count, "Clearing completed todos should preserve pending records.");
+    AssertEqual("保留的待办理记录", pendingTodos.Single().Title, "The pending record should be unchanged.");
+    AssertEqual(0, completedTodos.Count, "No completed records should remain after clearing.");
+    AssertEqual(0, await todoRepository.DeleteCompletedAsync(CancellationToken.None), "Clearing an empty completed list should delete nothing.");
+}
+
 static async Task TestTodoOrderByMessageTimeAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
@@ -362,9 +420,10 @@ static Task TestCaptureAdapterFactoryAsync()
 
     var wechatWindowSource = CaptureAdapterFactory.CreateWeChatWindowTextSource();
     AssertEqual(CaptureSourceKind.WindowText, wechatWindowSource.Kind, "WeChat visible-window source should use window text capture.");
-    AssertTrue(wechatWindowSource.IsEnabled, "WeChat visible-window source should be enabled by default.");
+    AssertFalse(wechatWindowSource.IsEnabled, "WeChat visible-window source should be opt-in because screen OCR can capture overlapping windows.");
+    var enabledWechatWindowSource = wechatWindowSource with { IsEnabled = true };
     var windowAdapters = CaptureAdapterFactory.CreateAdapters(
-        new[] { wechatWindowSource },
+        new[] { enabledWechatWindowSource },
         new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
     AssertEqual(1, windowAdapters.Count, "Enabled window text source with provider should create one adapter.");
     AssertEqual("WeChat.WindowText", windowAdapters[0].Name, "Enabled WeChat window source should create a window text adapter.");
@@ -380,7 +439,7 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep WeChat JSONL import.");
     AssertTrue(definitions.Any(source => source.Source == "Feishu" && source.Kind == CaptureSourceKind.JsonlDirectory), "Live capture should keep future Feishu JSONL import.");
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WeChatLocalExport && source.IsEnabled), "Live capture should enable WeChat local export source.");
-    AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText && source.IsEnabled), "Live capture should enable visible-window source by default.");
+    AssertFalse(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText), "Live capture must not include the visible-window OCR source.");
     AssertTrue(definitions.Any(source => source.Source == "Shihuatong" && source.Kind == CaptureSourceKind.ShihuatongLocalDatabase && source.IsEnabled), "Live capture should enable Shihuatong local database source.");
 
     var adapters = CaptureAdapterFactory.CreateAdapters(
@@ -388,7 +447,7 @@ static Task TestLiveCaptureAdapterFactoryAsync()
         new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
 
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.LocalExport"), "Live adapters should include WeChat local export adapter.");
-    AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.WindowText"), "Live adapters should include WeChat visible-window adapter when provider is available.");
+    AssertFalse(adapters.Any(adapter => adapter.Name == "WeChat.WindowText"), "Live adapters must not include WeChat visible-window capture.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "Live adapters should still include WeChat JSONL adapter.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.LocalDatabase"), "Live adapters should include Shihuatong local database adapter.");
@@ -490,6 +549,54 @@ static async Task TestWindowTextCaptureAdapterSplitBlocksAsync()
     AssertEqual(new DateTimeOffset(2026, 6, 4, 9, 20, 0, TimeSpan.FromHours(8)), batch.Messages[0].SentAt, "Split block time should use snapshot date.");
     AssertEqual("李工", batch.Messages[1].SenderName, "Second sender should be parsed from the next block.");
     AssertEqual("同步一下接口变更", batch.Messages[1].Content, "Second content should be parsed from the next block.");
+}
+
+
+static async Task TestWindowTextCaptureAdapterSkipsStatusChatNameAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 8, 4, 9, 30, 0, TimeSpan.FromHours(8));
+    var provider = new StaticWindowTextSnapshotProvider(new[]
+    {
+        new WindowTextSnapshot(
+            WindowTitle: "\u5FAE\u4FE1",
+            Text: "\u5FAE\u4FE1\u76D1\u542C\u8FD0\u884C\u4E2D\uFF0C\u6700\u8FD1\u91C7\u96C6 9 \u6761\uFF0C\u5165\u5E93 8 \u6761\uFF0C\u5F85\u529E 1 \u6761\nCRM\u9879\u76EE\u7FA4 10\u6761\n09:20 \u738B\u7ECF\u7406: @\u5F20\u4E09 \u4ECA\u5929\u4E0B\u73ED\u524D\u5904\u7406\u7EBF\u4E0A\u6545\u969C",
+            CapturedAt: capturedAt)
+    });
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "\u5FAE\u4FE1\u53EF\u89C1\u7A97\u53E3",
+        WindowTitleContains: "\u5FAE\u4FE1",
+        ChatId: "visible-window",
+        ChatName: "\u5FAE\u4FE1\u53EF\u89C1\u7A97\u53E3");
+
+    var batch = await new WindowTextCaptureAdapter(options, provider)
+        .CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+
+    AssertEqual(1, batch.Messages.Count, "The status summary must not be captured as a chat name.");
+    AssertEqual("CRM\u9879\u76EE\u7FA4", batch.Messages[0].ChatName, "The actual group name should be used without the unread-count suffix.");
+}
+
+static async Task TestWindowTextCaptureAdapterRejectsDashboardSnapshotAsync()
+{
+    var capturedAt = new DateTimeOffset(2026, 8, 4, 13, 50, 0, TimeSpan.FromHours(8));
+    var provider = new StaticWindowTextSnapshotProvider(new[]
+    {
+        new WindowTextSnapshot(
+            WindowTitle: "\u5FAE\u4FE1",
+            Text: "\u9879\u76EE\u770B\u677F\n\u5F85\u529E\u7406\n\u5DF2\u529E\u7406\n\u6D88\u606F\u6D41\n\u6BCF\u9875 50\n\u672B\u9875\n13:48 \u8DF3\u8F6C: 1/357 \u9875",
+            CapturedAt: capturedAt)
+    });
+    var options = new WindowTextCaptureOptions(
+        Source: "WeChat",
+        DisplayName: "\u5FAE\u4FE1\u53EF\u89C1\u7A97\u53E3",
+        WindowTitleContains: "\u5FAE\u4FE1",
+        ChatId: "visible-window",
+        ChatName: "\u5FAE\u4FE1\u53EF\u89C1\u7A97\u53E3");
+
+    var batch = await new WindowTextCaptureAdapter(options, provider)
+        .CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
+
+    AssertEqual(0, batch.Messages.Count, "Dashboard UI text must never be captured as WeChat messages.");
 }
 
 static async Task TestWindowsUiAutomationSnapshotProviderAsync()

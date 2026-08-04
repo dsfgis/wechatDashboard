@@ -112,6 +112,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DataContext = this;
     }
 
+    /// <summary>Switches the content page from the selected sidebar item.</summary>
+    private void SidebarNavigation_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (MainContentTabs is null ||
+            SidebarNavigation.SelectedItem is not ListBoxItem selectedItem ||
+            !int.TryParse(selectedItem.Tag?.ToString(), out var tabIndex))
+        {
+            return;
+        }
+
+        MainContentTabs.SelectedIndex = tabIndex;
+    }
+
+
     // 属性变更通知事件，供 WPF 绑定监听
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -244,6 +258,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             await LoadTodayWeChatMessagesAsync(1, ensureInitialized: false);
         }
+
+        StartWeChatListenerButton_Click(this, new RoutedEventArgs());
     }
 
     /// <summary>点击"刷新"按钮：重新初始化并刷新（不播种示例数据）。</summary>
@@ -373,6 +389,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             else
             {
                 SummaryText = $"本地数据库初始化失败：{_readerService.LastError ?? "未知错误"}，将使用可见窗口采集";
+                SummaryText = $"\u672C\u5730\u6570\u636E\u5E93\u521D\u59CB\u5316\u5931\u8D25\uFF1A{_readerService.LastError ?? "\u672A\u77E5\u9519\u8BEF"}\uFF0C\u5DF2\u505C\u7528 OCR \u7A97\u53E3\u91C7\u96C6\uFF1B\u8BF7\u91CD\u65B0\u521D\u59CB\u5316\u672C\u5730\u5E93\u3002";
             }
         }
 
@@ -572,7 +589,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
             {
                 source = FormatMessageSource(msg.Source);
-                sourceChatName = msg.ChatName;
+                sourceChatName = FormatSourceChatName(msg);
                 senderName = msg.SenderName;
                 messageContent = msg.Content;
                 sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
@@ -601,7 +618,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
             {
                 source = FormatMessageSource(msg.Source);
-                sourceChatName = msg.ChatName;
+                sourceChatName = FormatSourceChatName(msg);
                 senderName = msg.SenderName;
                 messageContent = msg.Content;
                 sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
@@ -650,6 +667,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new DiagnosticRow("WeChat.WindowText", "已启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "UIA+OCR 读取可见微信窗口，实时采集，窗口最小化后不可用"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
         });
+        Diagnostics.Remove(Diagnostics.First(row => row.Adapter == "WeChat.WindowText"));
 
         // 顶部摘要统计：今日消息数、@我数、待办理数、高优先级待办数
         TodayMessageCount = recentMessages.Count(message => message.SentAt.LocalDateTime.Date == DateTime.Today);
@@ -748,6 +766,61 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 "办理失败",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>确认后永久删除全部已办理记录，保留原始消息。</summary>
+    private async void ClearCompletedTodosButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button)
+        {
+            return;
+        }
+
+        var completedTodoCount = CompletedTodos.Count;
+        if (completedTodoCount == 0)
+        {
+            MessageBox.Show(
+                "当前没有已办理记录。",
+                "无需清空",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var confirmation = MessageBox.Show(
+            $"确定永久删除全部 {completedTodoCount} 条已办理记录吗？\n\n原始消息不会被删除，此操作不可恢复。",
+            "清空已办理",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (confirmation != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        button.IsEnabled = false;
+        try
+        {
+            var deletedCount = await _todoRepository.DeleteCompletedAsync(CancellationToken.None);
+            await RefreshAsync();
+            MessageBox.Show(
+                $"已删除 {deletedCount} 条已办理记录。",
+                "清空完成",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"清空已办理记录时发生错误：{ex.Message}",
+                "清空失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            button.IsEnabled = true;
         }
     }
 
@@ -1656,9 +1729,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }).ToArray();
 
         return new MessageCapturePipeline(
-            adapters: CaptureAdapterFactory.CreateAdapters(
-                effectiveSources,
-                CreateWindowTextSnapshotProvider()),
+            adapters: CaptureAdapterFactory.CreateAdapters(effectiveSources),
             _messageRepository,
             _todoRepository,
             _offsetRepository,
@@ -1786,9 +1857,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>构造窗口文本快照提供者：组合 UI 自动化读取器与屏幕 OCR 读取器。</summary>
     private static IWindowTextSnapshotProvider CreateWindowTextSnapshotProvider()
     {
-        return new WindowsOcrWindowTextSnapshotProvider(
-            new SystemWindowsAutomationReader(),
-            new WindowsScreenOcrReader());
+        return new WindowsUiAutomationSnapshotProvider(new SystemWindowsAutomationReader());
     }
 
     /// <summary>构造微信可见窗口采集选项：匹配标题含"微信"的窗口，排除本看板自身。</summary>
@@ -1824,6 +1893,54 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>将内部来源标识转换为界面显示名称。</summary>
+
+    /// <summary>Formats the source group name and rejects legacy window-capture status text.</summary>
+    private static string FormatSourceChatName(Message message)
+    {
+        var chatName = message.ChatName.Trim();
+        if (string.IsNullOrWhiteSpace(chatName))
+        {
+            return "\u7FA4\u540D\u8BC6\u522B\u5931\u8D25";
+        }
+
+        if (!message.SourceMessageKey.Contains(":window:", StringComparison.OrdinalIgnoreCase))
+        {
+            return chatName;
+        }
+
+        var hasMessageCount = chatName.Any(char.IsDigit) && chatName.Contains("\u6761", StringComparison.Ordinal);
+        var isStatusText =
+            chatName.StartsWith("\u5FAE\u4FE1\u76D1\u542C", StringComparison.OrdinalIgnoreCase) ||
+            ((chatName.Contains("\u91C7\u96C6", StringComparison.OrdinalIgnoreCase) ||
+              chatName.Contains("\u5165\u5E93", StringComparison.OrdinalIgnoreCase) ||
+              chatName.Contains("\u5F85\u529E", StringComparison.OrdinalIgnoreCase)) &&
+             hasMessageCount) ||
+            (chatName.Contains("\u5F53\u524D\u7B2C", StringComparison.OrdinalIgnoreCase) &&
+             chatName.Contains("\u9875", StringComparison.OrdinalIgnoreCase));
+
+        if (isStatusText)
+        {
+            return "\u7FA4\u540D\u8BC6\u522B\u5931\u8D25";
+        }
+
+        if (!chatName.EndsWith("\u6761", StringComparison.Ordinal))
+        {
+            return chatName;
+        }
+
+        var suffixStart = chatName.Length - 2;
+        while (suffixStart >= 0 &&
+               (char.IsDigit(chatName[suffixStart]) ||
+                char.IsWhiteSpace(chatName[suffixStart]) ||
+                chatName[suffixStart] is ',' or '\uFF0C'))
+        {
+            suffixStart--;
+        }
+
+        return suffixStart < chatName.Length - 2
+            ? chatName[..(suffixStart + 1)].TrimEnd()
+            : chatName;
+    }
     private static string FormatMessageSource(string source)
     {
         var value = source.Trim();

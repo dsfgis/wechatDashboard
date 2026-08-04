@@ -57,7 +57,15 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
                 .Select(NormalizeLine)
                 .Where(line => !IsSkippableLine(snapshot, line))
                 .ToArray();
+            if (LooksLikeDashboardSnapshot(lines))
+            {
+                continue;
+            }
             var chatName = InferChatName(snapshot.WindowTitle, lines);
+            if (!IsReliableChatName(chatName))
+            {
+                continue;
+            }
 
             foreach (var line in lines)
             {
@@ -231,7 +239,11 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
             var index = windowTitle.IndexOf(separator, StringComparison.Ordinal);
             if (index > 0)
             {
-                return windowTitle[..index].Trim();
+                var titleChatName = NormalizeChatName(windowTitle[..index]);
+                if (IsReliableChatName(titleChatName))
+                {
+                    return titleChatName;
+                }
             }
         }
 
@@ -240,14 +252,48 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
             !string.Equals(line, _options.ChatName, StringComparison.OrdinalIgnoreCase) &&
             !TryParseVisibleTime(line, out _) &&
             !MessageLineRegex.IsMatch(line) &&
-            !LooksLikeCommonUiLabel(line));
+            !LooksLikeCommonUiLabel(line) &&
+            !LooksLikeCaptureStatusLine(line));
         if (!string.IsNullOrWhiteSpace(firstTitleLine))
         {
-            return firstTitleLine;
+            return NormalizeChatName(firstTitleLine);
         }
 
         return _options.ChatName;
     }
+
+    private bool IsReliableChatName(string value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !string.Equals(value, _options.ChatName, StringComparison.OrdinalIgnoreCase) &&
+        !LooksLikeCommonUiLabel(value) &&
+        !LooksLikeCaptureStatusLine(value) &&
+        !LooksLikeDashboardUiLine(value);
+
+    private static string NormalizeChatName(string value) =>
+        TrailingUnreadCountRegex.Replace(value.Trim(), "").Trim();
+
+    private static bool LooksLikeCaptureStatusLine(string line) =>
+        line.StartsWith("\u5FAE\u4FE1\u76D1\u542C", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("\u4ECA\u5929\u5FAE\u4FE1\u6D88\u606F", StringComparison.OrdinalIgnoreCase) ||
+        ((line.Contains("\u91C7\u96C6", StringComparison.OrdinalIgnoreCase) ||
+          line.Contains("\u5165\u5E93", StringComparison.OrdinalIgnoreCase) ||
+          line.Contains("\u5F85\u529E", StringComparison.OrdinalIgnoreCase)) &&
+         MessageCountRegex.IsMatch(line)) ||
+        (line.Contains("\u5F53\u524D\u7B2C", StringComparison.OrdinalIgnoreCase) &&
+         line.Contains("\u9875", StringComparison.OrdinalIgnoreCase));
+
+    private static bool LooksLikeDashboardSnapshot(IReadOnlyList<string> lines)
+    {
+        var markerCount = DashboardUiMarkers.Count(marker =>
+            lines.Any(line => line.Contains(marker, StringComparison.OrdinalIgnoreCase)));
+        return markerCount >= 3;
+    }
+
+    private static bool LooksLikeDashboardUiLine(string line) =>
+        DashboardUiMarkers.Any(marker =>
+            line.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
+
 
     /// <summary>判断是否为可跳过的行：空白、等于窗口标题/聊天名，或匹配忽略前缀。</summary>
     private bool IsSkippableLine(WindowTextSnapshot snapshot, string line)
@@ -346,6 +392,35 @@ public sealed class WindowTextCaptureAdapter : IMessageCaptureAdapter
     private static readonly Regex MessageLineRegex = new(
         @"^(?:(?<time>\d{1,2}:\d{2})\s+)?(?<sender>[^:：]{1,40})[:：]\s*(?<content>.+)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex MessageCountRegex = new(
+        @"\d+\s*\u6761",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex TrailingUnreadCountRegex = new(
+        @"[\s,\uFF0C]*\d+\s*\u6761$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly string[] DashboardUiMarkers =
+    {
+        "\u5FAE\u4FE1\u770B\u677F",
+        "\u9879\u76EE\u770B\u677F",
+        "\u5F85\u529E\u7406",
+        "\u5DF2\u529E\u7406",
+        "\u6D88\u606F\u6D41",
+        "\u5FAE\u4FE1\u6D88\u606F",
+        "\u5173\u6CE8\u8BBE\u7F6E",
+        "\u91C7\u96C6\u6E90\u8BBE\u7F6E",
+        "\u91C7\u96C6\u8BCA\u65AD",
+        "\u5F00\u59CB\u76D1\u542C",
+        "\u505C\u6B62\u76D1\u542C",
+        "\u6BCF\u9875",
+        "\u9996\u9875",
+        "\u4E0A\u4E00\u9875",
+        "\u4E0B\u4E00\u9875",
+        "\u672B\u9875",
+        "\u8DF3\u8F6C"
+    };
 
     // 常见 UI 标签集合：用于过滤非消息文本
     private static readonly HashSet<string> CommonUiLabels = new(StringComparer.OrdinalIgnoreCase)

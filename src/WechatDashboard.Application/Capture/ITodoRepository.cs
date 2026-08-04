@@ -22,4 +22,7 @@ public interface ITodoRepository
 
     /// <summary>将所有待办理记录标记为已办理，并返回更新数量。</summary>
     Task<int> MarkAllCompletedAsync(DateTimeOffset completedAt, CancellationToken cancellationToken);
+
+    /// <summary>删除所有已办理记录，并返回删除数量。</summary>
+    Task<int> DeleteCompletedAsync(CancellationToken cancellationToken);
 }

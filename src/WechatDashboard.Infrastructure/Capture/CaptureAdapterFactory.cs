@@ -38,7 +38,6 @@ public static class CaptureAdapterFactory
             {
                 CreateWeChatLocalExportSource(captureRootPath),
                 CreateWeChatLocalDatabaseSource(readerService),
-                CreateWeChatWindowTextSource(),
                 CreateShihuatongLocalDatabaseSource(),
             })
             .ToArray();
@@ -75,7 +74,7 @@ public static class CaptureAdapterFactory
             DisplayName: "微信可见窗口",
             Kind: CaptureSourceKind.WindowText,
             Location: "微信",
-            IsEnabled: true);
+            IsEnabled: false);
     }
 
     /// <summary>创建微信本地导出采集源定义。</summary>

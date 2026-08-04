@@ -192,6 +192,17 @@ public sealed class SqliteTodoRepository : ITodoRepository
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>删除全部已办理记录，并返回删除数量。</summary>
+    public async Task<int> DeleteCompletedAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM todo_items WHERE status = $status;";
+        command.Parameters.AddWithValue("$status", TodoStatus.Done.ToString());
+
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     /// <summary>绑定待办参数到 INSERT 命令。</summary>
     private static void AddTodoParameters(SqliteCommand command, TodoItem todo)
     {
