@@ -4,19 +4,24 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
-## Current Snapshot (2026-06-30)
+## Current Snapshot (2026-08-08)
 
-The active branch is `codex/wechat-live-capture`. The current worktree contains the WeChat local database capture implementation in progress and has not been reduced to a small single-purpose diff.
+The active branch is `main` at `b020aa5` (`feat:dashboard-navigation-and-capture-safety`) and matched `origin/main` at the last read-only inspection. Unrelated untracked files exist in the workspace; preserve them and stage only files intentionally changed for the current task.
 
 Current verified state:
 
 - WPF can call the project-local `wx_key` helper through `tools\wx-key-tools\run-wx-key-probe.ps1` to write a DB Key file under `tools\result\wechat-local-reader`.
 - WPF can initialize the local reader with a DB Key file and read local WeChat messages through `tools\wechat-local-reader\wechat_local_reader.py`.
-- The `微信消息` tab displays today's local WeChat messages in a paged table with 50 rows per page and columns `消息内容`, `群名称`, and `发消息人`.
+- The `微信消息` and `消息流` pages provide first/previous/next/last/jump pagination and configurable page size.
 - The reader supports date-bounded reads through `--start-timestamp`, `--end-timestamp`, `--offset`, and `--limit`.
 - Non-text WeChat XML payloads are summarized before reaching the UI: `[图片]`, `[视频]`, `[表情]`, `[文件]`, `[链接] 标题 - 描述`, `[位置]`.
 - Python JSON output is UTF-8/ASCII-safe to avoid Windows GBK console failures.
-- Tests last verified in this worktree: Python reader tests 47 passed; .NET console tests 24 passed; WPF project build succeeded to `tools\result\build-check\WechatDashboard.App`.
+- Shihuatong local encrypted messages can be captured through `ShihuatongLocalDatabaseCaptureAdapter`; source identities and incremental offsets are preserved without using visible-window OCR.
+- Pending Todos move persistently to the completed page, and both pages display facts from the original source message. Source labels distinguish 微信、石化通、飞书、钉钉 and 示例.
+- The sidebar exposes project dashboard, pending/completed Todos, message stream, WeChat messages, follow settings, capture source settings and diagnostics.
+- The chart dashboard supports project, time and group-name dimensions with bar, ring and line presentation. Followed projects can contain multiple matching keywords and merge multiple chats into one project bucket.
+- Verification on 2026-08-07: full solution build succeeded with 0 warnings and 0 errors; all 32 .NET regression tests passed.
+- Python verification ran 47 tests with 1 failing expectation in `test_read_messages_aggregates_across_shards`: implementation sorts newest-first, while the test expects the older Alice row first. Restore a green Python baseline before claiming the next implementation complete.
 
 Sensitive state:
 
@@ -50,10 +55,20 @@ design/                              Canonical design, progress, and system-test
 - `tools\wechat-local-reader\wechat_local_reader.py` handles key import, database validation, snapshot/decryption, V4 `SessionTable`/`Name2Id`/`Msg_<md5(username)>` reads, pagination, and non-text XML summaries.
 - `tools\wx-key-tools\run-wx-key-probe.ps1` wraps the local `wx_key` tool and writes detected DB Keys to `tools\result\wechat-local-reader\wx-key-found.txt`.
 - `WindowTextCaptureAdapter`, `SystemWindowsAutomationReader`, `WindowsOcrWindowTextSnapshotProvider`, and `WindowsScreenOcrReader` remain in the codebase for visible-window diagnostics and fallback capture.
-- WPF `采集一次` and `开始微信监听` still use the capture pipeline and source settings; the separate `微信消息` tab reads today's local database messages directly through `WeChatLocalReaderService`.
+- WPF `采集一次` and `开始微信监听` use the capture pipeline and saved source settings. Reading the dedicated `微信消息` page also passes returned messages through `MessageCapturePipeline.ProcessAsync`, so persistence, `@我` Todo creation and deduplication share the same behavior.
 - Default current-user mention aliases are `白驹过隙` and `戴少峰` in `DefaultMentionAliases`.
 - SQLite is accessed through repository classes in `Infrastructure/Persistence`.
 - WPF should call application/infrastructure services and avoid embedding platform-specific capture code.
+
+Current technical gaps:
+
+- `MessageCapturePipeline.ProcessAsync` does not yet wrap message, classification, urgency and automatic Todo writes in one transaction. A failure after message persistence can cause the next dedup pass to skip a missing Todo.
+- Adapter exceptions are currently reduced to debug output inside the pipeline; the diagnostics page does not yet persist true per-Adapter success/failure history.
+- Some diagnostic timestamps are refresh timestamps rather than recorded capture timestamps.
+- Top counters are calculated from a recent-message sample and can undercount high-volume days.
+- Todo fields for description, due time and five statuses exist in the domain, but the WPF UI currently exposes only completion and clearing completed records.
+- Message FTS search, reminders, tray mode, report export, versioned migrations, backup/restore and retention controls remain unimplemented.
+- `MainWindow.xaml.cs` still combines UI state, capture orchestration, repositories, pagination, rules and analytics; split it incrementally rather than rewriting the application at once.
 
 ## Commands
 
@@ -141,9 +156,18 @@ Only the source reader, tests, and wrapper script are safe to review in normal c
 
 Follow `design/2026-06-04-development-plan.md`. Keep design changes in `design/wechat-message-monitor-wpf-design.md`; avoid creating extra design documents for the same方案 unless the user asks for a separate handoff artifact.
 
-Immediate next work:
+Immediate next work, in priority order:
 
-1. Re-open the WPF app and verify `微信消息` after the XML-summary fix: text messages show actual content, and image/video/link/file messages show readable summaries instead of raw XML.
-2. Decide whether `tools\wx-key-tools` should be committed as project-local tooling. If committed, record source, version, SHA-256, and license status; otherwise document it as a user-supplied local dependency.
-3. Keep improving the local database path: manual DB Key import, key-file import, initialization diagnostics, paged reads, and minimized-WeChat validation.
-4. Do not implement hidden in-process key extraction in WPF. If self-developed key extraction is revisited, keep it as a separate optional local tool with explicit user action and sanitized outputs.
+1. Restore the Python test baseline by making the cross-shard ordering test match the documented newest-first contract, then rerun all verification commands serially.
+2. Make dedup/upsert, message, classification, urgency and automatic Todo persistence one transaction; advance offsets only after a successful batch commit.
+3. Add structured per-Adapter run results and persist real last-success, last-failure, duration, counts, error stage and sanitized error summary for diagnostics.
+4. Replace recent-message-sample top counters with accurate SQL aggregate queries.
+5. Build the Todo workbench: manual creation, details, project, priority, due time, description, five states, reopen, source-message navigation, reminders and snooze.
+6. Add FTS5 full-text search and combined source/chat/sender/project/date/mention/Todo filters.
+7. Unify project keywords, priority contacts, urgency terms and weights in a rule center; persist classification/urgency reasons and support test input and correction.
+8. Add deterministic local project daily/weekly reports, followed by backup/restore, integrity checks and retention controls.
+9. Incrementally extract ViewModels and application services from `MainWindow.xaml.cs`, with discoverable tests and CI.
+
+Secondary capture work remains valid but follows the reliability baseline: decide the `tools\wx-key-tools` distribution policy, finish manual DB Key/data-directory/reinitialization UI, and complete minimized-WeChat system validation using privacy-safe counts.
+
+Do not implement hidden in-process key extraction in WPF. If self-developed key extraction is revisited, keep it as a separate optional local tool with explicit user action and sanitized outputs.

@@ -27,8 +27,8 @@ Completed:
 - `WindowsUiAutomationSnapshotProvider` and `SystemWindowsAutomationReader` for reading Windows UI Automation top-level window snapshots.
 - WPF capture diagnostics can scan WeChat visible windows and show UIA text previews without persisting messages.
 - Disabled WeChat window-text source profile through `CaptureAdapterFactory.CreateWeChatWindowTextSource()`.
-- Default live capture source registration through `CaptureAdapterFactory.CreateDefaultLiveSources(...)`, enabling `WeChat.WindowText` while preserving JSONL sources for WeChat, Feishu, Shihuatong, and DingTalk.
-- WPF "采集一次" now runs the live capture source set, including WeChat visible-window UI Automation capture.
+- Default live capture source registration through `CaptureAdapterFactory.CreateDefaultLiveSources(...)`, preserving local-database/local-export and JSONL sources while keeping `WeChat.WindowText` opt-in for diagnostics.
+- WPF "采集一次" runs the configured live capture source set; visible-window UI Automation/OCR is not included in the default live pipeline.
 - WPF "开始微信监听" and "停止监听" run the same capture pipeline on a 5-second polling interval.
 - `WindowTextCaptureAdapter` supports both single-line `HH:mm Sender: Content` rows and UIA split blocks such as `HH:mm / Sender / Content`.
 - `SystemWindowsAutomationReader` now uses UIA Raw View traversal by default.
@@ -54,7 +54,7 @@ Current handoff update (2026-06-30):
 - `tools/wechat-local-reader/wechat_local_reader.py` supports date-bounded capture, offset/limit paging, UTF-8-safe JSON output, and XML payload summaries.
 - XML media payloads are no longer shown raw in the UI; they are converted to user-facing summaries before JSON output.
 - Generated key/config/decrypted files are constrained to `tools\result`; `.gitignore` excludes that directory.
-- The current test baseline in this worktree is Python reader tests 47 passed, .NET console tests 24 passed, and WPF app build succeeded to `tools\result\build-check\WechatDashboard.App`.
+- The historical 2026-06-30 baseline was Python reader tests 47 passed, .NET console tests 24 passed, and a successful WPF build to `tools\result\build-check\WechatDashboard.App`. Use the later 2026-08-08 handoff for the current baseline.
 
 Current handoff update (2026-07-03):
 
@@ -67,15 +67,32 @@ Current handoff update (2026-07-03):
 - Added a `时间` column to the `待办理` and `微信消息` tabs; renamed `项目` to `群名` in `待办理`.
 - Reading WeChat messages now syncs into the main pipeline: `MessageCapturePipeline.ProcessAsync` (extracted for reuse) dedups, persists, classifies, scores urgency, and auto-creates a Todo for every `@我` message, guarded by `_captureSemaphore` to avoid races with the live capture loop; `SourceMessageKey` dedup prevents duplicate Todos on re-reads.
 - Added Chinese comments across the codebase to reach the project's 20% comment-rate target, with a `check-comments.ps1` verification script.
+
+Current handoff update (2026-08-08):
+
+- Active delivery baseline is `main` at `b020aa5` (`feat:dashboard-navigation-and-capture-safety`), matching `origin/main` at the time of inspection.
+- Persistent Todo completion, completed-page display, original-source message mapping, Chinese source labels, and clearing completed Todos are implemented.
+- Shihuatong local encrypted message capture is implemented through the isolated local-database adapter with persisted incremental offsets.
+- The WPF shell now uses sidebar navigation and includes Todo, completed Todo, message stream, WeChat messages, chart dashboard, follow settings, capture source settings, and diagnostics pages.
+- The chart dashboard supports project, time, and group-name dimensions plus bar, ring, and line presentation; multiple groups can be merged into one followed-project bucket.
+- Followed projects support multiple matching keywords, while legacy default project and priority-contact rules are still hardcoded and must be removed by the rule-center milestone.
+- Verified on 2026-08-07: solution build succeeded with 0 warnings and 0 errors; all 32 .NET regression tests passed.
+- Python reader verification ran 47 tests with 1 failure. The reader intentionally sorts by `(sentAt, id)` descending, but `test_read_messages_aggregates_across_shards` expects the older Alice row at index 0. Treat this as a test-contract mismatch to resolve before implementation work, not as confirmed production ordering corruption.
+- No tracked source changes were introduced by the inspection; unrelated untracked workspace files remain out of scope.
+
 Known gaps:
 
 - Real Windows UI Automation + OCR snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
-- Current WeChat window capture is limited to visible UIA/OCR text. It does not read hidden chats, encrypted message databases, or full historical WeChat data.
-- The next WeChat direction is local file/local database capture, because it can keep working when WeChat is minimized or covered. The canonical design is `design/wechat-message-monitor-wpf-design.md`.
+- UIA/OCR capture is limited to visible text and is no longer the preferred live path; local file/local database capture remains the primary direction.
+- WeChat local-database reading exists, but fresh-machine initialization, minimized-WeChat incremental validation, per-stage diagnostics, external-tool provenance, and manual reinitialization still need formal acceptance.
 - Windows notification listener is not implemented.
-- Feishu, Shihuatong, and DingTalk adapters are not implemented.
-- Project rules are hardcoded.
-- Statistics are basic counts, not full charted dashboards.
+- Feishu and DingTalk currently rely on JSONL directory ingestion rather than native live adapters. Shihuatong has both JSONL and local-database paths.
+- Project keyword configuration exists, but default project rules, priority contacts, classification reasons, and urgency reasons are not yet fully configurable or persisted.
+- Charted dashboard views exist, but top counters still sample recent messages and can undercount high-volume days; category, priority, Todo-status, SLA, and full-history aggregate queries remain incomplete.
+- The Todo entity supports description, due time and five statuses, but the WPF UI currently exposes only Pending-to-Done completion and clearing completed records.
+- Message search, FTS5, desktop reminders, tray mode, report export, versioned migrations, backup/restore, and retention controls are not implemented.
+- `MessageCapturePipeline.ProcessAsync` saves the message before the automatic Todo without one transaction; a failure between those writes can leave a persisted message whose Todo is skipped on the next dedup pass.
+- Adapter failures are collapsed to debug output inside the pipeline, while parts of the diagnostics UI use refresh time as a stand-in for real last-success time.
 - No installer, tray app, or background service mode yet.
 
 ## Milestone 1: Capture Source Registration
@@ -290,6 +307,80 @@ Purpose: move from simple counters to usable multi-dimensional views.
 - [ ] Step 3: Replace hardcoded WPF project summary logic with the analytics service.
 - [ ] Step 4: Add charts after the data contract is stable.
 
+> Progress note (2026-08-08): chart presentation and project/time/group dimensions are implemented, but the analytics service, accurate SQL aggregates, category/priority/Todo/SLA dimensions, and removal of recent-message sampling remain open. Do not mark this milestone complete yet.
+
+## Milestone 6: Reliability Baseline and Truthful Diagnostics
+
+Purpose: remove data-loss windows and make the application's status claims reflect persisted facts.
+
+**Primary files:**
+
+- Modify: `src/WechatDashboard.Application/Capture/MessageCapturePipeline.cs`
+- Modify: `src/WechatDashboard.Application/Capture/CaptureRunResult.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Persistence/SqliteDatabaseInitializer.cs`
+- Create: capture-run repositories and migration infrastructure under `src/WechatDashboard.Infrastructure/Persistence/`
+- Modify: `src/WechatDashboard.App/MainWindow.xaml` and `MainWindow.xaml.cs`
+- Modify: both .NET and Python regression tests
+
+- [ ] Step 1: Resolve the Python newest-first test contract and restore a fully green baseline.
+- [ ] Step 2: Add a database transaction covering dedup/upsert, message, classification, urgency and automatic Todo writes.
+- [ ] Step 3: Advance an Adapter offset only after the entire batch commits; retain a replayable offset on failure.
+- [ ] Step 4: Return structured per-Adapter results including status, duration, counts, error stage and sanitized summary.
+- [ ] Step 5: Persist real capture-run history and replace refresh-time diagnostic placeholders.
+- [ ] Step 6: Replace recent-100 top counters with accurate aggregate queries and regression-test days containing more than 100 messages.
+- [ ] Step 7: Run build, .NET tests, Python tests and `git diff --check` serially.
+
+## Milestone 7: Todo Workbench and Reminder Lifecycle
+
+Purpose: turn generated mentions into a complete personal work-management flow.
+
+**Planned components:**
+
+- Add Todo query/update application services and repository methods.
+- Add Todo list/detail ViewModels and reusable commands.
+- Add persisted reminder settings and `todo_reminders` storage.
+- Add Windows notification and tray services behind interfaces.
+
+- [ ] Step 1: Add tests for manual Todo creation and editing title, description, project, priority and due time.
+- [ ] Step 2: Implement persisted transitions among Pending, InProgress, Waiting, Done and Ignored.
+- [ ] Step 3: Support reopening Done/Ignored items without altering the original source message.
+- [ ] Step 4: Add Todo detail UI with original source, group, sender, sent time, full content and source-message navigation.
+- [ ] Step 5: Add due-soon, overdue, P0/P1 and new-mention reminders with snooze and quiet hours.
+- [ ] Step 6: Add notification deduplication and per-source/per-chat controls.
+
+## Milestone 8: Search, Rule Center, and Explainability
+
+Purpose: make accumulated messages discoverable and make automated decisions inspectable and correctable.
+
+- [ ] Step 1: Add versioned migration support and create an FTS5 index for content, chat name and sender name.
+- [ ] Step 2: Implement full-text search combined with source, chat, sender, project, date, mention, priority and Todo-status filters.
+- [ ] Step 3: Support converting any search/message result to a Todo and jumping to its original context.
+- [ ] Step 4: Replace legacy hardcoded project and priority-contact rules with repository-backed configuration.
+- [ ] Step 5: Persist `message_classifications` and `urgency_scores`, including reason and classifier/version fields.
+- [ ] Step 6: Add rule test input, reason preview, user correction, candidate-rule capture and controlled historical recomputation.
+
+## Milestone 9: Reports and Local Data Management
+
+Purpose: convert project activity into useful summaries while preserving local privacy and recoverability.
+
+- [ ] Step 1: Define deterministic project daily/weekly report contracts: new work, completed work, open work, risks, decisions and deadlines.
+- [ ] Step 2: Add report preview and local Markdown export, followed by Excel and Word export.
+- [ ] Step 3: Keep optional AI summarization disabled by default; require explicit scope preview, consent and redaction before cloud use.
+- [ ] Step 4: Add backup, restore, WAL checkpoint, schema-version validation and `PRAGMA integrity_check`.
+- [ ] Step 5: Add retention policies and time-range deletion with preview, confirmation and audit records.
+- [ ] Step 6: Add optional encrypted backups and document recovery limitations.
+
+## Milestone 10: UI Architecture and Automated Quality
+
+Purpose: reduce the 2,000-line main-window coupling and make future feature work independently testable.
+
+- [ ] Step 1: Introduce application composition/DI without changing capture security boundaries.
+- [ ] Step 2: Extract Shell, Todo, Message Feed, Dashboard, Rules, Diagnostics and Settings ViewModels incrementally.
+- [ ] Step 3: Move aggregation, filtering and command behavior out of `MainWindow.xaml.cs` into application services.
+- [ ] Step 4: Replace or wrap the console test runner with discoverable unit/integration test projects while preserving existing cases.
+- [ ] Step 5: Add ViewModel tests, selected WPF UI automation tests and CI for build, .NET tests, Python tests and formatting checks.
+- [ ] Step 6: Measure keyset pagination and aggregation performance against a generated 1-million-message database before optimizing further.
+
 ## Verification Commands
 
 Run these before committing any implementation change:
@@ -297,16 +388,30 @@ Run these before committing any implementation change:
 ```powershell
 dotnet build WechatDashboard.sln --no-restore -v minimal
 dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj --no-restore
+python -m unittest discover -v -s tools\wechat-local-reader -p test_wechat_local_reader.py
+git diff --check
 git status --short
 ```
 
 Expected result:
 
 - Build exits with code 0.
-- Tests report all tests passed.
-- The existing `MSB3101` warning about `obj` cache write permissions may appear in this environment; it is not a compile error.
+- All .NET and Python tests report passed; a red Python suite is a blocker even if the failure is only an outdated expectation.
+- `git diff --check` exits with code 0.
+- Build and tests run serially to avoid `CS2012` DLL contention in this repository.
 
 ## Immediate Next Work
+
+Current priority as of 2026-08-08 is Milestone 6, followed by Milestones 7 and 8. Do not start native Feishu/DingTalk integrations or additional dashboard chart types before the reliability baseline is green unless a separate user requirement changes the priority.
+
+Immediate sequence:
+
+1. Correct the Python newest-first test contract and confirm all 47 tests pass.
+2. Make message/classification/urgency/Todo persistence transactional and move offset commit after successful batch commit.
+3. Introduce structured per-Adapter results and persist true diagnostic history.
+4. Replace approximate top counters with SQL aggregates and add high-volume-day tests.
+5. Implement the Todo workbench and reminder lifecycle.
+6. Add FTS5 search, combined filters and the unified rule center.
 
 Milestones 1, 2, 2.1, 2.2, and 2.3 are implemented at the framework level. Milestone 2.4 is partially implemented through the Python reader and WPF service path: DB Key file import, database initialization, V4 local message reading, date-bounded pagination, UTF-8-safe JSON output, and XML media summary display all exist.
 
@@ -324,7 +429,7 @@ Completed since the previous 2026-06-10 snapshot:
 - Added non-text XML summarization so image/video/emoji/file/link/location messages do not display raw XML in the table.
 - Added/updated tests for key-file initialization, reader paging behavior, UTF-8-safe output, local reader service date paging, and XML summaries.
 
-Current validation baseline:
+Historical validation baseline on 2026-06-30:
 
 - Python reader: `python -m unittest discover -v -s tools\wechat-local-reader -p test_wechat_local_reader.py` -> 47 tests passed.
 - .NET regression runner: `dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj` -> 24 tests passed.
