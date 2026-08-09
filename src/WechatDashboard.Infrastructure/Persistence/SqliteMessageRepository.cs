@@ -185,6 +185,134 @@ public sealed class SqliteMessageRepository : IMessageRepository
         return messages;
     }
 
+    public async Task<IReadOnlyList<Message>> GetBySourceKeysAsync(
+        IReadOnlyCollection<MessageIdentity> identities,
+        CancellationToken cancellationToken)
+    {
+        var distinct = identities
+            .Where(item => !string.IsNullOrWhiteSpace(item.Source) && !string.IsNullOrWhiteSpace(item.SourceMessageKey))
+            .Distinct()
+            .ToArray();
+        if (distinct.Length == 0)
+        {
+            return Array.Empty<Message>();
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        var result = new List<Message>(distinct.Length);
+        foreach (var batch in distinct.Chunk(200))
+        {
+            await using var command = connection.CreateCommand();
+            var predicates = new List<string>(batch.Length);
+            for (var index = 0; index < batch.Length; index++)
+            {
+                predicates.Add($"(source = $source{index} AND source_message_key = $key{index})");
+                command.Parameters.AddWithValue($"$source{index}", batch[index].Source);
+                command.Parameters.AddWithValue($"$key{index}", batch[index].SourceMessageKey);
+            }
+
+            command.CommandText = $"""
+                SELECT id, source, source_message_key, chat_session_id, chat_name,
+                       sender_name, content, message_type, sent_at, captured_at, is_mention_me
+                FROM messages
+                WHERE {string.Join(" OR ", predicates)};
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                result.Add(ReadMessage(reader));
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<Message?> GetByIdAsync(long id, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        return await GetByIdAsync(connection, transaction: null, id, cancellationToken);
+    }
+
+    internal static async Task<Message?> GetByIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long id,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT id, source, source_message_key, chat_session_id, chat_name,
+                   sender_name, content, message_type, sent_at, captured_at, is_mention_me
+            FROM messages
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadMessage(reader) : null;
+    }
+
+    public async Task<MessageContext?> GetContextAsync(
+        long messageId,
+        int before,
+        int after,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        var anchor = await GetByIdAsync(connection, transaction: null, messageId, cancellationToken);
+        if (anchor is null)
+        {
+            return null;
+        }
+
+        var messages = new List<Message> { anchor };
+        messages.AddRange(await ReadRelativeAsync(connection, anchor, Math.Max(0, after), newer: true, cancellationToken));
+        messages.AddRange(await ReadRelativeAsync(connection, anchor, Math.Max(0, before), newer: false, cancellationToken));
+        var ordered = messages
+            .DistinctBy(message => message.Id)
+            .OrderByDescending(message => message.SentAt)
+            .ThenByDescending(message => message.Id)
+            .ToArray();
+        return new MessageContext(anchor, ordered);
+    }
+
+    private static async Task<IReadOnlyList<Message>> ReadRelativeAsync(
+        SqliteConnection connection,
+        Message anchor,
+        int limit,
+        bool newer,
+        CancellationToken cancellationToken)
+    {
+        if (limit == 0)
+        {
+            return Array.Empty<Message>();
+        }
+
+        await using var command = connection.CreateCommand();
+        var comparison = newer ? ">" : "<";
+        var order = newer ? "ASC" : "DESC";
+        command.CommandText = $"""
+            SELECT id, source, source_message_key, chat_session_id, chat_name,
+                   sender_name, content, message_type, sent_at, captured_at, is_mention_me
+            FROM messages
+            WHERE sent_at {comparison} $sentAt
+               OR (sent_at = $sentAt AND id {comparison} $id)
+            ORDER BY sent_at {order}, id {order}
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$sentAt", anchor.SentAt.ToString("O"));
+        command.Parameters.AddWithValue("$id", anchor.Id);
+        command.Parameters.AddWithValue("$limit", limit);
+        var result = new List<Message>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadMessage(reader));
+        }
+
+        return result;
+    }
+
     /// <summary>
     /// 分页查询消息（按发送时间倒序）。
     /// 在后台线程执行以避免阻塞 UI；内部先 COUNT 再取页数据。

@@ -20,6 +20,17 @@ public interface IMessageRepository
     /// <summary>按消息 ID 集合精确查询消息。</summary>
     Task<IReadOnlyList<Message>> GetByIdsAsync(IReadOnlyCollection<long> ids, CancellationToken cancellationToken);
 
+    /// <summary>按来源与来源消息键批量解析规范化数据库消息。</summary>
+    Task<IReadOnlyList<Message>> GetBySourceKeysAsync(
+        IReadOnlyCollection<MessageIdentity> identities,
+        CancellationToken cancellationToken);
+
+    /// <summary>按数据库主键获取一条原始消息。</summary>
+    Task<Message?> GetByIdAsync(long id, CancellationToken cancellationToken);
+
+    /// <summary>按锚点消息 ID 获取前后上下文，结果保持消息流的 newest-first 顺序。</summary>
+    Task<MessageContext?> GetContextAsync(long messageId, int before, int after, CancellationToken cancellationToken);
+
     /// <summary>分页查询消息（按发送时间倒序）。</summary>
     Task<MessagePage> GetPageAsync(int pageNumber, int pageSize, CancellationToken cancellationToken);
 
@@ -54,3 +65,7 @@ public sealed record MessagePage(
     int TotalCount,
     int PageNumber,
     int PageSize);
+
+public sealed record MessageContext(Message Anchor, IReadOnlyList<Message> Messages);
+
+public sealed record MessageIdentity(string Source, string SourceMessageKey);

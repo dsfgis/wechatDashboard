@@ -9,6 +9,7 @@ using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
+using WechatDashboard.App.Services;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 using WechatDashboard.Infrastructure.Capture;
@@ -56,7 +57,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 实时采集间隔
     private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
     private const int DefaultWeChatMessagePageSize = 50;
-    private const int DefaultMessageStreamPageSize = 50;
     private const int DashboardMessageSampleLimit = 5000;
 
     // 实时监听取消令牌
@@ -78,14 +78,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private int _wechatMessageTotalCount;
     private string _wechatMessagePageText = "第 0/0 页，共 0 条";
     private string _wechatMessageStatusText = "默认读取当天微信消息。请先提取 DB Key 并初始化本地库。";
-    // 消息流分页状态
-    private int _messageStreamPageNumber = 1;
-    private int _messageStreamPageSize = DefaultMessageStreamPageSize;
-    private int _messageStreamTotalCount;
-    private string _messageStreamPageText = "第 0/0 页，共 0 条";
-    private string _messageStreamStatusText = "正在加载消息流...";
     private string _dashboardStatusText = "按项目统计最近消息。";
     private string _dashboardChartType = "bar";
+    public TodoFeatureCoordinator TodoFeature { get; }
+
     public MainWindow()
     {
         InitializeComponent();
@@ -105,6 +101,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _followedProjectKeywordRepository = new SqliteFollowedProjectKeywordRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
+        TodoFeature = new TodoFeatureCoordinator(
+            _databasePath,
+            () => _currentAliases,
+            () => _currentFollowedChats,
+            () => _followedChatFilterMode,
+            tabIndex =>
+            {
+                MainContentTabs.SelectedIndex = tabIndex;
+                SidebarNavigation.SelectedItem = SidebarNavigation.Items
+                    .OfType<ListBoxItem>()
+                    .FirstOrDefault(item => item.Tag?.ToString() == tabIndex.ToString());
+            });
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;
@@ -181,17 +189,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         private set => SetField(ref _wechatMessageStatusText, value);
     }
 
-    public string MessageStreamPageText
-    {
-        get => _messageStreamPageText;
-        private set => SetField(ref _messageStreamPageText, value);
-    }
-
-    public string MessageStreamStatusText
-    {
-        get => _messageStreamStatusText;
-        private set => SetField(ref _messageStreamStatusText, value);
-    }
 
     public string DashboardStatusText
     {
@@ -204,18 +201,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         private set => SetField(ref _dashboardChartType, value);
     }
 
-
-    // 待办列表（UI 绑定）
-    public ObservableCollection<TodoRow> Todos { get; } = new();
-
-    // 已办理列表（UI 绑定）
-    public ObservableCollection<TodoRow> CompletedTodos { get; } = new();
-
-    // 消息流列表（UI 绑定）
-    public ObservableCollection<MessageRow> Messages { get; } = new();
-
-    // 支持高亮的消息流列表（UI 绑定）
-    public ObservableCollection<HighlightableMessageRow> HighlightableMessages { get; } = new();
 
     // 微信原生消息列表（UI 绑定）
     public ObservableCollection<WeChatMessageRow> WeChatMessages { get; } = new();
@@ -253,6 +238,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await InitializeAndRefreshAsync(seedIfEmpty: true);
+        await TodoFeature.StartAsync();
         await LoadCaptureSourceSettingsAsync();
         if (_readerService.IsInitialized)
         {
@@ -515,6 +501,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>窗口关闭时停止监听，避免后台任务泄漏。</summary>
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
+        await TodoFeature.StopAsync();
         await StopLiveCaptureAsync();
     }
 
@@ -549,8 +536,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var recentMessages = await _messageRepository.GetRecentAsync(100, CancellationToken.None);
         // 取所有未完成待办，用于待办列表与项目汇总
         var pendingTodos = await _todoRepository.GetPendingAsync(CancellationToken.None);
-        // 取所有已办理待办，用于已办理页面
-        var completedTodos = await _todoRepository.GetCompletedAsync(CancellationToken.None);
         // 采集源：微信本地数据库（基于 wechat-local-reader 解密）
         var localDatabaseSource = CaptureAdapterFactory.CreateWeChatLocalDatabaseSource(_readerService);
         var localDatabaseConfigPath = CaptureAdapterFactory.GetWeChatLocalDatabaseConfigPath();
@@ -567,74 +552,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 : _readerService.IsAvailable
                     ? "未检测到微信数据目录，请确认微信正在运行"
                     : localDatabaseSource.Location;
-
-        // 按待办关联 ID 精确查询原消息，避免旧待办因不在最近消息列表中而显示错误时间。
-        var sourceMessageIds = pendingTodos
-            .Concat(completedTodos)
-            .Where(todo => todo.SourceMessageId.HasValue)
-            .Select(todo => todo.SourceMessageId!.Value)
-            .Distinct()
-            .ToArray();
-        var sourceMessages = await _messageRepository.GetByIdsAsync(sourceMessageIds, CancellationToken.None);
-        var messageLookup = sourceMessages.ToDictionary(message => message.Id);
-
-        Replace(Todos, pendingTodos.Select(todo =>
-        {
-            var sourceChatName = "无来源消息";
-            var source = "-";
-            var senderName = "-";
-            var messageContent = todo.Title;
-            var sentAt = "-";
-
-            if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
-            {
-                source = FormatMessageSource(msg.Source);
-                sourceChatName = FormatSourceChatName(msg);
-                senderName = msg.SenderName;
-                messageContent = msg.Content;
-                sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
-            }
-
-            return new TodoRow(
-                todo.Id,
-                todo.Priority.ToString(),
-                "待办理",
-                source,
-                sourceChatName,
-                senderName,
-                messageContent,
-                sentAt,
-                "");
-        }));
-
-        Replace(CompletedTodos, completedTodos.Select(todo =>
-        {
-            var sourceChatName = "无来源消息";
-            var source = "-";
-            var senderName = "-";
-            var messageContent = todo.Title;
-            var sentAt = "-";
-
-            if (todo.SourceMessageId.HasValue && messageLookup.TryGetValue(todo.SourceMessageId.Value, out var msg))
-            {
-                source = FormatMessageSource(msg.Source);
-                sourceChatName = FormatSourceChatName(msg);
-                senderName = msg.SenderName;
-                messageContent = msg.Content;
-                sentAt = msg.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
-            }
-
-            return new TodoRow(
-                todo.Id,
-                todo.Priority.ToString(),
-                "已办理",
-                source,
-                sourceChatName,
-                senderName,
-                messageContent,
-                sentAt,
-                todo.CompletedAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "");
-        }));
 
         // 项目汇总：按项目分组统计待办数量与高优先级数量
         Replace(ProjectSummaries, pendingTodos
@@ -677,151 +594,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 刷新项目看板图表和消息流分页（强制重新计算总数）
         await LoadProjectDashboardAsync();
-        await LoadMessageStreamPageAsync(_messageStreamPageNumber, refreshCount: true);
-        SummaryText = $"消息 {_messageStreamTotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
-    }
-
-    /// <summary>勾选待办后将其持久化为已办理，并刷新两个列表。</summary>
-    private async void CompleteTodoCheckBox_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not CheckBox { IsChecked: true, Tag: TodoRow todoRow } checkBox)
-        {
-            return;
-        }
-
-        checkBox.IsEnabled = false;
-        try
-        {
-            var updated = await _todoRepository.MarkCompletedAsync(
-                todoRow.Id,
-                DateTimeOffset.Now,
-                CancellationToken.None);
-
-            if (!updated)
-            {
-                MessageBox.Show(
-                    "该记录可能已经办理或已被更新，请刷新后重试。",
-                    "办理失败",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
-            }
-
-            await RefreshAsync();
-        }
-        catch (Exception ex)
-        {
-            checkBox.IsChecked = false;
-            checkBox.IsEnabled = true;
-            MessageBox.Show(
-                $"办理记录时发生错误：{ex.Message}",
-                "办理失败",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
-        }
-    }
-
-    /// <summary>确认后将当前全部待办理记录批量转入已办理。</summary>
-    private async void SelectAllTodosCheckBox_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not CheckBox { IsChecked: true } checkBox)
-        {
-            return;
-        }
-
-        var todoCount = Todos.Count;
-        if (todoCount == 0)
-        {
-            checkBox.IsChecked = false;
-            return;
-        }
-
-        var confirmation = MessageBox.Show(
-            $"确定将当前 {todoCount} 条待办理记录全部转入已办理吗？",
-            "批量办理",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-
-        if (confirmation != MessageBoxResult.Yes)
-        {
-            checkBox.IsChecked = false;
-            return;
-        }
-
-        checkBox.IsEnabled = false;
-        try
-        {
-            await _todoRepository.MarkAllCompletedAsync(
-                DateTimeOffset.Now,
-                CancellationToken.None);
-            await RefreshAsync();
-            checkBox.IsChecked = false;
-            checkBox.IsEnabled = true;
-        }
-        catch (Exception ex)
-        {
-            checkBox.IsChecked = false;
-            checkBox.IsEnabled = true;
-            MessageBox.Show(
-                $"批量办理记录时发生错误：{ex.Message}",
-                "办理失败",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
-        }
-    }
-
-    /// <summary>确认后永久删除全部已办理记录，保留原始消息。</summary>
-    private async void ClearCompletedTodosButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button button)
-        {
-            return;
-        }
-
-        var completedTodoCount = CompletedTodos.Count;
-        if (completedTodoCount == 0)
-        {
-            MessageBox.Show(
-                "当前没有已办理记录。",
-                "无需清空",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
-
-        var confirmation = MessageBox.Show(
-            $"确定永久删除全部 {completedTodoCount} 条已办理记录吗？\n\n原始消息不会被删除，此操作不可恢复。",
-            "清空已办理",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-
-        if (confirmation != MessageBoxResult.Yes)
-        {
-            return;
-        }
-
-        button.IsEnabled = false;
-        try
-        {
-            var deletedCount = await _todoRepository.DeleteCompletedAsync(CancellationToken.None);
-            await RefreshAsync();
-            MessageBox.Show(
-                $"已删除 {deletedCount} 条已办理记录。",
-                "清空完成",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(
-                $"清空已办理记录时发生错误：{ex.Message}",
-                "清空失败",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
-        }
-        finally
-        {
-            button.IsEnabled = true;
-        }
+        await TodoFeature.RefreshAsync();
+        SummaryText = $"消息 {TodoFeature.MessageFeed.TotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
     }
 
     /// <summary>项目看板维度切换：按项目、时间或群名重新统计。</summary>
@@ -1003,209 +777,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return CreateProjectClassifier().Classify(message).ProjectName;
     }
 
-    /// <summary>重载消息流分页（默认不刷新总数）。</summary>
-    private async Task LoadMessageStreamPageAsync(int pageNumber)
-    {
-        await LoadMessageStreamPageAsync(pageNumber, refreshCount: false);
-    }
-
-    /// <summary>
-    /// 加载消息流分页数据。
-    /// refreshCount=true 时强制重新查询总数；否则复用已知总数以减少 COUNT(*) 查询开销。
-    /// 处理边界情况：页码越界自动回退到末页。
-    /// </summary>
-    private async Task LoadMessageStreamPageAsync(int pageNumber, bool refreshCount)
-    {
-        var safePage = Math.Max(1, pageNumber);
-        IReadOnlyCollection<string>? chatFilter = _currentFollowedChats.Count > 0 ? _currentFollowedChats : null;
-        var include = _followedChatFilterMode == FollowedChatFilterMode.Include;
-        MessagePage page;
-        if (refreshCount || _messageStreamTotalCount == 0)
-        {
-            page = await _messageRepository.GetPageAsync(safePage, _messageStreamPageSize, chatFilter, include, CancellationToken.None);
-        }
-        else
-        {
-            page = await _messageRepository.GetPageWithKnownCountAsync(
-                safePage, _messageStreamPageSize, _messageStreamTotalCount, chatFilter, include, CancellationToken.None);
-        }
-
-        var pageCount = CalculateMessageStreamPageCount(page.TotalCount);
-        if (page.Messages.Count == 0 && page.TotalCount > 0 && safePage > pageCount)
-        {
-            await LoadMessageStreamPageAsync(pageCount, refreshCount);
-            return;
-        }
-
-        _messageStreamPageNumber = page.PageNumber;
-        _messageStreamTotalCount = page.TotalCount;
-
-        // 创建高亮检测器
-        var mentionDetector = new MentionDetector(_currentAliases);
-
-        Replace(Messages, page.Messages.Select(message => new MessageRow(
-            message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
-            FormatMessageSource(message.Source),
-            message.ChatName,
-            message.SenderName,
-            message.IsMentionMe ? "是" : "否",
-            message.Content)));
-
-        // 同时更新高亮版本的消息列表
-        Replace(HighlightableMessages, page.Messages.Select(message =>
-        {
-            var segments = WechatDashboard.Application.Mentions.MessageHighlighter.HighlightMentions(
-                message.Content,
-                mentionDetector.ExtractMentionedAliases(message.Content));
-
-            return new HighlightableMessageRow
-            {
-                SentAt = message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
-                Source = FormatMessageSource(message.Source),
-                ChatName = message.ChatName,
-                SenderName = message.SenderName,
-                IsMentionMe = message.IsMentionMe ? "是" : "否",
-                RawContent = message.Content,
-                ContentSegments = segments
-            };
-        }));
-
-        UpdateMessageStreamPagingText();
-        var modeText = _followedChatFilterMode == FollowedChatFilterMode.Exclude ? "排除" : "关注";
-        MessageStreamStatusText = page.Messages.Count == 0
-            ? _currentFollowedChats.Count > 0 ? $"暂无{modeText}群消息，请在关注群设置中调整群名或模式。" : "暂无消息。"
-            : $"已加载本页 {page.Messages.Count} 条消息。";
-    }
-
-    /// <summary>消息流跳到首页：已是首页时给出提示。</summary>
-    private async void FirstMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_messageStreamPageNumber <= 1)
-        {
-            MessageStreamStatusText = "已是首页。";
-            return;
-        }
-
-        await LoadMessageStreamPageAsync(1);
-    }
-
-    /// <summary>消息流上一页：已是首页时给出提示。</summary>
-    private async void PreviousMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_messageStreamPageNumber <= 1)
-        {
-            MessageStreamStatusText = "已是首页，没有上一页。";
-            return;
-        }
-
-        await LoadMessageStreamPageAsync(_messageStreamPageNumber - 1);
-    }
-
-    /// <summary>消息流下一页：已是末页时给出提示。</summary>
-    private async void NextMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_messageStreamPageNumber >= CalculateMessageStreamPageCount(_messageStreamTotalCount))
-        {
-            MessageStreamStatusText = "已是末页，没有下一页。";
-            return;
-        }
-
-        await LoadMessageStreamPageAsync(_messageStreamPageNumber + 1);
-    }
-
-    /// <summary>消息流跳到末页：已是末页时给出提示。</summary>
-    private async void LastMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
-    {
-        var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
-        if (_messageStreamPageNumber >= pageCount)
-        {
-            MessageStreamStatusText = "已是末页。";
-            return;
-        }
-
-        await LoadMessageStreamPageAsync(pageCount);
-    }
-
-    /// <summary>消息流跳转到指定页码（解析输入框的页号）。</summary>
-    private async void GoToMessageStreamPageButton_Click(object sender, RoutedEventArgs e)
-    {
-        var requestedPage = ReadRequestedMessageStreamPage();
-        if (!requestedPage.HasValue)
-        {
-            return;
-        }
-
-        await LoadMessageStreamPageAsync(requestedPage.Value);
-    }
-
-    /// <summary>消息流每页条数变化：保留当前首行所在页，重新计算页码并刷新。</summary>
-    private async void MessageStreamPageSizeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        var selectedPageSize = ReadSelectedMessageStreamPageSize();
-        if (selectedPageSize == _messageStreamPageSize)
-        {
-            return;
-        }
-
-        var firstRowIndex = Math.Max(0, (_messageStreamPageNumber - 1) * _messageStreamPageSize);
-        _messageStreamPageSize = selectedPageSize;
-        var targetPage = firstRowIndex / _messageStreamPageSize + 1;
-        UpdateMessageStreamPagingText();
-
-        if (!IsLoaded)
-        {
-            return;
-        }
-
-        await LoadMessageStreamPageAsync(targetPage);
-    }
-
-    /// <summary>根据总条数与每页大小计算消息流总页数，至少为 1。</summary>
-    private int CalculateMessageStreamPageCount(int totalCount)
-    {
-        return Math.Max(1, (int)Math.Ceiling(totalCount / (double)_messageStreamPageSize));
-    }
-
-    /// <summary>从下拉框读取用户选择的消息流每页条数，限制在 1-200 之间。</summary>
-    private int ReadSelectedMessageStreamPageSize()
-    {
-        if (MessageStreamPageSizeComboBox?.SelectedItem is ComboBoxItem item)
-        {
-            var rawValue = item.Tag?.ToString() ?? item.Content?.ToString();
-            if (int.TryParse(rawValue, out var selectedPageSize))
-            {
-                return Math.Clamp(selectedPageSize, 1, 200);
-            }
-        }
-
-        return _messageStreamPageSize;
-    }
-
-    /// <summary>读取页码输入框并校验，返回 1 到总页数之间的合法页码；非法时给出提示并返回 null。</summary>
-    private int? ReadRequestedMessageStreamPage()
-    {
-        var rawPage = MessageStreamPageNumberTextBox?.Text?.Trim();
-        if (!int.TryParse(rawPage, out var requestedPage) || requestedPage <= 0)
-        {
-            MessageStreamStatusText = "请输入有效页码。";
-            return null;
-        }
-
-        var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
-        return Math.Clamp(requestedPage, 1, pageCount);
-    }
-
-    /// <summary>更新消息流分页文本与页码输入框，反映当前页/总页数/总条数/每页条数。</summary>
-    private void UpdateMessageStreamPagingText()
-    {
-        var pageCount = CalculateMessageStreamPageCount(_messageStreamTotalCount);
-        MessageStreamPageText = $"第 {_messageStreamPageNumber}/{pageCount} 页，共 {_messageStreamTotalCount} 条，每页 {_messageStreamPageSize} 条";
-        if (MessageStreamPageNumberTextBox is not null)
-        {
-            MessageStreamPageNumberTextBox.Text = _messageStreamPageNumber.ToString();
-        }
-    }
-
     /// <summary>
     /// 加载当天微信消息分页。
     /// ensureInitialized=true 时若读取器未初始化则自动尝试初始化（耗时操作），
@@ -1300,6 +871,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 创建高亮检测器
         var mentionDetector = new MentionDetector(_currentAliases);
+        var persistedMessages = await _messageRepository.GetBySourceKeysAsync(
+            filteredMessages
+                .Select(message => new MessageIdentity(message.Source, message.SourceMessageKey))
+                .ToArray(),
+            CancellationToken.None);
+        var persistedMessageLookup = persistedMessages.ToDictionary(
+            message => (message.Source, message.SourceMessageKey),
+            message => message.Id);
 
         Replace(WeChatMessages, filteredMessages.Select(message => new WeChatMessageRow(
             message.Content,
@@ -1315,6 +894,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             return new HighlightableWeChatMessageRow
             {
+                MessageId = persistedMessageLookup.GetValueOrDefault((message.Source, message.SourceMessageKey)),
                 Content = message.Content,
                 ChatName = message.ChatName,
                 SenderName = message.SenderName,
@@ -1542,7 +1122,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _followedChatFilterMode = newMode;
         await _followedChatRepository.SetFilterModeAsync(newMode, CancellationToken.None);
-        await LoadMessageStreamPageAsync(1, refreshCount: true);
+        await TodoFeature.MessageFeed.RefreshAsync();
         SummaryText = newMode == FollowedChatFilterMode.Exclude
             ? "已切换为排除模式：将不显示列表中的群消息。"
             : "已切换为只显示模式：将仅显示列表中的群消息。";
@@ -2008,88 +1588,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 }
 
-/// <summary>待办列表行数据：用于 UI 绑定展示单条待办。</summary>
-public sealed record TodoRow(
-    long Id,
-    string Priority,
-    string Status,
-    string Source,
-    string SourceChatName,
-    string SenderName,
-    string MessageContent,
-    string SentAt,
-    string CompletedAt);
-
-/// <summary>消息流列表行数据：用于 UI 绑定展示单条入库消息。</summary>
-public sealed record MessageRow(string SentAt, string Source, string ChatName, string SenderName, string IsMentionMe, string Content);
-
 /// <summary>微信消息列表行数据：用于 UI 绑定展示单条微信原生消息。</summary>
 public sealed record WeChatMessageRow(string Content, string ChatName, string SenderName);
-
-/// <summary>支持富文本高亮的消息行：用于显示带 @ 高亮的消息内容。</summary>
-public sealed class HighlightableMessageRow : INotifyPropertyChanged
-{
-    private string _sentAt = "";
-    private string _source = "";
-    private string _chatName = "";
-    private string _senderName = "";
-    private string _isMentionMe = "";
-    private string _rawContent = "";
-    private IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> _contentSegments = Array.Empty<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment>();
-
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    public string SentAt
-    {
-        get => _sentAt;
-        set { _sentAt = value; OnPropertyChanged(); }
-    }
-
-    public string Source
-    {
-        get => _source;
-        set { _source = value; OnPropertyChanged(); }
-    }
-
-    public string ChatName
-    {
-        get => _chatName;
-        set { _chatName = value; OnPropertyChanged(); }
-    }
-
-    public string SenderName
-    {
-        get => _senderName;
-        set { _senderName = value; OnPropertyChanged(); }
-    }
-
-    public string IsMentionMe
-    {
-        get => _isMentionMe;
-        set { _isMentionMe = value; OnPropertyChanged(); }
-    }
-
-    public string RawContent
-    {
-        get => _rawContent;
-        set { _rawContent = value; OnPropertyChanged(); }
-    }
-
-    public IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> ContentSegments
-    {
-        get => _contentSegments;
-        set { _contentSegments = value; OnPropertyChanged(); }
-    }
-
-    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-    }
-}
 
 /// <summary>支持富文本高亮的微信消息行。</summary>
 public sealed class HighlightableWeChatMessageRow : INotifyPropertyChanged
 {
+    private long _messageId;
     private string _content = "";
     private string _chatName = "";
     private string _senderName = "";
@@ -2097,6 +1602,12 @@ public sealed class HighlightableWeChatMessageRow : INotifyPropertyChanged
     private IEnumerable<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment> _contentSegments = Array.Empty<WechatDashboard.Application.Mentions.MessageHighlighter.TextSegment>();
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    public long MessageId
+    {
+        get => _messageId;
+        set { _messageId = value; OnPropertyChanged(); }
+    }
 
     public string Content
     {

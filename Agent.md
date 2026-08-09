@@ -6,7 +6,7 @@ WechatDashboard is a Windows WPF desktop application for collecting collaboratio
 
 ## Current Snapshot (2026-08-09)
 
-The active branch is `main` at `b020aa5` (`feat:dashboard-navigation-and-capture-safety`) and matched `origin/main` at the last read-only inspection. Unrelated untracked files exist in the workspace; preserve them and stage only files intentionally changed for the current task.
+The active branch is `main` at `7a00f4d` (`fix: persist message processing results atomically`) and matched `origin/main` at the 2026-08-09 inspection. Unrelated untracked files exist in the workspace; preserve them and stage only files intentionally changed for the current task.
 
 Current verified state:
 
@@ -20,7 +20,8 @@ Current verified state:
 - Pending Todos move persistently to the completed page, and both pages display facts from the original source message. Source labels distinguish 微信、石化通、飞书、钉钉 and 示例.
 - The sidebar exposes project dashboard, pending/completed Todos, message stream, WeChat messages, follow settings, capture source settings and diagnostics.
 - The chart dashboard supports project, time and group-name dimensions with bar, ring and line presentation. Followed projects can contain multiple matching keywords and merge multiple chats into one project bucket.
-- Verification on 2026-08-09: full solution build succeeded with 0 warnings and 0 errors; all 33 .NET regression tests passed.
+- Todo workbench implementation is present in the current working tree: arbitrary persisted messages can become idempotent Todos, active items are grouped into overdue/today/upcoming/undated, detail editing and persisted reminders/snooze history are wired, and Todo detail can locate the original message context.
+- Verification on 2026-08-09: the standard solution build and WPF independent-output build both succeeded with 0 warnings and 0 errors; all 39 .NET regression tests passed. Use the independent output only while a Visual Studio debug process locks the default app DLLs.
 - Python verification still runs 47 tests with 1 failing expectation in `test_read_messages_aggregates_across_shards`: implementation sorts newest-first, while the test expects the older Alice row first. This is unchanged from the pre-transaction baseline and remains the next test-baseline task.
 
 Sensitive state:
@@ -67,9 +68,9 @@ Current technical state and gaps:
 - Adapter exceptions are currently reduced to debug output inside the pipeline; the diagnostics page does not yet persist true per-Adapter success/failure history.
 - Some diagnostic timestamps are refresh timestamps rather than recorded capture timestamps.
 - Top counters are calculated from a recent-message sample and can undercount high-volume days.
-- Todo fields for description, due time and five statuses exist in the domain, but the WPF UI currently exposes only completion and clearing completed records.
-- Message FTS search, reminders, tray mode, report export, versioned migrations, backup/restore and retention controls remain unimplemented.
-- `MainWindow.xaml.cs` still combines UI state, capture orchestration, repositories, pagination, rules and analytics; split it incrementally rather than rewriting the application at once.
+- Todo list/detail/message-flow responsibilities now use feature Views/ViewModels, async commands, application services, policies, repositories, a unit of work and `TodoFeatureCoordinator`. `MainWindow.xaml.cs` still owns unrelated capture, settings, diagnostics and dashboard responsibilities, so continue extracting those incrementally.
+- Reminder migration/lifecycle, in-app delivery, stale-claim recovery and snooze presets are implemented. Windows Toast, quiet hours, per-source controls, explicit custom snooze UI, project selection UI and WPF automation remain open.
+- Message FTS search, tray mode, report export, backup/restore and retention controls remain unimplemented. The migration runner currently has only the Todo reminder migration.
 
 ## Commands
 
@@ -163,11 +164,11 @@ Immediate next work, in priority order:
 2. Add an explicit offset-not-advanced-on-failure test, then persist capture-run diagnostics.
 3. Add structured per-Adapter run results and persist real last-success, last-failure, duration, counts, error stage and sanitized error summary for diagnostics.
 4. Replace recent-message-sample top counters with accurate SQL aggregate queries.
-5. Build the Todo workbench: manual creation, details, project, priority, due time, description, five states, reopen, source-message navigation, reminders and snooze.
+5. Finish the Todo workbench acceptance slice: project selection UI, explicit custom snooze, resume/time-zone refresh hooks, Windows Toast/quiet hours/per-source controls, ViewModel tests and WPF UI automation.
 6. Add FTS5 full-text search and combined source/chat/sender/project/date/mention/Todo filters.
 7. Unify project keywords, priority contacts, urgency terms and weights in a rule center; persist classification/urgency reasons and support test input and correction.
 8. Add deterministic local project daily/weekly reports, followed by backup/restore, integrity checks and retention controls.
-9. Incrementally extract ViewModels and application services from `MainWindow.xaml.cs`, with discoverable tests and CI.
+9. Continue extracting the remaining capture/settings/diagnostics/dashboard responsibilities from `MainWindow.xaml.cs`, with discoverable tests and CI.
 
 Secondary capture work remains valid but follows the reliability baseline: decide the `tools\wx-key-tools` distribution policy, finish manual DB Key/data-directory/reinitialization UI, and complete minimized-WeChat system validation using privacy-safe counts.
 

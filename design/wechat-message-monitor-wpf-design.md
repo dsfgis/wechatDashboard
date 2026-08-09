@@ -587,6 +587,235 @@ ViewModel 建议：
 | RuleEditorViewModel | 项目规则、关键词、别名配置 |
 | CaptureDiagnosticsViewModel | 采集适配器健康状态 |
 
+### 5.1 Todo 工作台四项功能详细设计（2026-08-09）
+
+本节最初用于先行设计，当前实现状态记录在 5.1.10。范围包括：任意消息转为待办、延后提醒、今日到期/已逾期分组、从待办详情跳回原始消息。实现时不得继续把仓储调用、业务判断和导航定位堆入 `MainWindow.xaml.cs`。
+
+#### 5.1.1 已确认现状与设计约束
+
+1. `TodoItem` 已有 `SourceMessageId` 和 `DueAt`，`messages` 是原始消息事实来源；详情页只读展示原消息，不把用户编辑反写到消息表。
+2. 当前消息流行模型没有数据库消息 ID，主窗口直接处理待办完成、分页和仓储调用；新增功能前必须先引入可测试的 ViewModel 和应用服务边界。
+3. 当前数据库初始化只使用 `CREATE TABLE IF NOT EXISTS`，尚无版本化 migration。新增提醒表、索引或列之前，必须先落地 migration 基础设施，不能依赖重新建库。
+4. “今日到期”和“已逾期”是随当前时间变化的派生分组，不新增 Todo 状态，也不把分组名持久化。
+5. “延后提醒”只改变下一次提醒时间，不改变 `DueAt`。如用户要修改截止时间，应使用独立的“修改截止时间”操作。
+6. 第一版交互把一条原消息对应的既有 Todo 视为幂等结果：重复点击“转为待办”时打开已有 Todo，而不是静默创建重复项。领域模型不增加数据库唯一约束，以保留未来把一条消息拆成多个行动项的扩展空间；并发幂等由应用事务中的查询与插入保证。
+
+#### 5.1.2 总体架构与设计模式
+
+```mermaid
+flowchart LR
+    V["Todo/Message Views"] --> VM["TodoList / TodoDetail / MessageFeed ViewModels"]
+    VM --> C["Async Commands"]
+    C --> A["Todo Application Services"]
+    A --> P["Policies / Factory / State Transition"]
+    A --> R["Repositories + Unit of Work"]
+    R --> DB[(SQLite)]
+    VM --> N["Shell Navigation Coordinator"]
+    N --> MF["MessageFeedViewModel.Activate(route)"]
+    RW["Reminder Worker"] --> RP["Reminder Policy"]
+    RW --> NA["Notification Adapter"]
+    RW --> R
+    A --> E["Application Event Bus"]
+    E --> VM
+```
+
+采用以下模式，并限制其使用目的：
+
+| 模式 | 落点 | 解决的问题 |
+| --- | --- | --- |
+| MVVM | `TodoListViewModel`、`TodoDetailViewModel`、`MessageFeedViewModel` | 从窗口代码后置中移出状态、加载、校验和用户操作 |
+| Command | `CreateTodoFromMessageCommand`、`SnoozeReminderCommand`、`NavigateToSourceCommand` | 统一异步执行、忙碌态、CanExecute 和错误呈现 |
+| Application Service / Use Case | `TodoApplicationService`、`ReminderApplicationService` | 编排事务和跨仓储业务，不让 ViewModel 拼接流程 |
+| Factory | `TodoFactory.CreateFromMessage` | 统一手动与自动 Todo 的标题、来源、项目和优先级默认值 |
+| Policy / Strategy | `TodoDueBucketPolicy`、`ReminderSchedulePolicy`、`TodoStatusTransitionPolicy` | 隔离时区、分组、延期选项、状态流转等可变规则 |
+| Repository + Unit of Work | `ITodoRepository`、`IReminderRepository`、`IMessageRepository`、`ITodoUnitOfWork` | 保证手动建 Todo 与初始提醒、延期状态更新的原子性 |
+| Coordinator + Route | `IShellNavigationService`、`MessageContextRoute` | 跨页面导航并定位消息，不让 Todo 详情操纵 TabControl/DataGrid |
+| Observer / Event Aggregator | `TodoCreatedEvent`、`TodoChangedEvent`、`ReminderChangedEvent` | 让列表、顶部计数和详情按事件刷新，避免彼此直接引用 |
+| Adapter | `IUserNotificationPublisher` | 隔离 Windows Toast、托盘或仅应用内提示的实现差异 |
+| Clock abstraction | `IClock`、`ITimeZoneProvider` | 让午夜切组、逾期判断、延期和补发提醒可确定性测试 |
+
+不为五种 Todo 状态分别建立五个类。当前状态数量和转换规则较小，使用集中式 `TodoStatusTransitionPolicy` 更易审计；只有状态行为显著复杂后才升级为完整 State 对象。
+
+#### 5.1.3 建议目录与主窗口边界
+
+```text
+src/WechatDashboard.App/
+  Bootstrap/ApplicationCompositionRoot.cs
+  Navigation/ShellNavigationService.cs
+  Navigation/MessageContextRoute.cs
+  Views/Todos/TodoListView.xaml
+  Views/Todos/TodoDetailView.xaml
+  Views/Messages/MessageFeedView.xaml
+  ViewModels/ShellViewModel.cs
+  ViewModels/Todos/TodoListViewModel.cs
+  ViewModels/Todos/TodoDetailViewModel.cs
+  ViewModels/Messages/MessageFeedViewModel.cs
+  Behaviors/DataGridScrollIntoViewBehavior.cs
+  Commands/AsyncRelayCommand.cs
+src/WechatDashboard.Application/
+  Todos/TodoApplicationService.cs
+  Todos/TodoFactory.cs
+  Todos/TodoDueBucketPolicy.cs
+  Todos/TodoStatusTransitionPolicy.cs
+  Reminders/ReminderApplicationService.cs
+  Reminders/ReminderSchedulePolicy.cs
+  Navigation/MessageContextQueryService.cs
+src/WechatDashboard.Infrastructure/
+  Persistence/SqliteTodoRepository.cs
+  Persistence/SqliteReminderRepository.cs
+  Persistence/SqliteTodoUnitOfWork.cs
+  Notifications/WindowsToastNotificationPublisher.cs
+  Background/ReminderWorker.cs
+```
+
+`MainWindow.xaml.cs` 最终只保留 `InitializeComponent` 以及无法用绑定/Behavior 表达的窗口生命周期桥接。依赖构造放到 `ApplicationCompositionRoot`；页面切换归 `ShellViewModel`；DataGrid 滚动定位归附加 Behavior；确认框和错误提示通过 `IDialogService` 调用。迁移应按页面逐步完成，禁止一次性重写整个主窗口。
+
+#### 5.1.4 任意消息转为待办
+
+入口：消息流行操作按钮和右键菜单均提供“转为待办”。其他消息页只有在消息已经进入规范化 `messages` 表并取得数据库 ID 后才启用此命令；不得按正文、发送人和时间模糊匹配原消息。
+
+交互流程：
+
+1. `MessageListItemViewModel` 必须携带 `MessageId`、`Source` 和 `SourceMessageKey`，命令参数只传稳定的 `MessageId`。
+2. `CreateTodoFromMessageCommand` 打开轻量创建面板，使用 `TodoFactory` 预填标题、描述、分类项目、紧急度优先级，可选截止时间和首次提醒时间。
+3. 用户确认后，`TodoApplicationService.CreateFromMessageAsync` 在事务中重新读取消息，检查既有 Todo，创建 Todo，并在用户选择提醒时同时创建首条 `Scheduled` reminder。
+4. 如果已经存在关联 Todo，返回 `ExistingTodo` 结果并打开其详情；如果消息已被清理，返回 `SourceMessageMissing`，不创建悬空引用。
+5. 创建成功发布 `TodoCreatedEvent`；消息行切换为“查看待办”，待办列表和顶部计数按事件增量刷新，必要时再执行查询校准。
+
+建议用例契约：
+
+```csharp
+public sealed record CreateTodoFromMessageRequest(
+    long MessageId,
+    string? Title,
+    string? Description,
+    long? ProjectId,
+    PriorityLevel? Priority,
+    DateTimeOffset? DueAt,
+    DateTimeOffset? FirstReminderAt);
+
+public interface ITodoApplicationService
+{
+    Task<CreateTodoResult> CreateFromMessageAsync(
+        CreateTodoFromMessageRequest request,
+        CancellationToken cancellationToken);
+}
+```
+
+手动转换和 `@我` 自动创建共享 `TodoFactory` 的字段生成规则，但触发策略不同：自动创建仍由采集事务触发，手动创建由用户命令触发；不要让 UI 直接调用现有静态 `TodoService.CreateFromMention`。
+
+#### 5.1.5 今日到期与已逾期分组
+
+待办理页面默认显示四个可折叠分组，防止只显示用户点名的两个分组后隐藏其他事项：
+
+| 分组 | 判定（应用所在时区） | 默认排序 |
+| --- | --- | --- |
+| 已逾期 | `DueAt < now` | 截止时间最早、优先级最高在前 |
+| 今日到期 | `now <= DueAt < nextLocalDayStart` | 最接近截止时间在前 |
+| 后续到期 | `DueAt >= nextLocalDayStart` | 截止时间升序 |
+| 无截止时间 | `DueAt is null` | 优先级、更新时间降序 |
+
+仅 `Pending`、`InProgress`、`Waiting` 进入这些分组；`Done` 和 `Ignored` 留在历史/已办理视图。一个今天上午已过截止时间的 Todo 属于“已逾期”，不能同时出现在“今日到期”。
+
+`TodoDueBucketPolicy` 接收 `IClock` 和 `ITimeZoneProvider` 后计算分组，分组值不写回数据库。`TodoListViewModel` 在页面激活、Todo 变化、应用从休眠恢复、系统时区变化以及跨越本地午夜时刷新；页面保持打开时以一分钟为最大刷新间隔，使刚过截止时间的事项及时移入“已逾期”。
+
+#### 5.1.6 提醒与延后提醒
+
+提醒是独立生命周期，不复用 `todo_items.status`。建议新增：
+
+```sql
+CREATE TABLE todo_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    todo_id INTEGER NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    parent_reminder_id INTEGER NULL,
+    delivered_at TEXT NULL,
+    snoozed_at TEXT NULL,
+    dismissed_at TEXT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(todo_id) REFERENCES todo_items(id) ON DELETE CASCADE,
+    FOREIGN KEY(parent_reminder_id) REFERENCES todo_reminders(id)
+);
+
+CREATE INDEX idx_todo_reminders_due
+    ON todo_reminders(status, scheduled_at);
+CREATE INDEX idx_todo_reminders_todo
+    ON todo_reminders(todo_id, created_at DESC);
+```
+
+提醒状态为 `Scheduled`、`Dispatching`、`Delivered`、`Snoozed`、`Dismissed`、`Cancelled`。延期时在一个事务中把旧提醒标记为 `Snoozed`，并创建带 `parent_reminder_id` 的新 `Scheduled` 记录，从而保留完整历史。完成或忽略 Todo 时取消尚未发送的提醒；重新打开 Todo 不自动恢复旧提醒，详情页明确询问是否新建提醒。
+
+默认延期选项由 `ReminderSchedulePolicy` 提供：10 分钟、30 分钟、1 小时、明天 09:00、自定义。所有选项最终转换为绝对 `DateTimeOffset` 存储；校验目标时间必须晚于当前时间。延期不修改 `DueAt`，即使延期时间晚于截止时间也允许，但 UI 要显示“提醒晚于截止时间”的非阻塞警告。
+
+`ReminderWorker` 使用 `PeriodicTimer` 查询到期提醒，通过短事务原子领取 `Scheduled -> Dispatching`，再调用 `IUserNotificationPublisher`。发送成功转为 `Delivered`；失败记录脱敏错误并按退避策略重排，不在日志中写消息正文。应用启动或从休眠恢复时补领 `scheduled_at <= now` 的提醒，领取状态保证同一提醒不会重复弹出。第一版可以仅实现应用内通知，Windows Toast 作为 Adapter 后续接入，不影响用例层。
+
+#### 5.1.7 从待办详情跳回原始消息
+
+Todo 详情页展示 Todo 可编辑字段与原消息只读字段。仅当 `SourceMessageId` 存在且消息仍可查询时启用“查看原始消息”。导航流程如下：
+
+1. `NavigateToSourceCommand` 构造 `MessageContextRoute(SourceMessageId)`，交给 `IShellNavigationService`。
+2. `ShellViewModel` 切换到消息流页面，并调用 `MessageFeedViewModel.ActivateAsync(route)`；详情 ViewModel 不引用 `TabControl`、`DataGrid` 或主窗口。
+3. `MessageContextQueryService` 按 ID 查询锚点消息及前后上下文，进入临时“原消息定位模式”。该模式不受当前关注群过滤影响，并显示“返回先前消息列表”横幅，避免来源消息因过滤条件被错误报告为不存在。
+4. `MessageFeedViewModel` 设置 `SelectedMessageId`；`DataGridScrollIntoViewBehavior` 完成选中、滚动和短时高亮。
+5. 原消息已按清理策略删除时，详情仍保留 Todo 人工字段，按钮禁用并显示“原始消息已不存在”，不得用 Todo 描述伪装成原文。
+
+上下文查询使用 `(sent_at, id)` 作为稳定游标，默认返回锚点前后各 20 条。这样不依赖当前页大小，也避免为定位一条消息从第一页顺序翻页。
+
+#### 5.1.8 数据迁移、并发与失败语义
+
+1. 先增加 `schema_migrations` 和顺序 migration runner，再创建 `todo_reminders`；升级失败必须回滚并保留原库可重新尝试。
+2. `ITodoUnitOfWork` 负责手动创建 Todo + 初始提醒、延期旧提醒 + 新提醒、完成 Todo + 取消提醒三类事务。
+3. 保存详情和延期使用 `updated_at` 或新增 `row_version` 做乐观并发；冲突时重新加载并提示，不采用最后写入静默覆盖。
+4. 重复“转为待办”由事务内 `GetBySourceMessageIdAsync` 返回已有项。暂不建立 `source_message_id` 唯一索引，因为未来可能允许把一条消息拆成多个行动项。
+5. 所有时间以 ISO-8601 `DateTimeOffset` 持久化，分组边界通过用户当前时区计算；修改系统时区后立即重算，不批量改写历史值。
+
+#### 5.1.9 测试与验收切片
+
+单元测试：
+
+1. `TodoFactory` 正确继承消息、分类和紧急度默认值，且不修改原消息。
+2. `TodoDueBucketPolicy` 覆盖截止前一秒、恰好到期、今日末尾、跨午夜、夏令时和无截止时间。
+3. `ReminderSchedulePolicy` 覆盖各延期预设、自定义时间和无效过去时间。
+4. `TodoStatusTransitionPolicy` 覆盖完成/忽略时取消提醒以及重新打开规则。
+5. ViewModel 命令覆盖忙碌态、CanExecute、取消和错误结果，不需要启动 WPF 窗口。
+
+SQLite 集成测试：
+
+1. 任意消息可创建 Todo；重复命令返回既有 Todo；消息不存在时不创建记录。
+2. Todo 与首条提醒同事务提交，注入提醒写入失败时 Todo 也回滚。
+3. 延期事务保留旧记录、创建新记录，且任一步失败时不出现两个有效提醒。
+4. Worker 并发领取同一提醒时只有一个成功；应用重启后补发一次且不重复。
+5. 完成/忽略 Todo 会取消未发送提醒；历史提醒仍可审计。
+6. 原消息上下文查询以 ID 精确定位，在同一时间戳多条消息时仍稳定。
+
+UI 验收：
+
+1. 任意规范化消息均能转为待办，重复操作进入已有详情。
+2. 待办理页至少展示已逾期、今日到期、后续到期、无截止时间四组，跨越截止时间后自动换组。
+3. 详情可设置提醒并延后，界面明确区分截止时间和提醒时间。
+4. 从详情可切换到消息流、加载上下文、选中并高亮原始消息；当前群过滤不会阻止定位。
+5. 新功能的 View 和 ViewModel 不向 `MainWindow.xaml.cs` 新增仓储调用或业务分支；主窗口代码后置行数不得因本功能净增长。
+
+#### 5.1.10 实现状态（2026-08-09）
+
+已实现：
+
+1. 新增 `schema_migrations` 与事务式 migration 1，创建 `todo_reminders`、外键和查询索引；所有 SQLite 连接显式启用外键和 `busy_timeout`。
+2. 新增 `TodoFactory`、`TodoApplicationService`、`ReminderApplicationService`、`TodoDueBucketPolicy`、`ReminderSchedulePolicy`、`ITodoUnitOfWork` 和 SQLite 实现。任意已持久化消息可按稳定 `MessageId` 转成 Todo，重复转换返回既有 Todo；创建 Todo 与首条提醒、延期历史、完成/忽略时取消提醒均在事务内完成。
+3. 待办理页面按已逾期、今日到期、后续到期、无截止时间四组展示活动 Todo，并以一分钟计时器刷新时间派生分组。详情支持编辑标题、说明、优先级、截止时间和五种状态，支持设置提醒与 10 分钟、30 分钟、1 小时、明天 09:00 延后。
+4. `ReminderWorker` 使用原子领取、失败退避和超时领取恢复；应用启动会补领已到期提醒。第一版通知为 `IUserNotificationPublisher` 后的应用内提示，Windows Toast 尚未接入。
+5. Todo 详情显示原始消息事实，可切换到消息流上下文模式；该模式临时忽略关注群过滤，按稳定 ID 选中并由 `DataGridScrollIntoViewBehavior` 滚动定位，支持返回先前列表。
+6. Todo/消息分页、命令、详情与跨页面协调已移入独立 ViewModel、View、Behavior 和 `TodoFeatureCoordinator`。本次 `MainWindow.xaml.cs` 相对基线净减少 489 行，没有把新增仓储流程放回窗口事件处理器。
+7. 已修复 WPF `Run.Text` 对 `ObservableCollection.Count` 的默认双向绑定异常，所有相关计数绑定显式使用 `Mode=OneWay`。
+
+当前验证：标准解决方案构建与 WPF 独立输出编译均为 0 警告、0 错误；.NET 回归测试 39/39 通过，覆盖消息转 Todo 幂等、提醒延期历史、完成取消、到期派发一次、崩溃后领取恢复、来源上下文和来源键到稳定消息 ID 的映射。
+
+仍未完成：Windows Toast、免打扰与按来源/群聊通知控制、显式自定义“延后到”交互、应用恢复/系统时区变化事件、ViewModel 自动化测试和 WPF UI 自动化验收。应用事件总线与完整 `ShellViewModel` 尚未引入，当前使用范围更小的 Coordinator 回调完成页面协调。
+
 ## 6. SQLite 数据模型
 
 数据库文件默认存放在项目结果目录，例如 `tools\result\data\wechat-dashboard.db`。开发环境可通过配置覆盖。

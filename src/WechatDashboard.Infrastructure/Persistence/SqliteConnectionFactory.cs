@@ -12,7 +12,7 @@ internal static class SqliteConnectionFactory
     // 保证 SQLitePCL 只初始化一次
     private static int _sqliteInitialized;
     // 并发时最多等待 5000 毫秒
-    private const string BusyTimeoutPragma = "PRAGMA busy_timeout=5000;";
+    private const string ConnectionPragmas = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
 
     /// <summary>
     /// 打开一个 SQLite 连接，并在连接上设置 busy_timeout。
@@ -42,7 +42,7 @@ internal static class SqliteConnectionFactory
         // 设置 busy_timeout，避免写冲突时直接抛锁异常
         using (var pragmaCommand = connection.CreateCommand())
         {
-            pragmaCommand.CommandText = BusyTimeoutPragma;
+            pragmaCommand.CommandText = ConnectionPragmas;
             pragmaCommand.ExecuteNonQuery();
         }
         return connection;

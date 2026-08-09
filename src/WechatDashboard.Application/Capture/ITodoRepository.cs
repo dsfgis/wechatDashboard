@@ -17,6 +17,15 @@ public interface ITodoRepository
     /// <summary>获取所有已办理的待办（按完成时间倒序排列）。</summary>
     Task<IReadOnlyList<TodoItem>> GetCompletedAsync(CancellationToken cancellationToken);
 
+    /// <summary>获取所有活动状态待办。</summary>
+    Task<IReadOnlyList<TodoItem>> GetActiveAsync(CancellationToken cancellationToken);
+
+    /// <summary>按主键获取待办。</summary>
+    Task<TodoItem?> GetByIdAsync(long id, CancellationToken cancellationToken);
+
+    /// <summary>按原消息获取第一个关联待办，用于消息转待办幂等。</summary>
+    Task<TodoItem?> GetBySourceMessageIdAsync(long sourceMessageId, CancellationToken cancellationToken);
+
     /// <summary>将指定待办标记为已办理，并记录完成时间。</summary>
     Task<bool> MarkCompletedAsync(long id, DateTimeOffset completedAt, CancellationToken cancellationToken);
 

@@ -1,12 +1,15 @@
 using WechatDashboard.Application.Classification;
+using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Mentions;
+using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 using WechatDashboard.Infrastructure.Capture;
+using WechatDashboard.Infrastructure.Background;
 using WechatDashboard.Infrastructure.Persistence;
 
 var tests = new (string Name, Func<Task> Run)[]
@@ -15,10 +18,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Project classifier uses chat and keyword rules", TestProjectClassifierAsync),
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
+    ("Todo due bucket policy separates overdue, today, upcoming and undated items", TestTodoDueBucketPolicyAsync),
+    ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
+    ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
+    ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
+    ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
+    ("Message context query locates the source message by stable id", TestMessageContextQueryAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
-    ("Todo repository deletes only completed todos", TestDeleteCompletedTodosAsync),
+    ("Todo repository retains and clears Done and Ignored history", TestDeleteCompletedTodosAsync),
     ("Todo repository sorts pending todos by source message time descending", TestTodoOrderByMessageTimeAsync),
     ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
@@ -169,6 +178,203 @@ static Task TestTodoCreationAsync()
     return Task.CompletedTask;
 }
 
+static Task TestTodoDueBucketPolicyAsync()
+{
+    var now = new DateTimeOffset(2026, 8, 9, 14, 0, 0, TimeSpan.FromHours(8));
+    var policy = new TodoDueBucketPolicy(TimeZoneInfo.FindSystemTimeZoneById("China Standard Time"));
+
+    AssertEqual(TodoDueBucket.Overdue, policy.Classify(now.AddMinutes(-1), now), "A past due time should be overdue.");
+    AssertEqual(TodoDueBucket.DueToday, policy.Classify(now.AddHours(2), now), "A later due time today should be due today.");
+    AssertEqual(TodoDueBucket.Upcoming, policy.Classify(now.AddDays(1), now), "A due time tomorrow should be upcoming.");
+    AssertEqual(TodoDueBucket.NoDueDate, policy.Classify(null, now), "A missing due time should be undated.");
+    AssertEqual(TodoDueBucket.Overdue, policy.Classify(now, now), "A Todo due exactly now should be overdue, not duplicated across groups.");
+
+    return Task.CompletedTask;
+}
+
+static async Task TestManualMessageToTodoAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var reminderRepository = new SqliteReminderRepository(databasePath);
+    var now = new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8));
+    var message = await messageRepository.SaveAsync(
+        CreateMessage(0, "普通项目群", "李工", "请下周确认接口字段") with
+        {
+            SourceMessageKey = $"manual-todo-{Guid.NewGuid():N}",
+            IsMentionMe = false
+        },
+        CancellationToken.None);
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    var dueAt = now.AddDays(2);
+    var reminderAt = now.AddHours(1);
+    var request = new CreateTodoFromMessageRequest(
+        message.Id,
+        Title: null,
+        Description: "人工备注",
+        ProjectId: null,
+        Priority: PriorityLevel.P2,
+        DueAt: dueAt,
+        FirstReminderAt: reminderAt);
+
+    var created = await service.CreateFromMessageAsync(request, CancellationToken.None);
+    var repeated = await service.CreateFromMessageAsync(request, CancellationToken.None);
+    var todos = await todoRepository.GetActiveAsync(CancellationToken.None);
+    var reminders = await reminderRepository.GetForTodoAsync(created.Todo!.Id, CancellationToken.None);
+
+    AssertEqual(CreateTodoOutcome.Created, created.Outcome, "The first command should create a Todo.");
+    AssertEqual(CreateTodoOutcome.ExistingTodo, repeated.Outcome, "A repeated command should return the existing Todo.");
+    AssertEqual(created.Todo.Id, repeated.Todo!.Id, "Repeated conversion should point to the same Todo.");
+    AssertEqual(1, todos.Count, "Only one active Todo should be created from the message.");
+    AssertEqual(message.Id, todos.Single().SourceMessageId, "The manual Todo should preserve the source message id.");
+    AssertEqual(dueAt, todos.Single().DueAt, "The selected due time should persist.");
+    AssertFalse(todos.Single().IsAutoCreated, "A user conversion should be marked as manual.");
+    AssertEqual(1, reminders.Count, "The optional initial reminder should be persisted atomically.");
+    AssertEqual(ReminderStatus.Scheduled, reminders.Single().Status, "The initial reminder should be scheduled.");
+    AssertEqual(reminderAt, reminders.Single().ScheduledAt, "The selected reminder time should persist.");
+}
+
+static async Task TestReminderSnoozeAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var reminderRepository = new SqliteReminderRepository(databasePath);
+    var now = new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8));
+    var message = await messageRepository.SaveAsync(
+        CreateMessage(0, "CRM项目群", "王经理", "下午确认发布窗口") with { SourceMessageKey = $"snooze-{Guid.NewGuid():N}" },
+        CancellationToken.None);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var todoService = new TodoApplicationService(unitOfWork, new FixedClock(now));
+    var dueAt = now.AddHours(4);
+    var created = await todoService.CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(message.Id, null, null, null, null, dueAt, now.AddMinutes(10)),
+        CancellationToken.None);
+    var originalReminder = (await reminderRepository.GetForTodoAsync(created.Todo!.Id, CancellationToken.None)).Single();
+    var snoozeUntil = now.AddHours(1);
+    var reminderService = new ReminderApplicationService(unitOfWork, new FixedClock(now));
+
+    var snoozed = await reminderService.SnoozeAsync(originalReminder.Id, snoozeUntil, CancellationToken.None);
+    var reminders = await reminderRepository.GetForTodoAsync(created.Todo.Id, CancellationToken.None);
+    var persistedTodo = await todoRepository.GetByIdAsync(created.Todo.Id, CancellationToken.None);
+
+    AssertTrue(snoozed.Succeeded, "A scheduled reminder should be snoozable.");
+    AssertEqual(2, reminders.Count, "Snooze should preserve the old reminder and create a new one.");
+    AssertEqual(ReminderStatus.Snoozed, reminders.Single(item => item.Id == originalReminder.Id).Status, "The old reminder should retain snooze history.");
+    AssertEqual(ReminderStatus.Scheduled, reminders.Single(item => item.Id != originalReminder.Id).Status, "The replacement reminder should be scheduled.");
+    AssertEqual(originalReminder.Id, reminders.Single(item => item.Id != originalReminder.Id).ParentReminderId, "The replacement should link to the old reminder.");
+    AssertEqual(snoozeUntil, reminders.Single(item => item.Id != originalReminder.Id).ScheduledAt, "The replacement time should match the request.");
+    AssertEqual(dueAt, persistedTodo!.DueAt, "Snoozing must not change the Todo due time.");
+
+    var completed = await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            persistedTodo.Id,
+            persistedTodo.Title,
+            persistedTodo.Description,
+            persistedTodo.ProjectId,
+            persistedTodo.Priority,
+            persistedTodo.DueAt,
+            TodoStatus.Done,
+            persistedTodo.UpdatedAt),
+        CancellationToken.None);
+    var afterCompletion = await reminderRepository.GetForTodoAsync(persistedTodo.Id, CancellationToken.None);
+    AssertEqual(TodoStatus.Done, completed!.Status, "The Todo should complete through the application transaction.");
+    AssertEqual(ReminderStatus.Cancelled, afterCompletion.Last().Status, "Completing a Todo should cancel its open replacement reminder.");
+}
+
+static async Task TestReminderWorkerAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var now = new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8));
+    var message = await new SqliteMessageRepository(databasePath).SaveAsync(
+        CreateMessage(0, "提醒测试群", "测试员", "提醒测试") with { SourceMessageKey = $"worker-{Guid.NewGuid():N}" },
+        CancellationToken.None);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var created = await new TodoApplicationService(unitOfWork, new FixedClock(now)).CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(message.Id, null, null, null, null, null, now.AddMinutes(1)),
+        CancellationToken.None);
+    var publisher = new RecordingNotificationPublisher();
+    var repository = new SqliteReminderRepository(databasePath);
+    var worker = new ReminderWorker(repository, publisher, new FixedClock(now.AddMinutes(2)));
+
+    var firstDelivered = await worker.RunOnceAsync(CancellationToken.None);
+    var secondDelivered = await worker.RunOnceAsync(CancellationToken.None);
+    var reminder = (await repository.GetForTodoAsync(created.Todo!.Id, CancellationToken.None)).Single();
+
+    AssertEqual(1, firstDelivered, "The first worker pass should deliver the due reminder.");
+    AssertEqual(0, secondDelivered, "A delivered reminder must not be delivered twice.");
+    AssertEqual(1, publisher.PublishCount, "The notification adapter should be called once.");
+    AssertEqual(ReminderStatus.Delivered, reminder.Status, "The reminder should persist its delivered state.");
+}
+
+static async Task TestReminderWorkerRecoversStaleClaimAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var now = new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8));
+    var message = await new SqliteMessageRepository(databasePath).SaveAsync(
+        CreateMessage(0, "恢复测试群", "测试员", "恢复中断提醒") with { SourceMessageKey = $"recovery-{Guid.NewGuid():N}" },
+        CancellationToken.None);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var created = await new TodoApplicationService(unitOfWork, new FixedClock(now)).CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(message.Id, null, null, null, null, null, now.AddMinutes(1)),
+        CancellationToken.None);
+    var repository = new SqliteReminderRepository(databasePath);
+    var reminder = (await repository.GetForTodoAsync(created.Todo!.Id, CancellationToken.None)).Single();
+    AssertTrue(
+        await repository.TryClaimAsync(reminder.Id, now.AddMinutes(-10), CancellationToken.None),
+        "The test reminder should simulate a claim left behind by a crashed process.");
+    var publisher = new RecordingNotificationPublisher();
+    var worker = new ReminderWorker(repository, publisher, new FixedClock(now.AddMinutes(2)));
+
+    var delivered = await worker.RunOnceAsync(CancellationToken.None);
+    var recovered = await repository.GetByIdAsync(reminder.Id, CancellationToken.None);
+
+    AssertEqual(1, delivered, "A stale dispatch claim should be recovered and delivered.");
+    AssertEqual(1, publisher.PublishCount, "The recovered reminder should be published once.");
+    AssertEqual(ReminderStatus.Delivered, recovered!.Status, "The recovered reminder should finish as delivered.");
+    AssertEqual(1, recovered.AttemptCount, "Recovery should leave an auditable retry count.");
+}
+
+static async Task TestMessageContextQueryAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var repository = new SqliteMessageRepository(databasePath);
+    var sentAt = new DateTimeOffset(2026, 8, 9, 9, 0, 0, TimeSpan.FromHours(8));
+    var saved = new List<Message>();
+    for (var index = 0; index < 5; index++)
+    {
+        saved.Add(await repository.SaveAsync(
+            CreateMessage(0, "上下文群", $"成员{index}", $"消息{index}") with
+            {
+                SourceMessageKey = $"context-{Guid.NewGuid():N}-{index}",
+                SentAt = sentAt.AddMinutes(index)
+            },
+            CancellationToken.None));
+    }
+
+    var context = await repository.GetContextAsync(saved[2].Id, before: 1, after: 1, CancellationToken.None);
+
+    AssertTrue(context is not null, "An existing source message should produce a context result.");
+    AssertEqual(saved[2].Id, context!.Anchor.Id, "The context anchor must be selected by stable database id.");
+    AssertEqual(3, context.Messages.Count, "The context should include one message before and after the anchor.");
+    AssertEqual(saved[3].Id, context.Messages[0].Id, "Context should keep the normal newest-first display order.");
+    AssertEqual(saved[2].Id, context.Messages[1].Id, "The anchor should remain in chronological position.");
+    AssertEqual(saved[1].Id, context.Messages[2].Id, "The older context message should follow the anchor.");
+}
+
 static async Task TestSqliteRoundTripAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
@@ -195,6 +401,9 @@ static async Task TestSqliteRoundTripAsync()
     var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
     var recentMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
     var messagesById = await messageRepository.GetByIdsAsync(new[] { savedMessage.Id, long.MaxValue }, CancellationToken.None);
+    var messagesBySourceKey = await messageRepository.GetBySourceKeysAsync(
+        new[] { new MessageIdentity(savedMessage.Source, savedMessage.SourceMessageKey) },
+        CancellationToken.None);
 
     AssertTrue(savedMessage.Id > 0, "Saved message should get a database id.");
     AssertTrue(savedTodo.Id > 0, "Saved todo should get a database id.");
@@ -202,6 +411,7 @@ static async Task TestSqliteRoundTripAsync()
     AssertEqual("@张三 请今天处理线上故障", recentMessages.Single().Content, "Recent message content should round-trip.");
     AssertEqual(1, messagesById.Count, "ID lookup should return only matching messages.");
     AssertEqual(savedMessage.SentAt, messagesById.Single().SentAt, "ID lookup should preserve the original message time.");
+    AssertEqual(savedMessage.Id, messagesBySourceKey.Single().Id, "Source-key lookup should resolve the canonical persisted message id.");
 }
 
 static async Task TestMessageTodoTransactionRollbackAsync()
@@ -454,12 +664,24 @@ static async Task TestDeleteCompletedTodosAsync()
             CompletedAt = now
         },
         CancellationToken.None);
+    await todoRepository.SaveAsync(
+        pendingTodo with
+        {
+            Id = 0,
+            Title = "删除的已忽略记录",
+            Status = TodoStatus.Ignored,
+            UpdatedAt = now.AddSeconds(1)
+        },
+        CancellationToken.None);
 
+    var historyBeforeDelete = await todoRepository.GetCompletedAsync(CancellationToken.None);
     var deletedCount = await todoRepository.DeleteCompletedAsync(CancellationToken.None);
     var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
     var completedTodos = await todoRepository.GetCompletedAsync(CancellationToken.None);
 
-    AssertEqual(2, deletedCount, "Clearing completed todos should delete every completed record.");
+    AssertEqual(3, historyBeforeDelete.Count, "Done and Ignored todos should both remain visible in history.");
+    AssertTrue(historyBeforeDelete.Any(item => item.Status == TodoStatus.Ignored), "An ignored Todo must not disappear from every list.");
+    AssertEqual(3, deletedCount, "Clearing handled todos should delete every Done and Ignored record.");
     AssertEqual(1, pendingTodos.Count, "Clearing completed todos should preserve pending records.");
     AssertEqual("保留的待办理记录", pendingTodos.Single().Title, "The pending record should be unchanged.");
     AssertEqual(0, completedTodos.Count, "No completed records should remain after clearing.");
@@ -1526,5 +1748,21 @@ public sealed class FakeExternalCommandRunner : IExternalCommandRunner
         LastEnvironment = environment;
         _onRun?.Invoke(executablePath, LastArguments, workingDirectory, environment);
         return Task.FromResult(_result);
+    }
+}
+
+public sealed class FixedClock(DateTimeOffset now) : IClock
+{
+    public DateTimeOffset Now { get; } = now;
+}
+
+public sealed class RecordingNotificationPublisher : IUserNotificationPublisher
+{
+    public int PublishCount { get; private set; }
+
+    public Task PublishAsync(ReminderDispatchItem item, CancellationToken cancellationToken)
+    {
+        PublishCount++;
+        return Task.CompletedTask;
     }
 }

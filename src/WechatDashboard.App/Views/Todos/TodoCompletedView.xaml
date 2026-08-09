@@ -1,0 +1,28 @@
+<UserControl x:Class="WechatDashboard.App.Views.Todos.TodoCompletedView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,10">
+            <Button Content="刷新" Command="{Binding RefreshCommand}" />
+            <Button Content="清空已办理" Command="{Binding ClearCompletedCommand}" />
+        </StackPanel>
+        <DataGrid ItemsSource="{Binding Completed}">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="完成时间" Binding="{Binding CompletedAt}" Width="145" />
+                <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="75" />
+                <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="80" />
+                <DataGridTextColumn Header="群聊" Binding="{Binding SourceChatName}" Width="150" />
+                <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" />
+                <DataGridTemplateColumn Header="操作" Width="80">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Button Content="详情" Padding="10,4"
+                                    Command="{Binding DataContext.OpenDetailCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                    CommandParameter="{Binding}" />
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+            </DataGrid.Columns>
+        </DataGrid>
+    </DockPanel>
+</UserControl>

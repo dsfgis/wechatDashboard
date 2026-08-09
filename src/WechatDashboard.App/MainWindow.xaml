@@ -2,6 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:WechatDashboard.App"
+        xmlns:todoViews="clr-namespace:WechatDashboard.App.Views.Todos"
+        xmlns:messageViews="clr-namespace:WechatDashboard.App.Views.Messages"
         Title="微信项目消息看板"
         Height="760"
         Width="1180"
@@ -271,109 +273,13 @@
                     </ControlTemplate>
                 </TabControl.Template>
                 <TabItem Header="待办理">
-                    <DataGrid ItemsSource="{Binding Todos}">
-                        <DataGrid.Columns>
-                            <DataGridTemplateColumn Header="办理" Width="70">
-                                <DataGridTemplateColumn.HeaderTemplate>
-                                    <DataTemplate>
-                                        <CheckBox HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"
-                                                  Content="全选"
-                                                  ToolTip="将全部待办理记录转入已办理页面"
-                                                  Click="SelectAllTodosCheckBox_Click" />
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.HeaderTemplate>
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <CheckBox HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"
-                                                  ToolTip="勾选后转入已办理页面"
-                                                  Tag="{Binding}"
-                                                  Click="CompleteTodoCheckBox_Click" />
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="150" />
-                            <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
-                            <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
-                            <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="90" />
-                            <DataGridTextColumn Header="群名" Binding="{Binding SourceChatName}" Width="160" />
-                            <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
-                            <DataGridTemplateColumn Header="消息内容" CellTemplate="{StaticResource TodoMessageContentTemplate}" Width="*" />
-                        </DataGrid.Columns>
-                    </DataGrid>
+                    <todoViews:TodoPendingView DataContext="{Binding TodoFeature.Workbench}" />
                 </TabItem>
                 <TabItem Header="已办理">
-                    <DockPanel>
-                        <Button x:Name="ClearCompletedTodosButton"
-                                DockPanel.Dock="Top"
-                                Content="清空"
-                                HorizontalAlignment="Right"
-                                Margin="0,0,0,10"
-                                Padding="16,4"
-                                ToolTip="删除全部已办理记录（不删除原始消息）"
-                                Click="ClearCompletedTodosButton_Click" />
-                        <DataGrid ItemsSource="{Binding CompletedTodos}">
-                            <DataGrid.Columns>
-                                <DataGridTextColumn Header="完成时间" Binding="{Binding CompletedAt}" Width="150" />
-                                <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="90" />
-                                <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90" />
-                                <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="90" />
-                                <DataGridTextColumn Header="群名" Binding="{Binding SourceChatName}" Width="160" />
-                                <DataGridTemplateColumn Header="消息内容" CellTemplate="{StaticResource TodoMessageContentTemplate}" Width="*" />
-                            </DataGrid.Columns>
-                        </DataGrid>
-                    </DockPanel>
+                    <todoViews:TodoCompletedView DataContext="{Binding TodoFeature.Workbench}" />
                 </TabItem>
                 <TabItem Header="消息流">
-                    <DockPanel>
-                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
-                            <TextBlock Text="{Binding MessageStreamStatusText}" VerticalAlignment="Center" Foreground="#4B5563" TextWrapping="Wrap" />
-                            <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                                <TextBlock Text="每页" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
-                                <ComboBox x:Name="MessageStreamPageSizeComboBox" Width="72" Margin="0,0,8,0" SelectedIndex="1" SelectionChanged="MessageStreamPageSizeComboBox_SelectionChanged">
-                                    <ComboBoxItem Content="20" Tag="20" />
-                                    <ComboBoxItem Content="50" Tag="50" />
-                                    <ComboBoxItem Content="100" Tag="100" />
-                                    <ComboBoxItem Content="200" Tag="200" />
-                                </ComboBox>
-                                <Button Content="首页" Click="FirstMessageStreamPageButton_Click" />
-                                <Button Content="上一页" Click="PreviousMessageStreamPageButton_Click" />
-                                <Button Content="下一页" Click="NextMessageStreamPageButton_Click" />
-                                <Button Content="末页" Click="LastMessageStreamPageButton_Click" />
-                                <TextBlock Text="跳至" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,4,0" />
-                                <TextBox x:Name="MessageStreamPageNumberTextBox" Width="48" Text="1" Margin="0,0,8,0" VerticalContentAlignment="Center" />
-                                <Button Content="跳转" Click="GoToMessageStreamPageButton_Click" />
-                                <TextBlock Text="{Binding MessageStreamPageText}" VerticalAlignment="Center" Foreground="#4B5563" Margin="4,0,0,0" />
-                            </WrapPanel>
-                        </DockPanel>
-                        <DataGrid ItemsSource="{Binding HighlightableMessages}">
-                            <DataGrid.Columns>
-                                <DataGridTextColumn Header="时间" Binding="{Binding SentAt}" Width="170" />
-                                <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="90" />
-                                <DataGridTextColumn Header="群聊" Binding="{Binding ChatName}" Width="160" />
-                                <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="110" />
-                                <DataGridTextColumn Header="@我" Binding="{Binding IsMentionMe}" Width="70" />
-                                <DataGridTemplateColumn Header="内容" Width="*">
-                                    <DataGridTemplateColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}"
-                                                                      TextWrapping="Wrap"
-                                                                      ToolTipService.ShowDuration="60000">
-                                                <local:HighlightTextBlock.ToolTip>
-                                                    <ToolTip MaxWidth="700"
-                                                             DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                                                        <TextBlock Text="{Binding RawContent}"
-                                                                   TextWrapping="Wrap" />
-                                                    </ToolTip>
-                                                </local:HighlightTextBlock.ToolTip>
-                                            </local:HighlightTextBlock>
-                                        </DataTemplate>
-                                    </DataGridTemplateColumn.CellTemplate>
-                                </DataGridTemplateColumn>
-                            </DataGrid.Columns>
-                        </DataGrid>
-                    </DockPanel>
+                    <messageViews:MessageFeedView DataContext="{Binding TodoFeature.MessageFeed}" />
                 </TabItem>
                 <TabItem Header="微信消息">
                     <DockPanel>
@@ -420,6 +326,15 @@
                                 </DataGridTemplateColumn>
                                 <DataGridTextColumn Header="群名称" Binding="{Binding ChatName}" Width="220" />
                                 <DataGridTextColumn Header="发消息人" Binding="{Binding SenderName}" Width="140" />
+                                <DataGridTemplateColumn Header="操作" Width="100">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Button Content="转为待办" Padding="9,4"
+                                                    Command="{Binding DataContext.TodoFeature.MessageFeed.ConvertToTodoCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                    CommandParameter="{Binding MessageId}" />
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                             </DataGrid.Columns>
                         </DataGrid>
                     </DockPanel>

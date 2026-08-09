@@ -68,9 +68,9 @@ Current handoff update (2026-07-03):
 - Reading WeChat messages now syncs into the main pipeline: `MessageCapturePipeline.ProcessAsync` (extracted for reuse) dedups, persists, classifies, scores urgency, and auto-creates a Todo for every `@我` message, guarded by `_captureSemaphore` to avoid races with the live capture loop; `SourceMessageKey` dedup prevents duplicate Todos on re-reads.
 - Added Chinese comments across the codebase to reach the project's 20% comment-rate target, with a `check-comments.ps1` verification script.
 
-Current handoff update (2026-08-08):
+Current handoff update (2026-08-09):
 
-- Active delivery baseline is `main` at `b020aa5` (`feat:dashboard-navigation-and-capture-safety`), matching `origin/main` at the time of inspection.
+- Active delivery baseline is `main` at `7a00f4d` (`fix: persist message processing results atomically`), matching `origin/main` at the time of inspection.
 - Persistent Todo completion, completed-page display, original-source message mapping, Chinese source labels, and clearing completed Todos are implemented.
 - Shihuatong local encrypted message capture is implemented through the isolated local-database adapter with persisted incremental offsets.
 - The WPF shell now uses sidebar navigation and includes Todo, completed Todo, message stream, WeChat messages, chart dashboard, follow settings, capture source settings, and diagnostics pages.
@@ -89,6 +89,9 @@ Current implementation update (2026-08-09):
 - Verification: full solution build passed with 0 warnings and 0 errors; all 33 .NET regression tests passed.
 - Python reader remains at 46 passed / 1 failed because of the previously documented newest-first test expectation mismatch; the transaction change does not touch Python reader code.
 - Classification and urgency are now written to `message_classifications` and `urgency_scores` inside the same transaction, including category, confidence, reason, classifier, score and priority. Classifier-version metadata remains open.
+- Todo workbench core is now implemented from `design/wechat-message-monitor-wpf-design.md` section 5.1: arbitrary persisted-message conversion, four due buckets, persisted reminders/snooze history, application-start catch-up, editable Todo detail and source-message context navigation. Windows Toast, quiet hours, per-source controls, explicit custom snooze UI and automated WPF acceptance remain open.
+- The implementation uses feature Views/ViewModels, async commands, policies, application services, repositories, a unit of work, an in-app notification Adapter and `TodoFeatureCoordinator`; `MainWindow.xaml.cs` is 489 lines smaller than the baseline for this change.
+- Verification on 2026-08-09: after the Visual Studio debug process released the default DLLs, the standard solution build and WPF independent-output build both passed with 0 warnings/0 errors; all 39 .NET regression tests passed.
 
 Known gaps:
 
@@ -99,8 +102,8 @@ Known gaps:
 - Feishu and DingTalk currently rely on JSONL directory ingestion rather than native live adapters. Shihuatong has both JSONL and local-database paths.
 - Project keyword configuration exists, but default project rules, priority contacts, classification reasons, and urgency reasons are not yet fully configurable or persisted.
 - Charted dashboard views exist, but top counters still sample recent messages and can undercount high-volume days; category, priority, Todo-status, SLA, and full-history aggregate queries remain incomplete.
-- The Todo entity supports description, due time and five statuses, but the WPF UI currently exposes only Pending-to-Done completion and clearing completed records.
-- Message search, FTS5, desktop reminders, tray mode, report export, versioned migrations, backup/restore, and retention controls are not implemented.
+- The Todo workbench now exposes description, due time, priority and five statuses, plus due grouping, persisted reminders and source-message navigation. Explicit custom snooze UI and automated WPF UI acceptance remain open.
+- Message search, FTS5, Windows Toast, tray mode, report export, backup/restore, and retention controls are not implemented. Versioned migration infrastructure exists for the Todo reminder migration but needs to be used by later schema changes.
 - Message, classification, urgency and automatic Todo persistence are now atomic. Explicit classifier-version metadata and historical backfill remain open.
 - Adapter failures are collapsed to debug output inside the pipeline, while parts of the diagnostics UI use refresh time as a stand-in for real last-success time.
 - No installer, tray app, or background service mode yet.
@@ -347,17 +350,25 @@ Purpose: turn generated mentions into a complete personal work-management flow.
 
 **Planned components:**
 
-- Add Todo query/update application services and repository methods.
-- Add Todo list/detail ViewModels and reusable commands.
-- Add persisted reminder settings and `todo_reminders` storage.
-- Add Windows notification and tray services behind interfaces.
+- Add `TodoApplicationService` and `ReminderApplicationService`; ViewModels do not orchestrate repositories.
+- Add Todo list/detail/message-feed ViewModels, async commands and `ShellNavigationService` routes.
+- Add `TodoFactory`, `TodoDueBucketPolicy`, `ReminderSchedulePolicy` and `TodoStatusTransitionPolicy`.
+- Add versioned migration support, `todo_reminders`, reminder repository and Todo unit of work.
+- Add reminder worker and notification publisher behind interfaces; Windows Toast remains an Adapter detail.
+- Incrementally extract the affected Todo/message responsibilities from `MainWindow.xaml.cs`; do not perform an all-at-once shell rewrite.
 
-- [ ] Step 1: Add tests for manual Todo creation and editing title, description, project, priority and due time.
-- [ ] Step 2: Implement persisted transitions among Pending, InProgress, Waiting, Done and Ignored.
-- [ ] Step 3: Support reopening Done/Ignored items without altering the original source message.
-- [ ] Step 4: Add Todo detail UI with original source, group, sender, sent time, full content and source-message navigation.
-- [ ] Step 5: Add due-soon, overdue, P0/P1 and new-mention reminders with snooze and quiet hours.
-- [ ] Step 6: Add notification deduplication and per-source/per-chat controls.
+- [x] Step 0: Complete the detailed architecture, persistence, interaction, failure and test design in `design/wechat-message-monitor-wpf-design.md` section 5.1.
+- [x] Step 1: Add `schema_migrations` and a transactional migration runner; migrate `todo_reminders` and reminder indexes without requiring a fresh database.
+- [ ] Step 2: Introduce `AsyncRelayCommand`, `IDialogService`, the application event bus and `ShellNavigationService`; extract Todo list/detail and message-feed ViewModels without adding new business branches to `MainWindow.xaml.cs`. ViewModels, commands, dialog abstraction and a feature Coordinator are implemented; the event bus and full shell navigation abstraction remain open.
+- [x] Step 3: Add failing tests and implement `TodoFactory` plus `TodoApplicationService.CreateFromMessageAsync`; carry the canonical database `MessageId` in every convertible row and make repeated conversion return the existing Todo.
+- [ ] Step 4: Implement persisted editing of title, description, project, priority, due time and transitions among Pending, InProgress, Waiting, Done and Ignored; support reopening without altering the source message. Title, description, priority, due time and five-state editing are implemented; project selection UI remains open.
+- [ ] Step 5: Implement `TodoDueBucketPolicy` and grouped active-Todo queries for 已逾期、今日到期、后续到期、无截止时间, including midnight, time-zone and resume refresh behavior. The four groups and minute refresh are implemented; explicit resume and system-time-zone change events remain open.
+- [ ] Step 6: Implement reminder creation, completion cancellation, due claiming, application-start catch-up, delivery deduplication and snooze presets/custom time. Snooze changes reminder time only, never `DueAt`. Core lifecycle, stale-claim recovery and presets are implemented; explicit custom snooze UI and Windows notification delivery remain open.
+- [x] Step 7: Add Todo detail original-message facts and `MessageContextRoute`; load anchor context by ID and `(sent_at, id)`, temporarily bypass list filters, select/scroll/highlight through a WPF Behavior, and expose return-to-list navigation.
+- [ ] Step 8: Add per-source/per-chat notification controls and quiet hours after the core reminder lifecycle is stable.
+- [ ] Step 9: Run migration/SQLite/unit/ViewModel/UI acceptance tests, then build, .NET tests, Python tests and `git diff --check` serially. Reject the milestone if `MainWindow.xaml.cs` gains repository calls or has net line growth from these features.
+
+Implementation checkpoint (2026-08-09): Steps 1, 3 and 7 are complete. Steps 2, 4, 5 and 6 have their core paths implemented with the remaining boundaries stated inline. The standard solution and WPF independent-output builds both pass with 0 warnings/0 errors, 39 .NET tests pass, and `MainWindow.xaml.cs` has net negative line growth. Step 9 remains open until Python and UI acceptance are green.
 
 ## Milestone 8: Search, Rule Center, and Explainability
 
@@ -365,7 +376,7 @@ Purpose: make accumulated messages discoverable and make automated decisions ins
 
 - [ ] Step 1: Add versioned migration support and create an FTS5 index for content, chat name and sender name.
 - [ ] Step 2: Implement full-text search combined with source, chat, sender, project, date, mention, priority and Todo-status filters.
-- [ ] Step 3: Support converting any search/message result to a Todo and jumping to its original context.
+- [ ] Step 3: Reuse Milestone 7's message-to-Todo command and `MessageContextRoute` from FTS/search results; do not build a second conversion or navigation path.
 - [ ] Step 4: Replace legacy hardcoded project and priority-contact rules with repository-backed configuration.
 - [x] Step 5a: Persist `message_classifications` and `urgency_scores`, including classification reason, classifier, urgency reason and priority.
 - [ ] Step 5b: Add explicit classifier/ranker version metadata and a migration path for historical rows.

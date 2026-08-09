@@ -1,0 +1,60 @@
+<UserControl x:Class="WechatDashboard.App.Views.Todos.TodoPendingView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <DataTemplate x:Key="TodoCardTemplate">
+            <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,7">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <DockPanel>
+                            <TextBlock Text="{Binding Priority}" Foreground="#DC2626" FontWeight="SemiBold" Margin="0,0,8,0" />
+                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        </DockPanel>
+                        <TextBlock Margin="0,4,0,0" Foreground="#4B5563" TextTrimming="CharacterEllipsis">
+                            <Run Text="截止 "/><Run Text="{Binding DueAt, Mode=OneWay}"/><Run Text="　提醒 "/><Run Text="{Binding ReminderAt, Mode=OneWay}"/>
+                        </TextBlock>
+                        <TextBlock Margin="0,3,0,0" Foreground="#6B7280" TextTrimming="CharacterEllipsis">
+                            <Run Text="{Binding Source, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SourceChatName, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SenderName, Mode=OneWay}"/>
+                        </TextBlock>
+                        <TextBlock Text="{Binding MessageContent}" Foreground="#374151" Margin="0,4,0,0" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                        <Button Content="详情" Padding="12,5"
+                                Command="{Binding DataContext.OpenDetailCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                CommandParameter="{Binding}" />
+                        <Button Content="完成" Padding="12,5"
+                                Command="{Binding DataContext.CompleteCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                CommandParameter="{Binding}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+    <DockPanel>
+        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+            <Button DockPanel.Dock="Right" Content="刷新待办" Command="{Binding RefreshCommand}" />
+            <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" Foreground="#4B5563" TextWrapping="Wrap" />
+        </DockPanel>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <Expander IsExpanded="True" Margin="0,0,0,8">
+                    <Expander.Header><TextBlock Foreground="#DC2626" FontWeight="SemiBold"><Run Text="已逾期（"/><Run Text="{Binding Overdue.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <ItemsControl ItemsSource="{Binding Overdue}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                </Expander>
+                <Expander IsExpanded="True" Margin="0,0,0,8">
+                    <Expander.Header><TextBlock Foreground="#D97706" FontWeight="SemiBold"><Run Text="今日到期（"/><Run Text="{Binding DueToday.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <ItemsControl ItemsSource="{Binding DueToday}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                </Expander>
+                <Expander IsExpanded="True" Margin="0,0,0,8">
+                    <Expander.Header><TextBlock FontWeight="SemiBold"><Run Text="后续到期（"/><Run Text="{Binding Upcoming.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <ItemsControl ItemsSource="{Binding Upcoming}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                </Expander>
+                <Expander IsExpanded="True">
+                    <Expander.Header><TextBlock FontWeight="SemiBold"><Run Text="无截止时间（"/><Run Text="{Binding NoDueDate.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <ItemsControl ItemsSource="{Binding NoDueDate}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                </Expander>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</UserControl>

@@ -120,6 +120,83 @@ public sealed class SqliteTodoRepository : ITodoRepository
         return todos;
     }
 
+    public async Task<IReadOnlyList<TodoItem>> GetActiveAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, source_message_id, project_id, title, description, status,
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created
+            FROM todo_items
+            WHERE status IN ($pending, $inProgress, $waiting)
+            ORDER BY due_at IS NULL, due_at,
+                CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
+                updated_at DESC;
+            """;
+        command.Parameters.AddWithValue("$pending", TodoStatus.Pending.ToString());
+        command.Parameters.AddWithValue("$inProgress", TodoStatus.InProgress.ToString());
+        command.Parameters.AddWithValue("$waiting", TodoStatus.Waiting.ToString());
+        var result = new List<TodoItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadTodo(reader));
+        }
+
+        return result;
+    }
+
+    public async Task<TodoItem?> GetByIdAsync(long id, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        return await GetByIdAsync(connection, transaction: null, id, cancellationToken);
+    }
+
+    internal static async Task<TodoItem?> GetByIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long id,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT id, source_message_id, project_id, title, description, status,
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created
+            FROM todo_items WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadTodo(reader) : null;
+    }
+
+    public async Task<TodoItem?> GetBySourceMessageIdAsync(long sourceMessageId, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        return await GetBySourceMessageIdAsync(connection, transaction: null, sourceMessageId, cancellationToken);
+    }
+
+    internal static async Task<TodoItem?> GetBySourceMessageIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long sourceMessageId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT id, source_message_id, project_id, title, description, status,
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created
+            FROM todo_items
+            WHERE source_message_id = $sourceMessageId
+            ORDER BY created_at, id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$sourceMessageId", sourceMessageId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadTodo(reader) : null;
+    }
+
     /// <summary>查询所有已办理的待办，按完成时间倒序排列。</summary>
     public async Task<IReadOnlyList<TodoItem>> GetCompletedAsync(CancellationToken cancellationToken)
     {
@@ -140,10 +217,11 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 completed_at,
                 is_auto_created
             FROM todo_items
-            WHERE status = $status
+            WHERE status IN ($done, $ignored)
             ORDER BY completed_at DESC, updated_at DESC;
             """;
-        command.Parameters.AddWithValue("$status", TodoStatus.Done.ToString());
+        command.Parameters.AddWithValue("$done", TodoStatus.Done.ToString());
+        command.Parameters.AddWithValue("$ignored", TodoStatus.Ignored.ToString());
 
         var todos = new List<TodoItem>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -162,7 +240,9 @@ public sealed class SqliteTodoRepository : ITodoRepository
         CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE todo_items
             SET
@@ -177,7 +257,14 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Parameters.AddWithValue("$id", id);
         command.Parameters.AddWithValue("$pendingStatus", TodoStatus.Pending.ToString());
 
-        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+        var updated = await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+        if (updated)
+        {
+            await CancelOpenRemindersAsync(connection, transaction, id, completedAt, cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
     }
 
     /// <summary>将全部待办理记录原子更新为已办理，并返回更新数量。</summary>
@@ -186,7 +273,9 @@ public sealed class SqliteTodoRepository : ITodoRepository
         CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE todo_items
             SET
@@ -199,7 +288,27 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
         command.Parameters.AddWithValue("$pendingStatus", TodoStatus.Pending.ToString());
 
-        return await command.ExecuteNonQueryAsync(cancellationToken);
+        var updated = await command.ExecuteNonQueryAsync(cancellationToken);
+        if (updated > 0)
+        {
+            await using var cancel = connection.CreateCommand();
+            cancel.Transaction = transaction;
+            cancel.CommandText = """
+                UPDATE todo_reminders
+                SET status = $cancelled, updated_at = $completedAt
+                WHERE status IN ($scheduled, $dispatching)
+                  AND todo_id IN (SELECT id FROM todo_items WHERE status = $completedStatus AND completed_at = $completedAt);
+                """;
+            cancel.Parameters.AddWithValue("$cancelled", ReminderStatus.Cancelled.ToString());
+            cancel.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
+            cancel.Parameters.AddWithValue("$scheduled", ReminderStatus.Scheduled.ToString());
+            cancel.Parameters.AddWithValue("$dispatching", ReminderStatus.Dispatching.ToString());
+            cancel.Parameters.AddWithValue("$completedStatus", TodoStatus.Done.ToString());
+            await cancel.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
     }
 
     /// <summary>删除全部已办理记录，并返回删除数量。</summary>
@@ -207,10 +316,33 @@ public sealed class SqliteTodoRepository : ITodoRepository
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
         await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM todo_items WHERE status = $status;";
-        command.Parameters.AddWithValue("$status", TodoStatus.Done.ToString());
+        command.CommandText = "DELETE FROM todo_items WHERE status IN ($done, $ignored);";
+        command.Parameters.AddWithValue("$done", TodoStatus.Done.ToString());
+        command.Parameters.AddWithValue("$ignored", TodoStatus.Ignored.ToString());
 
         return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task CancelOpenRemindersAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long todoId,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var cancel = connection.CreateCommand();
+        cancel.Transaction = transaction;
+        cancel.CommandText = """
+            UPDATE todo_reminders
+            SET status = $cancelled, updated_at = $completedAt
+            WHERE todo_id = $todoId AND status IN ($scheduled, $dispatching);
+            """;
+        cancel.Parameters.AddWithValue("$cancelled", ReminderStatus.Cancelled.ToString());
+        cancel.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
+        cancel.Parameters.AddWithValue("$todoId", todoId);
+        cancel.Parameters.AddWithValue("$scheduled", ReminderStatus.Scheduled.ToString());
+        cancel.Parameters.AddWithValue("$dispatching", ReminderStatus.Dispatching.ToString());
+        await cancel.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>绑定待办参数到 INSERT 命令。</summary>
@@ -232,7 +364,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
     }
 
     /// <summary>从 DataReader 映射为 TodoItem 实体。</summary>
-    private static TodoItem ReadTodo(SqliteDataReader reader)
+    internal static TodoItem ReadTodo(SqliteDataReader reader)
     {
         return new TodoItem(
             Id: reader.GetInt64(0),

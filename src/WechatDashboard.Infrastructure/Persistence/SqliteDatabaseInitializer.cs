@@ -27,6 +27,14 @@ public sealed class SqliteDatabaseInitializer
         await ExecuteAsync(connection, "PRAGMA foreign_keys=ON;", cancellationToken);
         // 建表建索引
         await ExecuteAsync(connection, SchemaSql, cancellationToken);
+        await ExecuteAsync(connection, MigrationTableSql, cancellationToken);
+        await ApplyMigrationAsync(
+            connection,
+            version: 1,
+            name: "todo-reminder-lifecycle",
+            checksum: "todo-reminder-lifecycle-v1",
+            sql: TodoReminderMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -36,6 +44,76 @@ public sealed class SqliteDatabaseInitializer
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    private static async Task ApplyMigrationAsync(
+        SqliteConnection connection,
+        int version,
+        string name,
+        string checksum,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var check = connection.CreateCommand();
+        check.CommandText = "SELECT checksum FROM schema_migrations WHERE version = $version;";
+        check.Parameters.AddWithValue("$version", version);
+        var existingChecksum = await check.ExecuteScalarAsync(cancellationToken) as string;
+        if (existingChecksum is not null)
+        {
+            if (!string.Equals(existingChecksum, checksum, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Schema migration {version} checksum mismatch.");
+            }
+
+            return;
+        }
+
+        await using var transaction = connection.BeginTransaction();
+        await using var migration = connection.CreateCommand();
+        migration.Transaction = transaction;
+        migration.CommandText = sql;
+        await migration.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var record = connection.CreateCommand();
+        record.Transaction = transaction;
+        record.CommandText = "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES ($version, $name, $checksum, $appliedAt);";
+        record.Parameters.AddWithValue("$version", version);
+        record.Parameters.AddWithValue("$name", name);
+        record.Parameters.AddWithValue("$checksum", checksum);
+        record.Parameters.AddWithValue("$appliedAt", DateTimeOffset.UtcNow.ToString("O"));
+        await record.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private const string MigrationTableSql = """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );
+        """;
+
+    private const string TodoReminderMigrationSql = """
+        CREATE TABLE todo_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            todo_id INTEGER NOT NULL,
+            scheduled_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            parent_reminder_id INTEGER NULL,
+            delivered_at TEXT NULL,
+            snoozed_at TEXT NULL,
+            dismissed_at TEXT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(todo_id) REFERENCES todo_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_reminder_id) REFERENCES todo_reminders(id)
+        );
+
+        CREATE INDEX idx_todo_reminders_due ON todo_reminders(status, scheduled_at);
+        CREATE INDEX idx_todo_reminders_todo ON todo_reminders(todo_id, created_at DESC);
+        """;
 
     /// <summary>
     /// 数据库模式 SQL：会话、消息、项目、分类、紧急度、待办、规则、别名、偏移量、采集源设置、审计日志。
