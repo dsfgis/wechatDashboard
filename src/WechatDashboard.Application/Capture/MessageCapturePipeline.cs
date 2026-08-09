@@ -14,8 +14,7 @@ public sealed class MessageCapturePipeline
 {
     // 已注册的采集适配器列表
     private readonly IReadOnlyList<IMessageCaptureAdapter> _adapters;
-    private readonly IMessageRepository _messageRepository;
-    private readonly ITodoRepository _todoRepository;
+    private readonly IMessageProcessingUnitOfWork _messageProcessingUnitOfWork;
     private readonly IProcessingOffsetRepository _offsetRepository;
     private readonly MentionDetector _mentionDetector;
     private readonly ProjectClassifier _projectClassifier;
@@ -23,16 +22,14 @@ public sealed class MessageCapturePipeline
 
     public MessageCapturePipeline(
         IEnumerable<IMessageCaptureAdapter> adapters,
-        IMessageRepository messageRepository,
-        ITodoRepository todoRepository,
+        IMessageProcessingUnitOfWork messageProcessingUnitOfWork,
         IProcessingOffsetRepository offsetRepository,
         MentionDetector mentionDetector,
         ProjectClassifier projectClassifier,
         UrgencyRanker urgencyRanker)
     {
         _adapters = adapters.ToArray();
-        _messageRepository = messageRepository;
-        _todoRepository = todoRepository;
+        _messageProcessingUnitOfWork = messageProcessingUnitOfWork;
         _offsetRepository = offsetRepository;
         _mentionDetector = mentionDetector;
         _projectClassifier = projectClassifier;
@@ -105,27 +102,32 @@ public sealed class MessageCapturePipeline
         {
             captured++;
 
-            // 去重：同来源+同消息键已入库则跳过，避免重复建待办
-            if (await _messageRepository.ExistsAsync(capturedMessage.Source, capturedMessage.SourceMessageKey, cancellationToken))
+            // 判断是否 @我
+            var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
+            var message = ToMessage(capturedMessage, isMentionMe);
+            var writeResult = await _messageProcessingUnitOfWork.TryProcessAsync(
+                message,
+                savedMessage =>
+                {
+                    // 分类和评分保持在应用层；待办与消息由工作单元在同一事务中提交。
+                    var classification = _projectClassifier.Classify(savedMessage);
+                    var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
+                    var todo = isMentionMe
+                        ? TodoService.CreateFromMention(savedMessage, classification, urgency)
+                        : null;
+                    return new MessageProcessingArtifacts(classification, urgency, todo);
+                },
+                cancellationToken);
+
+            if (!writeResult.Persisted)
             {
                 duplicates++;
                 continue;
             }
 
-            // 判断是否 @我
-            var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
-            var message = ToMessage(capturedMessage, isMentionMe);
-            var savedMessage = await _messageRepository.SaveAsync(message, cancellationToken);
             persisted++;
-
-            // 分类 + 紧急度评分
-            var classification = _projectClassifier.Classify(savedMessage);
-            var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
-
-            // @我 的消息自动创建待办
-            if (isMentionMe)
+            if (writeResult.CreatedTodo)
             {
-                await _todoRepository.SaveAsync(TodoService.CreateFromMention(savedMessage, classification, urgency), cancellationToken);
                 createdTodos++;
             }
         }

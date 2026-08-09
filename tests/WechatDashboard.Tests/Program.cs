@@ -3,6 +3,7 @@ using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
+using Microsoft.Data.Sqlite;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 using WechatDashboard.Infrastructure.Capture;
@@ -15,6 +16,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
+    ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
     ("Todo repository deletes only completed todos", TestDeleteCompletedTodosAsync),
     ("Todo repository sorts pending todos by source message time descending", TestTodoOrderByMessageTimeAsync),
@@ -200,6 +202,144 @@ static async Task TestSqliteRoundTripAsync()
     AssertEqual("@张三 请今天处理线上故障", recentMessages.Single().Content, "Recent message content should round-trip.");
     AssertEqual(1, messagesById.Count, "ID lookup should return only matching messages.");
     AssertEqual(savedMessage.SentAt, messagesById.Single().SentAt, "ID lookup should preserve the original message time.");
+}
+
+static async Task TestMessageTodoTransactionRollbackAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var unitOfWork = new SqliteMessageProcessingUnitOfWork(databasePath);
+    var message = CreateMessage(
+        id: 0,
+        chatName: "CRM项目群",
+        senderName: "王经理",
+        content: "@张三 紧急，今天处理线上故障") with
+    {
+        SourceMessageKey = $"transaction-{Guid.NewGuid():N}",
+        IsMentionMe = true
+    };
+
+    MessageProcessingArtifacts BuildArtifacts(Message savedMessage)
+    {
+        var classification = new ClassificationResult(
+            savedMessage.Id,
+            1,
+            "CRM升级",
+            MessageCategory.Incident,
+            0.95,
+            "测试规则",
+            "Rules");
+        var urgency = new UrgencyScore(savedMessage.Id, 90, PriorityLevel.P0, "@我; 紧急");
+        var todo = TodoService.CreateFromMention(savedMessage, classification, urgency);
+        return new MessageProcessingArtifacts(classification, urgency, todo);
+    }
+
+    async Task<int> CountRowsAsync(string tableName)
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync(CancellationToken.None);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {tableName};";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(CancellationToken.None));
+    }
+
+    async Task<(long MessageId, string Category, double Confidence, string Reason, string Classifier)> ReadClassificationAsync()
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync(CancellationToken.None);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT message_id, category, confidence, reason, classifier FROM message_classifications LIMIT 1;";
+        await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+        AssertTrue(await reader.ReadAsync(CancellationToken.None), "A classification row should be readable.");
+        return (reader.GetInt64(0), reader.GetString(1), reader.GetDouble(2), reader.GetString(3), reader.GetString(4));
+    }
+
+    async Task<(long MessageId, int Score, string Priority, string Reason)> ReadUrgencyAsync()
+    {
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync(CancellationToken.None);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT message_id, score, priority, reason FROM urgency_scores LIMIT 1;";
+        await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+        AssertTrue(await reader.ReadAsync(CancellationToken.None), "An urgency row should be readable.");
+        return (reader.GetInt64(0), reader.GetInt32(1), reader.GetString(2), reader.GetString(3));
+    }
+
+    await using (var failureConnection = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await failureConnection.OpenAsync(CancellationToken.None);
+        await using var failureCommand = failureConnection.CreateCommand();
+        failureCommand.CommandText = """
+            CREATE TRIGGER fail_todo_insert
+            BEFORE INSERT ON todo_items
+            BEGIN
+                SELECT RAISE(ABORT, 'forced Todo insert failure');
+            END;
+            """;
+        await failureCommand.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    var insertFailed = false;
+    try
+    {
+        await unitOfWork.TryProcessAsync(message, BuildArtifacts, CancellationToken.None);
+    }
+    catch (SqliteException)
+    {
+        insertFailed = true;
+    }
+
+    AssertTrue(insertFailed, "The forced Todo insert should fail inside the SQLite transaction.");
+    AssertFalse(
+        await messageRepository.ExistsAsync(message.Source, message.SourceMessageKey, CancellationToken.None),
+        "The message insert must roll back when Todo insertion fails.");
+    AssertEqual(0, (await todoRepository.GetPendingAsync(CancellationToken.None)).Count, "The failed transaction must leave no Todo.");
+    AssertEqual(0, await CountRowsAsync("message_classifications"), "The failed transaction must roll back classification results.");
+    AssertEqual(0, await CountRowsAsync("urgency_scores"), "The failed transaction must roll back urgency results.");
+
+    await using (var recoveryConnection = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await recoveryConnection.OpenAsync(CancellationToken.None);
+        await using var recoveryCommand = recoveryConnection.CreateCommand();
+        recoveryCommand.CommandText = "DROP TRIGGER fail_todo_insert;";
+        await recoveryCommand.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    var retry = await unitOfWork.TryProcessAsync(message, BuildArtifacts, CancellationToken.None);
+    var persistedMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
+    var persistedTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+
+    AssertTrue(retry.Persisted, "A valid retry should persist the message after rollback.");
+    AssertTrue(retry.CreatedTodo, "A valid retry should create the Todo atomically.");
+    AssertEqual(1, persistedMessages.Count, "Exactly one message should exist after the successful retry.");
+    AssertEqual(1, persistedTodos.Count, "Exactly one Todo should exist after the successful retry.");
+    AssertEqual(1, await CountRowsAsync("message_classifications"), "The successful retry should persist one classification result.");
+    AssertEqual(1, await CountRowsAsync("urgency_scores"), "The successful retry should persist one urgency result.");
+    AssertEqual(persistedMessages.Single().Id, persistedTodos.Single().SourceMessageId, "The Todo must reference the committed message.");
+    var persistedClassification = await ReadClassificationAsync();
+    var persistedUrgency = await ReadUrgencyAsync();
+    AssertEqual(persistedMessages.Single().Id, persistedClassification.MessageId, "The classification must reference the committed message.");
+    AssertEqual(MessageCategory.Incident.ToString(), persistedClassification.Category, "The classification category should round-trip.");
+    AssertEqual(0.95, persistedClassification.Confidence, "The classification confidence should round-trip.");
+    AssertEqual("测试规则", persistedClassification.Reason, "The classification reason should round-trip.");
+    AssertEqual("Rules", persistedClassification.Classifier, "The classifier name should round-trip.");
+    AssertEqual(persistedMessages.Single().Id, persistedUrgency.MessageId, "The urgency score must reference the committed message.");
+    AssertEqual(90, persistedUrgency.Score, "The urgency score should round-trip.");
+    AssertEqual(PriorityLevel.P0.ToString(), persistedUrgency.Priority, "The urgency priority should round-trip.");
+    AssertEqual("@我; 紧急", persistedUrgency.Reason, "The urgency reason should round-trip.");
+
+    var duplicate = await unitOfWork.TryProcessAsync(message, BuildArtifacts, CancellationToken.None);
+    AssertFalse(duplicate.Persisted, "The source-message unique key should reject a duplicate atomically.");
+    AssertFalse(duplicate.CreatedTodo, "A duplicate message must not create a second Todo.");
+    AssertEqual(1, (await messageRepository.GetRecentAsync(10, CancellationToken.None)).Count, "Duplicate processing must keep one message.");
+    AssertEqual(1, (await todoRepository.GetPendingAsync(CancellationToken.None)).Count, "Duplicate processing must keep one Todo.");
+    AssertEqual(1, await CountRowsAsync("message_classifications"), "Duplicate processing must keep one classification result.");
+    AssertEqual(1, await CountRowsAsync("urgency_scores"), "Duplicate processing must keep one urgency result.");
 }
 
 static async Task TestTodoCompletionAsync()
@@ -1016,8 +1156,7 @@ static async Task TestCapturePipelineAsync()
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
     var pipeline = new MessageCapturePipeline(
         adapters: new IMessageCaptureAdapter[] { new JsonlDirectoryCaptureAdapter("WeChat", inputRoot) },
-        messageRepository,
-        todoRepository,
+        new SqliteMessageProcessingUnitOfWork(databasePath),
         offsetRepository,
         new MentionDetector(new[] { "张三", "zhangsan" }),
         new ProjectClassifier(new[]
@@ -1038,6 +1177,14 @@ static async Task TestCapturePipelineAsync()
     AssertEqual(2, recentMessages.Count, "Two messages should be persisted.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should be persisted.");
     AssertTrue(pendingTodos.Single().Title.Contains("@张三"), "Todo title should come from mention message.");
+
+    await using var resultConnection = new SqliteConnection($"Data Source={databasePath}");
+    await resultConnection.OpenAsync(CancellationToken.None);
+    await using var resultCommand = resultConnection.CreateCommand();
+    resultCommand.CommandText = "SELECT COUNT(*) FROM message_classifications;";
+    AssertEqual(2, Convert.ToInt32(await resultCommand.ExecuteScalarAsync(CancellationToken.None)), "Every persisted message should have a classification result.");
+    resultCommand.CommandText = "SELECT COUNT(*) FROM urgency_scores;";
+    AssertEqual(2, Convert.ToInt32(await resultCommand.ExecuteScalarAsync(CancellationToken.None)), "Every persisted message should have an urgency result.");
 }
 
 static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
@@ -1065,8 +1212,7 @@ static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
         .ToArray();
     var pipeline = new MessageCapturePipeline(
         adapters: CaptureAdapterFactory.CreateAdapters(sources),
-        messageRepository,
-        todoRepository,
+        new SqliteMessageProcessingUnitOfWork(databasePath),
         offsetRepository,
         new MentionDetector(new[] { "张三", "zhangsan" }),
         new ProjectClassifier(new[]
@@ -1170,8 +1316,7 @@ static async Task TestCapturePipelineWithSavedSettingsAsync()
 
     var pipeline = new MessageCapturePipeline(
         adapters: CaptureAdapterFactory.CreateAdapters(effectiveSources),
-        messageRepository,
-        todoRepository,
+        new SqliteMessageProcessingUnitOfWork(databasePath),
         offsetRepository,
         new MentionDetector(new[] { "张三" }),
         new ProjectClassifier(new[]

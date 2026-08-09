@@ -763,6 +763,8 @@ CREATE INDEX idx_classification_project ON message_classifications(project_id, c
 3. 如果任一步失败，整条消息处理回滚；下一轮采集仍能重试，不能出现“消息已存在但 Todo 永久缺失”。
 4. Offset 只能在该 Adapter 本批消息全部成功提交后推进；部分失败时保留可重放位置。
 
+实现进度（2026-08-09）：消息唯一键去重、消息、`message_classifications`、`urgency_scores` 和可选自动 Todo 已通过 `IMessageProcessingUnitOfWork` 在同一 SQLite 事务中完成。测试覆盖待办写入失败时四类数据全部回滚、成功重试、字段往返和重复抑制。分类器/评分器显式版本元数据与历史数据回填仍待后续 migration 实现。
+
 失败处理：
 
 1. 单条消息处理失败写入日志，不中断整个批次。

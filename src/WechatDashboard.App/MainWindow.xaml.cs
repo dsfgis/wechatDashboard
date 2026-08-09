@@ -1730,8 +1730,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         return new MessageCapturePipeline(
             adapters: CaptureAdapterFactory.CreateAdapters(effectiveSources),
-            _messageRepository,
-            _todoRepository,
+            new SqliteMessageProcessingUnitOfWork(_databasePath),
             _offsetRepository,
             new MentionDetector(_currentAliases),
             CreateProjectClassifier(),

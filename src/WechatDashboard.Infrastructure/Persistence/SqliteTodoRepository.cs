@@ -22,7 +22,18 @@ public sealed class SqliteTodoRepository : ITodoRepository
     public async Task<TodoItem> SaveAsync(TodoItem todo, CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        return await InsertAsync(connection, transaction: null, todo, cancellationToken);
+    }
+
+    /// <summary>在指定连接和事务内插入待办，供消息工作单元复用。</summary>
+    internal static async Task<TodoItem> InsertAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        TodoItem todo,
+        CancellationToken cancellationToken)
+    {
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO todo_items (
                 source_message_id,
@@ -49,15 +60,14 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 $updatedAt,
                 $completedAt,
                 $isAutoCreated
-            );
+            )
+            RETURNING id;
             """;
         AddTodoParameters(command, todo);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-
-        // 读取自增主键并回填
-        command.Parameters.Clear();
-        command.CommandText = "SELECT last_insert_rowid();";
-        var id = (long)(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
+        var id = Convert.ToInt64(
+            await command.ExecuteScalarAsync(cancellationToken)
+                ?? throw new InvalidOperationException("SQLite did not return the inserted Todo id."),
+            System.Globalization.CultureInfo.InvariantCulture);
 
         return todo with { Id = id };
     }

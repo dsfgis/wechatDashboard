@@ -80,6 +80,16 @@ Current handoff update (2026-08-08):
 - Python reader verification ran 47 tests with 1 failure. The reader intentionally sorts by `(sentAt, id)` descending, but `test_read_messages_aggregates_across_shards` expects the older Alice row at index 0. Treat this as a test-contract mismatch to resolve before implementation work, not as confirmed production ordering corruption.
 - No tracked source changes were introduced by the inspection; unrelated untracked workspace files remain out of scope.
 
+Current implementation update (2026-08-09):
+
+- Added `IMessageProcessingUnitOfWork` and `SqliteMessageProcessingUnitOfWork` as the atomic boundary used by `MessageCapturePipeline`.
+- Message insertion now uses `ON CONFLICT(source, source_message_key) DO NOTHING RETURNING id`, making the database unique constraint the final deduplication authority instead of a separate `ExistsAsync`/`SaveAsync` race window.
+- Message and automatic Todo writes now share one SQLite connection and transaction. Any Todo factory or insert failure rolls back the message, so the same source message can succeed on a later retry.
+- Added a SQLite integration regression test with a temporary failing Todo trigger. It verifies rollback, successful retry, source-message linkage, and duplicate suppression.
+- Verification: full solution build passed with 0 warnings and 0 errors; all 33 .NET regression tests passed.
+- Python reader remains at 46 passed / 1 failed because of the previously documented newest-first test expectation mismatch; the transaction change does not touch Python reader code.
+- Classification and urgency are now written to `message_classifications` and `urgency_scores` inside the same transaction, including category, confidence, reason, classifier, score and priority. Classifier-version metadata remains open.
+
 Known gaps:
 
 - Real Windows UI Automation + OCR snapshot provider is wired into WPF live capture, but still needs validation against the user's actual WeChat desktop window and selected chats.
@@ -91,7 +101,7 @@ Known gaps:
 - Charted dashboard views exist, but top counters still sample recent messages and can undercount high-volume days; category, priority, Todo-status, SLA, and full-history aggregate queries remain incomplete.
 - The Todo entity supports description, due time and five statuses, but the WPF UI currently exposes only Pending-to-Done completion and clearing completed records.
 - Message search, FTS5, desktop reminders, tray mode, report export, versioned migrations, backup/restore, and retention controls are not implemented.
-- `MessageCapturePipeline.ProcessAsync` saves the message before the automatic Todo without one transaction; a failure between those writes can leave a persisted message whose Todo is skipped on the next dedup pass.
+- Message, classification, urgency and automatic Todo persistence are now atomic. Explicit classifier-version metadata and historical backfill remain open.
 - Adapter failures are collapsed to debug output inside the pipeline, while parts of the diagnostics UI use refresh time as a stand-in for real last-success time.
 - No installer, tray app, or background service mode yet.
 
@@ -323,7 +333,8 @@ Purpose: remove data-loss windows and make the application's status claims refle
 - Modify: both .NET and Python regression tests
 
 - [ ] Step 1: Resolve the Python newest-first test contract and restore a fully green baseline.
-- [ ] Step 2: Add a database transaction covering dedup/upsert, message, classification, urgency and automatic Todo writes.
+- [x] Step 2a: Add a database transaction covering unique-key dedup/upsert, message and automatic Todo writes, with rollback/retry/duplicate regression coverage.
+- [x] Step 2b: Persist classification and urgency result rows in the same transaction, with field round-trip, rollback and duplicate-suppression coverage.
 - [ ] Step 3: Advance an Adapter offset only after the entire batch commits; retain a replayable offset on failure.
 - [ ] Step 4: Return structured per-Adapter results including status, duration, counts, error stage and sanitized summary.
 - [ ] Step 5: Persist real capture-run history and replace refresh-time diagnostic placeholders.
@@ -356,7 +367,8 @@ Purpose: make accumulated messages discoverable and make automated decisions ins
 - [ ] Step 2: Implement full-text search combined with source, chat, sender, project, date, mention, priority and Todo-status filters.
 - [ ] Step 3: Support converting any search/message result to a Todo and jumping to its original context.
 - [ ] Step 4: Replace legacy hardcoded project and priority-contact rules with repository-backed configuration.
-- [ ] Step 5: Persist `message_classifications` and `urgency_scores`, including reason and classifier/version fields.
+- [x] Step 5a: Persist `message_classifications` and `urgency_scores`, including classification reason, classifier, urgency reason and priority.
+- [ ] Step 5b: Add explicit classifier/ranker version metadata and a migration path for historical rows.
 - [ ] Step 6: Add rule test input, reason preview, user correction, candidate-rule capture and controlled historical recomputation.
 
 ## Milestone 9: Reports and Local Data Management
@@ -407,7 +419,7 @@ Current priority as of 2026-08-08 is Milestone 6, followed by Milestones 7 and 8
 Immediate sequence:
 
 1. Correct the Python newest-first test contract and confirm all 47 tests pass.
-2. Make message/classification/urgency/Todo persistence transactional and move offset commit after successful batch commit.
+2. Add explicit offset failure coverage and persist truthful per-Adapter run diagnostics.
 3. Introduce structured per-Adapter results and persist true diagnostic history.
 4. Replace approximate top counters with SQL aggregates and add high-volume-day tests.
 5. Implement the Todo workbench and reminder lifecycle.

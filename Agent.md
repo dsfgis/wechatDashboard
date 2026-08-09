@@ -4,7 +4,7 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
-## Current Snapshot (2026-08-08)
+## Current Snapshot (2026-08-09)
 
 The active branch is `main` at `b020aa5` (`feat:dashboard-navigation-and-capture-safety`) and matched `origin/main` at the last read-only inspection. Unrelated untracked files exist in the workspace; preserve them and stage only files intentionally changed for the current task.
 
@@ -20,8 +20,8 @@ Current verified state:
 - Pending Todos move persistently to the completed page, and both pages display facts from the original source message. Source labels distinguish 微信、石化通、飞书、钉钉 and 示例.
 - The sidebar exposes project dashboard, pending/completed Todos, message stream, WeChat messages, follow settings, capture source settings and diagnostics.
 - The chart dashboard supports project, time and group-name dimensions with bar, ring and line presentation. Followed projects can contain multiple matching keywords and merge multiple chats into one project bucket.
-- Verification on 2026-08-07: full solution build succeeded with 0 warnings and 0 errors; all 32 .NET regression tests passed.
-- Python verification ran 47 tests with 1 failing expectation in `test_read_messages_aggregates_across_shards`: implementation sorts newest-first, while the test expects the older Alice row first. Restore a green Python baseline before claiming the next implementation complete.
+- Verification on 2026-08-09: full solution build succeeded with 0 warnings and 0 errors; all 33 .NET regression tests passed.
+- Python verification still runs 47 tests with 1 failing expectation in `test_read_messages_aggregates_across_shards`: implementation sorts newest-first, while the test expects the older Alice row first. This is unchanged from the pre-transaction baseline and remains the next test-baseline task.
 
 Sensitive state:
 
@@ -60,9 +60,10 @@ design/                              Canonical design, progress, and system-test
 - SQLite is accessed through repository classes in `Infrastructure/Persistence`.
 - WPF should call application/infrastructure services and avoid embedding platform-specific capture code.
 
-Current technical gaps:
+Current technical state and gaps:
 
-- `MessageCapturePipeline.ProcessAsync` does not yet wrap message, classification, urgency and automatic Todo writes in one transaction. A failure after message persistence can cause the next dedup pass to skip a missing Todo.
+- `MessageCapturePipeline.ProcessAsync` now uses `IMessageProcessingUnitOfWork`; SQLite persists the unique-key message, `message_classifications`, `urgency_scores`, and optional automatic Todo on one connection and transaction. Any result failure rolls back all four artifacts, a later retry succeeds, and duplicate input creates no duplicate result rows.
+- Classification category, confidence, reason and classifier plus urgency score, priority and reason are persisted. Explicit classifier-version metadata is not yet modeled and remains part of the rule-center work.
 - Adapter exceptions are currently reduced to debug output inside the pipeline; the diagnostics page does not yet persist true per-Adapter success/failure history.
 - Some diagnostic timestamps are refresh timestamps rather than recorded capture timestamps.
 - Top counters are calculated from a recent-message sample and can undercount high-volume days.
@@ -159,7 +160,7 @@ Follow `design/2026-06-04-development-plan.md`. Keep design changes in `design/w
 Immediate next work, in priority order:
 
 1. Restore the Python test baseline by making the cross-shard ordering test match the documented newest-first contract, then rerun all verification commands serially.
-2. Make dedup/upsert, message, classification, urgency and automatic Todo persistence one transaction; advance offsets only after a successful batch commit.
+2. Add an explicit offset-not-advanced-on-failure test, then persist capture-run diagnostics.
 3. Add structured per-Adapter run results and persist real last-success, last-failure, duration, counts, error stage and sanitized error summary for diagnostics.
 4. Replace recent-message-sample top counters with accurate SQL aggregate queries.
 5. Build the Todo workbench: manual creation, details, project, priority, due time, description, five states, reopen, source-message navigation, reminders and snooze.

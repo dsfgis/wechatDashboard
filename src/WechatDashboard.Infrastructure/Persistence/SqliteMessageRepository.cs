@@ -23,7 +23,22 @@ public sealed class SqliteMessageRepository : IMessageRepository
     public async Task<Message> SaveAsync(Message message, CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        return await TryInsertAsync(connection, transaction: null, message, cancellationToken)
+            ?? throw new InvalidOperationException(
+                $"Message '{message.Source}:{message.SourceMessageKey}' already exists.");
+    }
+
+    /// <summary>
+    /// 在指定连接/事务内原子插入消息；唯一键已存在时返回 null。
+    /// </summary>
+    internal static async Task<Message?> TryInsertAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        Message message,
+        CancellationToken cancellationToken)
+    {
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO messages (
                 source,
@@ -50,17 +65,18 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 $capturedAt,
                 $isMentionMe,
                 $rawExcerpt
-            );
+            )
+            ON CONFLICT(source, source_message_key) DO NOTHING
+            RETURNING id;
             """;
         AddMessageParameters(command, message);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result is null || result is DBNull)
+        {
+            return null;
+        }
 
-        // 读取自增主键并回填到实体
-        command.Parameters.Clear();
-        command.CommandText = "SELECT last_insert_rowid();";
-        var id = (long)(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
-
-        return message with { Id = id };
+        return message with { Id = Convert.ToInt64(result, CultureInfo.InvariantCulture) };
     }
 
     /// <summary>判断指定来源+消息键是否已存在（去重）。</summary>
