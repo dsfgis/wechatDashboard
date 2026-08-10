@@ -46,6 +46,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync());
         OpenDetailCommand = new AsyncRelayCommand(OpenDetailAsync, parameter => parameter is TodoListItemViewModel);
         CompleteCommand = new AsyncRelayCommand(CompleteAsync, parameter => parameter is TodoListItemViewModel);
+        CompleteAllCommand = new AsyncRelayCommand(_ => CompleteAllAsync(), _ => ActiveCount > 0);
         ClearCompletedCommand = new AsyncRelayCommand(_ => ClearCompletedAsync(), _ => Completed.Count > 0);
     }
 
@@ -57,6 +58,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand OpenDetailCommand { get; }
     public AsyncRelayCommand CompleteCommand { get; }
+    public AsyncRelayCommand CompleteAllCommand { get; }
     public AsyncRelayCommand ClearCompletedCommand { get; }
 
     public string StatusText
@@ -81,6 +83,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             .OrderByDescending(row => row.Todo.CompletedAt ?? row.Todo.UpdatedAt));
         StatusText = $"活动待办 {ActiveCount} 条，其中已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条。";
         OnPropertyChanged(nameof(ActiveCount));
+        CompleteAllCommand.RaiseCanExecuteChanged();
         ClearCompletedCommand.RaiseCanExecuteChanged();
     }
 
@@ -143,6 +146,22 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         }
 
         await RefreshAsync();
+    }
+
+    private async Task CompleteAllAsync()
+    {
+        var activeCount = ActiveCount;
+        if (activeCount == 0 ||
+            !_dialogs.Confirm($"确定将全部 {activeCount} 条活动待办移动到已办吗？未触发的提醒将同时取消。", "全部移动到已办"))
+        {
+            return;
+        }
+
+        var updated = await _todos.MarkAllCompletedAsync(_clock.Now, CancellationToken.None);
+        await RefreshAsync();
+        StatusText = updated == 0
+            ? "没有可移动的活动待办，列表可能已被其他操作更新。"
+            : $"已将 {updated} 条待办移动到已办。";
     }
 
     private async Task ClearCompletedAsync()

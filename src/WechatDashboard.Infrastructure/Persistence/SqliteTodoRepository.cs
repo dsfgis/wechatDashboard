@@ -267,7 +267,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         return updated;
     }
 
-    /// <summary>将全部待办理记录原子更新为已办理，并返回更新数量。</summary>
+    /// <summary>将全部活动状态记录原子更新为已办理，并返回更新数量。</summary>
     public async Task<int> MarkAllCompletedAsync(
         DateTimeOffset completedAt,
         CancellationToken cancellationToken)
@@ -282,11 +282,13 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 status = $completedStatus,
                 updated_at = $completedAt,
                 completed_at = $completedAt
-            WHERE status = $pendingStatus;
+            WHERE status IN ($pendingStatus, $inProgressStatus, $waitingStatus);
             """;
         command.Parameters.AddWithValue("$completedStatus", TodoStatus.Done.ToString());
         command.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
         command.Parameters.AddWithValue("$pendingStatus", TodoStatus.Pending.ToString());
+        command.Parameters.AddWithValue("$inProgressStatus", TodoStatus.InProgress.ToString());
+        command.Parameters.AddWithValue("$waitingStatus", TodoStatus.Waiting.ToString());
 
         var updated = await command.ExecuteNonQueryAsync(cancellationToken);
         if (updated > 0)

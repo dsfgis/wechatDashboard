@@ -9,6 +9,7 @@
         <DataGrid ItemsSource="{Binding Completed}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="完成时间" Binding="{Binding CompletedAt}" Width="145" />
+                <DataGridTextColumn Header="消息时间" Binding="{Binding SentAt}" Width="145" />
                 <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="75" />
                 <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="80" />
                 <DataGridTextColumn Header="群聊" Binding="{Binding SourceChatName}" Width="150" />

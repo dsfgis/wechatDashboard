@@ -17,6 +17,9 @@
                         <TextBlock Margin="0,3,0,0" Foreground="#6B7280" TextTrimming="CharacterEllipsis">
                             <Run Text="{Binding Source, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SourceChatName, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SenderName, Mode=OneWay}"/>
                         </TextBlock>
+                        <TextBlock Margin="0,3,0,0" Foreground="#6B7280">
+                            <Run Text="消息时间 "/><Run Text="{Binding SentAt, Mode=OneWay}"/>
+                        </TextBlock>
                         <TextBlock Text="{Binding MessageContent}" Foreground="#374151" Margin="0,4,0,0" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
@@ -34,6 +37,7 @@
     <DockPanel>
         <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
             <Button DockPanel.Dock="Right" Content="刷新待办" Command="{Binding RefreshCommand}" />
+            <Button DockPanel.Dock="Right" Content="全部移动到已办" Command="{Binding CompleteAllCommand}" />
             <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" Foreground="#4B5563" TextWrapping="Wrap" />
         </DockPanel>
         <ScrollViewer VerticalScrollBarVisibility="Auto">

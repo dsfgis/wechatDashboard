@@ -605,6 +605,17 @@ static async Task TestTodoCompletionAsync()
         {
             Id = 0,
             Title = "批量办理记录二",
+            Status = TodoStatus.InProgress,
+            UpdatedAt = now,
+            CompletedAt = null
+        },
+        CancellationToken.None);
+    await todoRepository.SaveAsync(
+        todo with
+        {
+            Id = 0,
+            Title = "批量办理记录三",
+            Status = TodoStatus.Waiting,
             UpdatedAt = now,
             CompletedAt = null
         },
@@ -612,13 +623,13 @@ static async Task TestTodoCompletionAsync()
 
     var bulkCompletionTime = now.AddSeconds(2);
     var bulkUpdatedCount = await todoRepository.MarkAllCompletedAsync(bulkCompletionTime, CancellationToken.None);
-    var remainingPendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
+    var remainingActiveTodos = await todoRepository.GetActiveAsync(CancellationToken.None);
     var allCompletedTodos = await todoRepository.GetCompletedAsync(CancellationToken.None);
 
-    AssertEqual(2, bulkUpdatedCount, "Bulk completion should update every pending todo.");
-    AssertEqual(0, remainingPendingTodos.Count, "Bulk completion should leave no pending todos.");
-    AssertEqual(3, allCompletedTodos.Count, "Individually and bulk completed todos should all be returned.");
-    AssertEqual(2, allCompletedTodos.Count(item => item.CompletedAt == bulkCompletionTime), "Bulk completion time should be applied consistently.");
+    AssertEqual(3, bulkUpdatedCount, "Bulk completion should update every active todo status.");
+    AssertEqual(0, remainingActiveTodos.Count, "Bulk completion should leave no active todos.");
+    AssertEqual(4, allCompletedTodos.Count, "Individually and bulk completed todos should all be returned.");
+    AssertEqual(3, allCompletedTodos.Count(item => item.CompletedAt == bulkCompletionTime), "Bulk completion time should be applied consistently.");
 }
 
 static async Task TestDeleteCompletedTodosAsync()

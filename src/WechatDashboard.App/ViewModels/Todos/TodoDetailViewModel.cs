@@ -24,7 +24,9 @@ public sealed class TodoDetailViewModel : ObservableObject
     private PriorityLevel _priority;
     private TodoStatus _status;
     private string _dueAtText;
-    private string _reminderAtText;
+    private DateTime? _reminderDate;
+    private int _reminderHour;
+    private int _reminderMinute;
     private string _statusText = "";
 
     public TodoDetailViewModel(
@@ -51,7 +53,10 @@ public sealed class TodoDetailViewModel : ObservableObject
         _priority = _todo.Priority;
         _status = _todo.Status;
         _dueAtText = FormatTime(_todo.DueAt);
-        _reminderAtText = FormatTime(_currentReminder?.ScheduledAt);
+        var reminderSelection = _currentReminder?.ScheduledAt.LocalDateTime ?? GetDefaultReminderTime(_clock.Now);
+        _reminderDate = reminderSelection.Date;
+        _reminderHour = reminderSelection.Hour;
+        _reminderMinute = reminderSelection.Minute;
         Source = row.Source;
         SourceChatName = row.SourceChatName;
         SenderName = row.SenderName;
@@ -69,6 +74,8 @@ public sealed class TodoDetailViewModel : ObservableObject
     public event EventHandler? RequestClose;
     public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
     public IReadOnlyList<TodoStatus> Statuses { get; } = Enum.GetValues<TodoStatus>();
+    public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
+    public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
     public AsyncRelayCommand ScheduleReminderCommand { get; }
     public AsyncRelayCommand SnoozeTenMinutesCommand { get; }
@@ -113,10 +120,22 @@ public sealed class TodoDetailViewModel : ObservableObject
         set => SetProperty(ref _dueAtText, value);
     }
 
-    public string ReminderAtText
+    public DateTime? ReminderDate
     {
-        get => _reminderAtText;
-        set => SetProperty(ref _reminderAtText, value);
+        get => _reminderDate;
+        set => SetProperty(ref _reminderDate, value);
+    }
+
+    public int ReminderHour
+    {
+        get => _reminderHour;
+        set => SetProperty(ref _reminderHour, value);
+    }
+
+    public int ReminderMinute
+    {
+        get => _reminderMinute;
+        set => SetProperty(ref _reminderMinute, value);
     }
 
     public string CurrentReminderText => _currentReminder is null
@@ -154,19 +173,20 @@ public sealed class TodoDetailViewModel : ObservableObject
 
     private async Task ScheduleReminderAsync()
     {
-        if (!TryParseOptionalTime(ReminderAtText, out var reminderAt) || reminderAt is null || reminderAt <= _clock.Now)
+        if (!TryGetReminderTime(out var reminderAt) || reminderAt <= _clock.Now)
         {
-            _dialogs.ShowError("提醒时间必须晚于当前时间，格式为 yyyy-MM-dd HH:mm。", "设置提醒失败");
+            _dialogs.ShowError("请选择晚于当前时间的有效提醒日期和时间。", "设置提醒失败");
             return;
         }
 
-        _currentReminder = await _reminderService.ScheduleAsync(_todo.Id, reminderAt.Value, CancellationToken.None);
+        _currentReminder = await _reminderService.ScheduleAsync(_todo.Id, reminderAt, CancellationToken.None);
         if (_currentReminder is null)
         {
             _dialogs.ShowError("已完成或已忽略的待办不能设置提醒。", "设置提醒失败");
             return;
         }
 
+        SetReminderSelection(_currentReminder.ScheduledAt);
         StatusText = "提醒已设置。";
         OnPropertyChanged(nameof(CurrentReminderText));
         await _refreshWorkbench();
@@ -200,7 +220,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         }
 
         _currentReminder = result.Reminder;
-        ReminderAtText = FormatTime(result.Reminder.ScheduledAt);
+        SetReminderSelection(result.Reminder.ScheduledAt);
         StatusText = $"提醒已延后到 {result.Reminder.ScheduledAt.LocalDateTime:yyyy-MM-dd HH:mm}，截止时间未改变。";
         OnPropertyChanged(nameof(CurrentReminderText));
         await _refreshWorkbench();
@@ -239,6 +259,50 @@ public sealed class TodoDetailViewModel : ObservableObject
 
         result = null;
         return false;
+    }
+
+    private bool TryGetReminderTime(out DateTimeOffset result)
+    {
+        if (ReminderDate is not { } date ||
+            ReminderHour is < 0 or > 23 ||
+            ReminderMinute is < 0 or > 59)
+        {
+            result = default;
+            return false;
+        }
+
+        var localTime = DateTime.SpecifyKind(
+            date.Date.AddHours(ReminderHour).AddMinutes(ReminderMinute),
+            DateTimeKind.Unspecified);
+        if (TimeZoneInfo.Local.IsInvalidTime(localTime))
+        {
+            result = default;
+            return false;
+        }
+
+        result = new DateTimeOffset(localTime, TimeZoneInfo.Local.GetUtcOffset(localTime));
+        return true;
+    }
+
+    private void SetReminderSelection(DateTimeOffset value)
+    {
+        var localTime = value.LocalDateTime;
+        ReminderDate = localTime.Date;
+        ReminderHour = localTime.Hour;
+        ReminderMinute = localTime.Minute;
+    }
+
+    private static DateTime GetDefaultReminderTime(DateTimeOffset now)
+    {
+        var localTime = now.LocalDateTime.AddMinutes(5);
+        return new DateTime(
+            localTime.Year,
+            localTime.Month,
+            localTime.Day,
+            localTime.Hour,
+            localTime.Minute / 5 * 5,
+            0,
+            DateTimeKind.Unspecified);
     }
 
     private static string FormatTime(DateTimeOffset? value) => value?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "";

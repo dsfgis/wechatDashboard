@@ -29,7 +29,7 @@ public interface ITodoRepository
     /// <summary>将指定待办标记为已办理，并记录完成时间。</summary>
     Task<bool> MarkCompletedAsync(long id, DateTimeOffset completedAt, CancellationToken cancellationToken);
 
-    /// <summary>将所有待办理记录标记为已办理，并返回更新数量。</summary>
+    /// <summary>将所有活动状态（待办理、进行中、等待）的记录标记为已办理，并返回更新数量。</summary>
     Task<int> MarkAllCompletedAsync(DateTimeOffset completedAt, CancellationToken cancellationToken);
 
     /// <summary>删除所有已办理记录，并返回删除数量。</summary>

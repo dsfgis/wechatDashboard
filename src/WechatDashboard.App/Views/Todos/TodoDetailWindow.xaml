@@ -42,10 +42,28 @@
                 <StackPanel>
                     <TextBlock Text="提醒" FontWeight="SemiBold" />
                     <TextBlock Text="{Binding CurrentReminderText}" Foreground="#4B5563" Margin="0,4,0,8" />
-                    <TextBlock Text="提醒时间（yyyy-MM-dd HH:mm）" Foreground="#6B7280" />
+                    <TextBlock Text="提醒时间" Foreground="#6B7280" />
                     <DockPanel Margin="0,4,0,8">
                         <Button DockPanel.Dock="Right" Content="设置提醒" Command="{Binding ScheduleReminderCommand}" Padding="12,6" Margin="8,0,0,0" />
-                        <TextBox Text="{Binding ReminderAtText, UpdateSourceTrigger=PropertyChanged}" Padding="8" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <DatePicker SelectedDate="{Binding ReminderDate, UpdateSourceTrigger=PropertyChanged}"
+                                        SelectedDateFormat="Short" MinWidth="150" />
+                            <ComboBox Grid.Column="1" ItemsSource="{Binding ReminderHours}"
+                                      SelectedItem="{Binding ReminderHour}"
+                                      ItemStringFormat="{}{0:00}" Width="64" Margin="8,0,4,0" />
+                            <TextBlock Grid.Column="2" Text="时" VerticalAlignment="Center" />
+                            <ComboBox Grid.Column="3" ItemsSource="{Binding ReminderMinutes}"
+                                      SelectedItem="{Binding ReminderMinute}"
+                                      ItemStringFormat="{}{0:00}" Width="64" Margin="8,0,4,0" />
+                            <TextBlock Grid.Column="4" Text="分" VerticalAlignment="Center" />
+                        </Grid>
                     </DockPanel>
                     <TextBlock Text="延后只改变提醒时间，不改变截止时间。" Foreground="#6B7280" Margin="0,0,0,6" />
                     <WrapPanel>
