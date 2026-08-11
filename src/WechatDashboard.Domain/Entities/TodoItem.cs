@@ -30,4 +30,8 @@ public sealed record TodoItem(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     DateTimeOffset? CompletedAt,
-    bool IsAutoCreated);
+    bool IsAutoCreated)
+{
+    /// <summary>是否固定显示在活动待办列表顶部。</summary>
+    public bool IsPinned { get; init; }
+}

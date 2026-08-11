@@ -46,10 +46,13 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync());
         OpenDetailCommand = new AsyncRelayCommand(OpenDetailAsync, parameter => parameter is TodoListItemViewModel);
         CompleteCommand = new AsyncRelayCommand(CompleteAsync, parameter => parameter is TodoListItemViewModel);
-        CompleteAllCommand = new AsyncRelayCommand(_ => CompleteAllAsync(), _ => ActiveCount > 0);
+        TogglePinCommand = new AsyncRelayCommand(TogglePinAsync, parameter => parameter is TodoListItemViewModel);
+        SelectAllCommand = new RelayCommand(_ => ToggleSelectAll(), _ => ActiveCount > 0);
+        CompleteSelectedCommand = new AsyncRelayCommand(_ => CompleteSelectedAsync(), _ => SelectedCount > 0);
         ClearCompletedCommand = new AsyncRelayCommand(_ => ClearCompletedAsync(), _ => Completed.Count > 0);
     }
 
+    public ObservableCollection<TodoListItemViewModel> Pinned { get; } = new();
     public ObservableCollection<TodoListItemViewModel> Overdue { get; } = new();
     public ObservableCollection<TodoListItemViewModel> DueToday { get; } = new();
     public ObservableCollection<TodoListItemViewModel> Upcoming { get; } = new();
@@ -58,7 +61,9 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand OpenDetailCommand { get; }
     public AsyncRelayCommand CompleteCommand { get; }
-    public AsyncRelayCommand CompleteAllCommand { get; }
+    public AsyncRelayCommand TogglePinCommand { get; }
+    public RelayCommand SelectAllCommand { get; }
+    public AsyncRelayCommand CompleteSelectedCommand { get; }
     public AsyncRelayCommand ClearCompletedCommand { get; }
 
     public string StatusText
@@ -67,7 +72,10 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         private set => SetProperty(ref _statusText, value);
     }
 
-    public int ActiveCount => Overdue.Count + DueToday.Count + Upcoming.Count + NoDueDate.Count;
+    public int ActiveCount => Pinned.Count + Overdue.Count + DueToday.Count + Upcoming.Count + NoDueDate.Count;
+    public int SelectedCount => ActiveRows().Count(row => row.IsSelected);
+    public int OverdueCount => Pinned.Count(row => row.Bucket == TodoDueBucket.Overdue) + Overdue.Count;
+    public string SelectAllButtonText => ActiveCount > 0 && SelectedCount == ActiveCount ? "取消全选" : "全选";
 
     public async Task RefreshAsync()
     {
@@ -75,15 +83,18 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         var completed = await _todos.GetCompletedAsync(CancellationToken.None);
         var rows = await CreateRowsAsync(active.Concat(completed));
         var activeIds = active.Select(item => item.Id).ToHashSet();
-        Replace(Overdue, rows.Where(row => activeIds.Contains(row.Todo.Id) && row.Bucket == TodoDueBucket.Overdue));
-        Replace(DueToday, rows.Where(row => activeIds.Contains(row.Todo.Id) && row.Bucket == TodoDueBucket.DueToday));
-        Replace(Upcoming, rows.Where(row => activeIds.Contains(row.Todo.Id) && row.Bucket == TodoDueBucket.Upcoming));
-        Replace(NoDueDate, rows.Where(row => activeIds.Contains(row.Todo.Id) && row.Bucket == TodoDueBucket.NoDueDate));
+        var activeRows = rows.Where(row => activeIds.Contains(row.Todo.Id)).ToArray();
+        Replace(Pinned, activeRows.Where(row => row.IsPinned).OrderByDescending(row => row.Todo.UpdatedAt));
+        Replace(Overdue, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.Overdue));
+        Replace(DueToday, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.DueToday));
+        Replace(Upcoming, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.Upcoming));
+        Replace(NoDueDate, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.NoDueDate));
         Replace(Completed, rows.Where(row => !activeIds.Contains(row.Todo.Id))
             .OrderByDescending(row => row.Todo.CompletedAt ?? row.Todo.UpdatedAt));
-        StatusText = $"活动待办 {ActiveCount} 条，其中已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条。";
+        StatusText = $"活动待办 {ActiveCount} 条，其中已置顶 {Pinned.Count} 条、已逾期 {OverdueCount} 条。";
         OnPropertyChanged(nameof(ActiveCount));
-        CompleteAllCommand.RaiseCanExecuteChanged();
+        OnPropertyChanged(nameof(OverdueCount));
+        UpdateSelectionState();
         ClearCompletedCommand.RaiseCanExecuteChanged();
     }
 
@@ -148,20 +159,51 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         await RefreshAsync();
     }
 
-    private async Task CompleteAllAsync()
+    private async Task TogglePinAsync(object? parameter)
     {
-        var activeCount = ActiveCount;
-        if (activeCount == 0 ||
-            !_dialogs.Confirm($"确定将全部 {activeCount} 条活动待办移动到已办吗？未触发的提醒将同时取消。", "全部移动到已办"))
+        if (parameter is not TodoListItemViewModel row)
         {
             return;
         }
 
-        var updated = await _todos.MarkAllCompletedAsync(_clock.Now, CancellationToken.None);
+        var isPinned = !row.IsPinned;
+        var updated = await _todos.SetPinnedAsync(row.Id, isPinned, _clock.Now, CancellationToken.None);
+        if (!updated)
+        {
+            _dialogs.ShowError("待办已被其他操作修改，请刷新后重试。", isPinned ? "置顶失败" : "取消置顶失败");
+            await RefreshAsync();
+            return;
+        }
+
+        await RefreshAsync();
+        StatusText = isPinned ? "待办已置顶。" : "已取消置顶。";
+    }
+
+    private void ToggleSelectAll()
+    {
+        var shouldSelect = SelectedCount != ActiveCount;
+        foreach (var row in ActiveRows())
+        {
+            row.IsSelected = shouldSelect;
+        }
+
+        UpdateSelectionState();
+    }
+
+    private async Task CompleteSelectedAsync()
+    {
+        var selectedIds = ActiveRows().Where(row => row.IsSelected).Select(row => row.Id).Distinct().ToArray();
+        if (selectedIds.Length == 0 ||
+            !_dialogs.Confirm($"确定将勾选的 {selectedIds.Length} 条待办移动到已办吗？未触发的提醒将同时取消。", "勾选项转为已办"))
+        {
+            return;
+        }
+
+        var updated = await _todos.MarkSelectedCompletedAsync(selectedIds, _clock.Now, CancellationToken.None);
         await RefreshAsync();
         StatusText = updated == 0
-            ? "没有可移动的活动待办，列表可能已被其他操作更新。"
-            : $"已将 {updated} 条待办移动到已办。";
+            ? "没有勾选项被移动，列表可能已被其他操作更新。"
+            : $"已将勾选的 {updated} 条待办移动到已办。";
     }
 
     private async Task ClearCompletedAsync()
@@ -186,7 +228,12 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             var reminders = await _reminders.GetForTodoAsync(todo.Id, CancellationToken.None);
             var currentReminder = reminders.LastOrDefault(item => item.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching or ReminderStatus.Delivered);
             messageLookup.TryGetValue(todo.SourceMessageId ?? 0, out var message);
-            rows.Add(new TodoListItemViewModel(todo, message, currentReminder, _bucketPolicy.Classify(todo.DueAt, _clock.Now)));
+            rows.Add(new TodoListItemViewModel(
+                todo,
+                message,
+                currentReminder,
+                _bucketPolicy.Classify(todo.DueAt, _clock.Now),
+                UpdateSelectionState));
         }
 
         return rows;
@@ -200,16 +247,36 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             target.Add(item);
         }
     }
+
+    private IEnumerable<TodoListItemViewModel> ActiveRows() =>
+        Pinned.Concat(Overdue).Concat(DueToday).Concat(Upcoming).Concat(NoDueDate);
+
+    private void UpdateSelectionState()
+    {
+        OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(SelectAllButtonText));
+        CompleteSelectedCommand.RaiseCanExecuteChanged();
+        SelectAllCommand.RaiseCanExecuteChanged();
+    }
 }
 
-public sealed class TodoListItemViewModel
+public sealed class TodoListItemViewModel : ObservableObject
 {
-    public TodoListItemViewModel(TodoItem todo, Message? sourceMessage, TodoReminder? reminder, TodoDueBucket bucket)
+    private readonly Action _selectionChanged;
+    private bool _isSelected;
+
+    public TodoListItemViewModel(
+        TodoItem todo,
+        Message? sourceMessage,
+        TodoReminder? reminder,
+        TodoDueBucket bucket,
+        Action selectionChanged)
     {
         Todo = todo;
         SourceMessage = sourceMessage;
         Reminder = reminder;
         Bucket = bucket;
+        _selectionChanged = selectionChanged;
     }
 
     public TodoItem Todo { get; }
@@ -217,6 +284,19 @@ public sealed class TodoListItemViewModel
     public TodoReminder? Reminder { get; }
     public TodoDueBucket Bucket { get; }
     public long Id => Todo.Id;
+    public bool IsPinned => Todo.IsPinned;
+    public string PinButtonText => IsPinned ? "取消置顶" : "置顶";
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (SetProperty(ref _isSelected, value))
+            {
+                _selectionChanged();
+            }
+        }
+    }
     public string Priority => Todo.Priority.ToString();
     public string Status => Todo.Status.ToString();
     public string Title => Todo.Title;

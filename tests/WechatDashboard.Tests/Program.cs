@@ -27,6 +27,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
+    ("Todo repository persists pinning and sorts pinned active todos first", TestTodoPinningAsync),
+    ("Todo repository completes only explicitly selected active todos", TestSelectedTodoCompletionAsync),
     ("Todo repository retains and clears Done and Ignored history", TestDeleteCompletedTodosAsync),
     ("Todo repository sorts pending todos by source message time descending", TestTodoOrderByMessageTimeAsync),
     ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
@@ -630,6 +632,112 @@ static async Task TestTodoCompletionAsync()
     AssertEqual(0, remainingActiveTodos.Count, "Bulk completion should leave no active todos.");
     AssertEqual(4, allCompletedTodos.Count, "Individually and bulk completed todos should all be returned.");
     AssertEqual(3, allCompletedTodos.Count(item => item.CompletedAt == bulkCompletionTime), "Bulk completion time should be applied consistently.");
+}
+
+static async Task TestTodoPinningAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var repository = new SqliteTodoRepository(databasePath);
+    var now = DateTimeOffset.UtcNow;
+    var template = new TodoItem(
+        Id: 0,
+        SourceMessageId: null,
+        ProjectId: null,
+        Title: "普通待办",
+        Description: null,
+        Status: TodoStatus.Pending,
+        Priority: PriorityLevel.P2,
+        DueAt: now.AddDays(1),
+        CreatedAt: now,
+        UpdatedAt: now,
+        CompletedAt: null,
+        IsAutoCreated: false);
+    var ordinary = await repository.SaveAsync(template, CancellationToken.None);
+    var pinned = await repository.SaveAsync(
+        template with
+        {
+            Id = 0,
+            Title = "需要置顶的待办",
+            DueAt = now.AddDays(2),
+            CreatedAt = now.AddMinutes(-5),
+            UpdatedAt = now.AddMinutes(-5)
+        },
+        CancellationToken.None);
+
+    AssertTrue(
+        await repository.SetPinnedAsync(pinned.Id, true, now.AddSeconds(1), CancellationToken.None),
+        "An active todo should be pinnable.");
+    var active = await repository.GetActiveAsync(CancellationToken.None);
+    var reloaded = await repository.GetByIdAsync(pinned.Id, CancellationToken.None);
+
+    AssertEqual(pinned.Id, active[0].Id, "Pinned todo should sort before an earlier-due ordinary todo.");
+    AssertTrue(reloaded!.IsPinned, "Pinned state should survive a repository reload.");
+    AssertFalse(active.Single(item => item.Id == ordinary.Id).IsPinned, "Ordinary todo should remain unpinned.");
+
+    AssertTrue(
+        await repository.SetPinnedAsync(pinned.Id, false, now.AddSeconds(2), CancellationToken.None),
+        "Pinned state should be removable.");
+    AssertFalse(
+        (await repository.GetByIdAsync(pinned.Id, CancellationToken.None))!.IsPinned,
+        "Unpinned state should persist.");
+}
+
+static async Task TestSelectedTodoCompletionAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var repository = new SqliteTodoRepository(databasePath);
+    var now = DateTimeOffset.UtcNow;
+    var template = new TodoItem(
+        Id: 0,
+        SourceMessageId: null,
+        ProjectId: null,
+        Title: "选择办理一",
+        Description: null,
+        Status: TodoStatus.Pending,
+        Priority: PriorityLevel.P2,
+        DueAt: null,
+        CreatedAt: now,
+        UpdatedAt: now,
+        CompletedAt: null,
+        IsAutoCreated: false);
+    var first = await repository.SaveAsync(template, CancellationToken.None);
+    var second = await repository.SaveAsync(
+        template with { Id = 0, Title = "保留未办理", Status = TodoStatus.InProgress },
+        CancellationToken.None);
+    var third = await repository.SaveAsync(
+        template with { Id = 0, Title = "选择办理二", Status = TodoStatus.Waiting },
+        CancellationToken.None);
+    await repository.SetPinnedAsync(first.Id, true, now.AddSeconds(1), CancellationToken.None);
+
+    var completionTime = now.AddSeconds(2);
+    var updated = await repository.MarkSelectedCompletedAsync(
+        new[] { first.Id, third.Id, third.Id, -1 },
+        completionTime,
+        CancellationToken.None);
+    var active = await repository.GetActiveAsync(CancellationToken.None);
+    var completed = await repository.GetCompletedAsync(CancellationToken.None);
+
+    AssertEqual(2, updated, "Only two distinct selected active todos should complete.");
+    AssertEqual(1, active.Count, "One unselected active todo should remain.");
+    AssertEqual(second.Id, active.Single().Id, "The unselected todo must remain active.");
+    AssertEqual(2, completed.Count, "Only selected todos should appear in completed history.");
+    AssertTrue(completed.All(item => item.CompletedAt == completionTime), "Selected completion should use one timestamp.");
+    AssertTrue(completed.All(item => !item.IsPinned), "Completing a selected todo should clear its pinned state.");
+    AssertFalse(
+        await repository.SetPinnedAsync(first.Id, true, completionTime.AddSeconds(1), CancellationToken.None),
+        "Completed todos must not be pinnable.");
+    AssertEqual(
+        0,
+        await repository.MarkSelectedCompletedAsync(Array.Empty<long>(), completionTime, CancellationToken.None),
+        "An empty selection should not update any todo.");
 }
 
 static async Task TestDeleteCompletedTodosAsync()

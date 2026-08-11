@@ -125,7 +125,8 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             UPDATE todo_items
             SET title = $title, description = $description, project_id = $projectId,
                 priority = $priority, due_at = $dueAt, status = $status,
-                updated_at = $now, completed_at = $completedAt
+                updated_at = $now, completed_at = $completedAt,
+                is_pinned = CASE WHEN $status IN ($done, $ignored) THEN 0 ELSE is_pinned END
             WHERE id = $id AND updated_at = $expectedUpdatedAt;
             """;
         update.Parameters.AddWithValue("$title", request.Title);
@@ -134,6 +135,8 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         update.Parameters.AddWithValue("$priority", request.Priority.ToString());
         update.Parameters.AddWithValue("$dueAt", request.DueAt is null ? DBNull.Value : request.DueAt.Value.ToString("O"));
         update.Parameters.AddWithValue("$status", request.Status.ToString());
+        update.Parameters.AddWithValue("$done", TodoStatus.Done.ToString());
+        update.Parameters.AddWithValue("$ignored", TodoStatus.Ignored.ToString());
         update.Parameters.AddWithValue("$now", now.ToString("O"));
         update.Parameters.AddWithValue("$completedAt", request.Status == TodoStatus.Done ? now.ToString("O") : DBNull.Value);
         update.Parameters.AddWithValue("$id", request.TodoId);

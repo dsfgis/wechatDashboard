@@ -29,6 +29,15 @@ public interface ITodoRepository
     /// <summary>将指定待办标记为已办理，并记录完成时间。</summary>
     Task<bool> MarkCompletedAsync(long id, DateTimeOffset completedAt, CancellationToken cancellationToken);
 
+    /// <summary>设置活动待办的置顶状态。</summary>
+    Task<bool> SetPinnedAsync(long id, bool isPinned, DateTimeOffset updatedAt, CancellationToken cancellationToken);
+
+    /// <summary>仅将指定的活动待办标记为已办理，并返回实际更新数量。</summary>
+    Task<int> MarkSelectedCompletedAsync(
+        IReadOnlyCollection<long> ids,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken);
+
     /// <summary>将所有活动状态（待办理、进行中、等待）的记录标记为已办理，并返回更新数量。</summary>
     Task<int> MarkAllCompletedAsync(DateTimeOffset completedAt, CancellationToken cancellationToken);
 

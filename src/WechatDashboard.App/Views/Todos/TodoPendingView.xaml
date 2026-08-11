@@ -5,9 +5,27 @@
         <DataTemplate x:Key="TodoCardTemplate">
             <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,7">
                 <Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                              VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="勾选后可批量转为已办" />
+                    <StackPanel Grid.Column="1">
                         <DockPanel>
+                            <TextBlock Text="[置顶]" Foreground="#D97706" FontWeight="SemiBold" Margin="0,0,8,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                             <TextBlock Text="{Binding Priority}" Foreground="#DC2626" FontWeight="SemiBold" Margin="0,0,8,0" />
                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
@@ -22,7 +40,10 @@
                         </TextBlock>
                         <TextBlock Text="{Binding MessageContent}" Foreground="#374151" Margin="0,4,0,0" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                        <Button Content="{Binding PinButtonText}" Padding="12,5"
+                                Command="{Binding DataContext.TogglePinCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                CommandParameter="{Binding}" />
                         <Button Content="详情" Padding="12,5"
                                 Command="{Binding DataContext.OpenDetailCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                 CommandParameter="{Binding}" />
@@ -37,11 +58,19 @@
     <DockPanel>
         <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
             <Button DockPanel.Dock="Right" Content="刷新待办" Command="{Binding RefreshCommand}" />
-            <Button DockPanel.Dock="Right" Content="全部移动到已办" Command="{Binding CompleteAllCommand}" />
+            <Button DockPanel.Dock="Right" Content="勾选项转为已办" Command="{Binding CompleteSelectedCommand}" />
+            <Button DockPanel.Dock="Right" Content="{Binding SelectAllButtonText}" Command="{Binding SelectAllCommand}" />
+            <TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="#4B5563">
+                <Run Text="已选择 "/><Run Text="{Binding SelectedCount, Mode=OneWay}"/><Run Text=" 条"/>
+            </TextBlock>
             <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" Foreground="#4B5563" TextWrapping="Wrap" />
         </DockPanel>
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
+                <Expander IsExpanded="True" Margin="0,0,0,8">
+                    <Expander.Header><TextBlock Foreground="#D97706" FontWeight="SemiBold"><Run Text="已置顶（"/><Run Text="{Binding Pinned.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <ItemsControl ItemsSource="{Binding Pinned}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                </Expander>
                 <Expander IsExpanded="True" Margin="0,0,0,8">
                     <Expander.Header><TextBlock Foreground="#DC2626" FontWeight="SemiBold"><Run Text="已逾期（"/><Run Text="{Binding Overdue.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
                     <ItemsControl ItemsSource="{Binding Overdue}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />

@@ -35,6 +35,13 @@ public sealed class SqliteDatabaseInitializer
             checksum: "todo-reminder-lifecycle-v1",
             sql: TodoReminderMigrationSql,
             cancellationToken);
+        await ApplyMigrationAsync(
+            connection,
+            version: 2,
+            name: "todo-pinning",
+            checksum: "todo-pinning-v1",
+            sql: TodoPinningMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -113,6 +120,12 @@ public sealed class SqliteDatabaseInitializer
 
         CREATE INDEX idx_todo_reminders_due ON todo_reminders(status, scheduled_at);
         CREATE INDEX idx_todo_reminders_todo ON todo_reminders(todo_id, created_at DESC);
+        """;
+
+    private const string TodoPinningMigrationSql = """
+        ALTER TABLE todo_items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX idx_todo_active_pinned_due
+            ON todo_items(status, is_pinned DESC, due_at, updated_at DESC);
         """;
 
     /// <summary>

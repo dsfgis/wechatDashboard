@@ -46,7 +46,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 created_at,
                 updated_at,
                 completed_at,
-                is_auto_created
+                is_auto_created,
+                is_pinned
             )
             VALUES (
                 $sourceMessageId,
@@ -59,7 +60,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 $createdAt,
                 $updatedAt,
                 $completedAt,
-                $isAutoCreated
+                $isAutoCreated,
+                $isPinned
             )
             RETURNING id;
             """;
@@ -93,10 +95,12 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 created_at,
                 updated_at,
                 completed_at,
-                is_auto_created
+                is_auto_created,
+                is_pinned
             FROM todo_items
             WHERE status = $status
             ORDER BY
+                is_pinned DESC,
                 COALESCE(
                     (SELECT julianday(sent_at) FROM messages WHERE messages.id = todo_items.source_message_id),
                     julianday(created_at)
@@ -126,10 +130,10 @@ public sealed class SqliteTodoRepository : ITodoRepository
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT id, source_message_id, project_id, title, description, status,
-                   priority, due_at, created_at, updated_at, completed_at, is_auto_created
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned
             FROM todo_items
             WHERE status IN ($pending, $inProgress, $waiting)
-            ORDER BY due_at IS NULL, due_at,
+            ORDER BY is_pinned DESC, due_at IS NULL, due_at,
                 CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
                 updated_at DESC;
             """;
@@ -162,7 +166,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Transaction = transaction;
         command.CommandText = """
             SELECT id, source_message_id, project_id, title, description, status,
-                   priority, due_at, created_at, updated_at, completed_at, is_auto_created
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned
             FROM todo_items WHERE id = $id;
             """;
         command.Parameters.AddWithValue("$id", id);
@@ -186,7 +190,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Transaction = transaction;
         command.CommandText = """
             SELECT id, source_message_id, project_id, title, description, status,
-                   priority, due_at, created_at, updated_at, completed_at, is_auto_created
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned
             FROM todo_items
             WHERE source_message_id = $sourceMessageId
             ORDER BY created_at, id
@@ -215,7 +219,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 created_at,
                 updated_at,
                 completed_at,
-                is_auto_created
+                is_auto_created,
+                is_pinned
             FROM todo_items
             WHERE status IN ($done, $ignored)
             ORDER BY completed_at DESC, updated_at DESC;
@@ -248,7 +253,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
             SET
                 status = $completedStatus,
                 updated_at = $completedAt,
-                completed_at = $completedAt
+                completed_at = $completedAt,
+                is_pinned = 0
             WHERE id = $id
               AND status = $pendingStatus;
             """;
@@ -267,6 +273,94 @@ public sealed class SqliteTodoRepository : ITodoRepository
         return updated;
     }
 
+    /// <summary>更新活动待办的置顶状态；已办和已忽略记录不能重新置顶。</summary>
+    public async Task<bool> SetPinnedAsync(
+        long id,
+        bool isPinned,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE todo_items
+            SET is_pinned = $isPinned, updated_at = $updatedAt
+            WHERE id = $id
+              AND status IN ($pending, $inProgress, $waiting);
+            """;
+        command.Parameters.AddWithValue("$isPinned", isPinned ? 1 : 0);
+        command.Parameters.AddWithValue("$updatedAt", updatedAt.ToString("O"));
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$pending", TodoStatus.Pending.ToString());
+        command.Parameters.AddWithValue("$inProgress", TodoStatus.InProgress.ToString());
+        command.Parameters.AddWithValue("$waiting", TodoStatus.Waiting.ToString());
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    /// <summary>仅完成调用方明确选择的活动待办，并在同一事务中取消对应提醒。</summary>
+    public async Task<int> MarkSelectedCompletedAsync(
+        IReadOnlyCollection<long> ids,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        var selectedIds = ids.Where(id => id > 0).Distinct().ToArray();
+        if (selectedIds.Length == 0)
+        {
+            return 0;
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
+        var updatedIds = new List<long>(selectedIds.Length);
+        foreach (var batch in selectedIds.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            var placeholders = AddIdParameters(command, batch);
+            command.CommandText = $"""
+                UPDATE todo_items
+                SET status = $completedStatus,
+                    updated_at = $completedAt,
+                    completed_at = $completedAt,
+                    is_pinned = 0
+                WHERE id IN ({placeholders})
+                  AND status IN ($pending, $inProgress, $waiting)
+                RETURNING id;
+                """;
+            command.Parameters.AddWithValue("$completedStatus", TodoStatus.Done.ToString());
+            command.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
+            command.Parameters.AddWithValue("$pending", TodoStatus.Pending.ToString());
+            command.Parameters.AddWithValue("$inProgress", TodoStatus.InProgress.ToString());
+            command.Parameters.AddWithValue("$waiting", TodoStatus.Waiting.ToString());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                updatedIds.Add(reader.GetInt64(0));
+            }
+        }
+
+        foreach (var batch in updatedIds.Chunk(500))
+        {
+            await using var cancel = connection.CreateCommand();
+            cancel.Transaction = transaction;
+            var placeholders = AddIdParameters(cancel, batch);
+            cancel.CommandText = $"""
+                UPDATE todo_reminders
+                SET status = $cancelled, updated_at = $completedAt
+                WHERE todo_id IN ({placeholders})
+                  AND status IN ($scheduled, $dispatching);
+                """;
+            cancel.Parameters.AddWithValue("$cancelled", ReminderStatus.Cancelled.ToString());
+            cancel.Parameters.AddWithValue("$completedAt", completedAt.ToString("O"));
+            cancel.Parameters.AddWithValue("$scheduled", ReminderStatus.Scheduled.ToString());
+            cancel.Parameters.AddWithValue("$dispatching", ReminderStatus.Dispatching.ToString());
+            await cancel.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return updatedIds.Count;
+    }
+
     /// <summary>将全部活动状态记录原子更新为已办理，并返回更新数量。</summary>
     public async Task<int> MarkAllCompletedAsync(
         DateTimeOffset completedAt,
@@ -281,7 +375,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
             SET
                 status = $completedStatus,
                 updated_at = $completedAt,
-                completed_at = $completedAt
+                completed_at = $completedAt,
+                is_pinned = 0
             WHERE status IN ($pendingStatus, $inProgressStatus, $waitingStatus);
             """;
         command.Parameters.AddWithValue("$completedStatus", TodoStatus.Done.ToString());
@@ -363,6 +458,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Parameters.AddWithValue("$updatedAt", todo.UpdatedAt.ToString("O"));
         command.Parameters.AddWithValue("$completedAt", ToDbValue(todo.CompletedAt?.ToString("O")));
         command.Parameters.AddWithValue("$isAutoCreated", todo.IsAutoCreated ? 1 : 0);
+        command.Parameters.AddWithValue("$isPinned", todo.IsPinned ? 1 : 0);
     }
 
     /// <summary>从 DataReader 映射为 TodoItem 实体。</summary>
@@ -380,7 +476,23 @@ public sealed class SqliteTodoRepository : ITodoRepository
             CreatedAt: DateTimeOffset.Parse(reader.GetString(8)),
             UpdatedAt: DateTimeOffset.Parse(reader.GetString(9)),
             CompletedAt: GetNullableDateTimeOffset(reader, 10),
-            IsAutoCreated: reader.GetInt32(11) == 1);
+            IsAutoCreated: reader.GetInt32(11) == 1)
+        {
+            IsPinned = reader.GetInt32(12) == 1
+        };
+    }
+
+    private static string AddIdParameters(SqliteCommand command, IReadOnlyList<long> ids)
+    {
+        var placeholders = new string[ids.Count];
+        for (var index = 0; index < ids.Count; index++)
+        {
+            var parameterName = $"$id{index}";
+            placeholders[index] = parameterName;
+            command.Parameters.AddWithValue(parameterName, ids[index]);
+        }
+
+        return string.Join(", ", placeholders);
     }
 
     /// <summary>将可空值转换为数据库参数（null -> DBNull）。</summary>
