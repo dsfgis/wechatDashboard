@@ -213,56 +213,67 @@ Purpose: move WeChat live collection away from OCR as the primary path and valid
 - [x] Step 5: Keep `WeChat.WindowText` available as a disabled or fallback source.
 - [ ] Step 6: With explicit user authorization, initialize the encrypted database reader and validate with real desktop WeChat while the chat window is minimized.
 
-## Milestone 2.4: WeChat V4 Database Capture Rework
+## Milestone 2.4: Native C# WeChat V4 Database Capture
 
-Purpose: replace the current single-path memory scan and five-minute query with a diagnosable pipeline inspired by the verified WeTrace data flow: pluggable key acquisition, complete database decryption, V4 shard indexing, historical bootstrap, and incremental capture.
+Purpose: replace the current Python runtime path with a diagnosable native C# pipeline: isolated `wx_key.dll` acquisition, complete database validation/reading, V4 shard indexing, historical bootstrap, and incremental capture. Python remains only as a migration oracle until parity and clean-machine acceptance are complete.
 
 Implementation direction updated after the WeTrace comparison:
 
 - Treat WeTrace as evidence for the data chain, not as a dependency to embed. The reusable part is `db_storage` discovery, full SQLCipher V4 database decryption, `SessionTable` loading, `Msg_<md5(username)>` table matching, and `Name2Id` sender resolution.
-- Stop treating the read-only memory scanner as the only path to success. It remains a low-intrusion provider, but failure to find a key should route to `ImportedKeyProvider` or a user-configured `ExternalHookKeyProvider`.
-- Add an explicit external key command contract: stdout may return JSON with `ok`, `provider`, `version`, `wechat_version`, and `db_key`, a plain-text 64-hex DB key, or a configured key file such as `dbkey.txt`. The reader must extract only the key and must not log raw stdout/stderr.
-- Prefer adapting `gzygood/DbkeyHook`'s `DbkeyHookCMD.exe -pid {pid}` style command for Windows WeChat 4.1.x, because its documented approach targets the post-4.0.3.39 behavior where dbkey is released after use and old memory search patterns stop working. Keep `ylytdeng/wechat-decrypt` as a reference for SQLCipher4 and export behavior, not as the first replacement for key acquisition.
+- Stop treating the read-only memory scanner as the only path to success. It remains a low-intrusion provider, but failure to find a key should route to `NativeHookKeyProvider` or `ImportedKeyProvider`.
+- Add a self-owned x64 `WechatDashboard.KeyProbe.exe`. It loads the authorized `wx_key.dll` through P/Invoke, returns only sanitized status on stdout, and transfers the 32-byte master key through a current-user-only random named pipe.
+- Use `NativeHookKeyProvider` as the target WeChat 4.1.x provider because post-4.0.3.39 clients may release dbkey after use. Keep the C# read-only memory scanner as a diagnostic provider and imported keys as a controlled recovery provider.
 - Validate any imported or externally extracted DB key against `session/session.db`, `contact/contact.db`, and at least one `message/message_N.db` before saving initialization state.
-- Keep third-party Hook tools outside the WPF process but place the explicitly authorized local `wx_key` tool under `tools\wx-key-tools`; generated key/config/decrypted outputs must stay under `tools\result`. Do not copy WeTrace's absent `wx_key.dll`.
+- Keep `wx_key.dll` outside the WPF process and package it with `WechatDashboard.KeyProbe.exe`. The project owner confirmed on 2026-08-11 that the selected DLL is authorized for external distribution; each release must archive the authorization evidence, source, version, SHA-256, dependency closure, and security scan result.
+- Put installed binaries under the application directory and all mutable databases, settings, logs, DPAPI material, snapshots, and decrypted working data under `%LocalAppData%\WechatDashboard`.
+- Remove Python, PyInstaller artifacts, `.py` files, PowerShell probing, and plaintext key files from the final Release package only after C# parity is proven.
 - Consider the WeChat local database capture incomplete until the same key drives full database decryption, V4 shard indexing, historical bootstrap, one real incremental message, deduplication, and Todo creation.
 
 Reference reviewed on 2026-06-10:
 
 - [afumu/wetrace documentation](https://github.com/afumu/wetrace/tree/main/docs)
 - Reuse only architecture and independently verified format knowledge.
-- Do not copy or redistribute its `wx_key.dll`; the DLL is excluded from the source repository.
+- Do not copy the DLL absent from WeTrace. The selected distributable `wx_key.dll` must be traced to the separately authorized source recorded by this project.
 - WeTrace is licensed under `CC BY-NC-SA 4.0`, so direct source reuse requires separate license review.
 
 **Planned files:**
 
 - Create: `src/WechatDashboard.Application/Capture/IWeChatDatabaseKeyProvider.cs`
 - Create: `src/WechatDashboard.Infrastructure/Capture/ReadOnlyMemoryKeyProvider.cs`
-- Create: `src/WechatDashboard.Infrastructure/Capture/ExternalHookKeyProvider.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/NativeHookKeyProvider.cs`
 - Create: `src/WechatDashboard.Infrastructure/Capture/ImportedKeyProvider.cs`
+- Create: `src/WechatDashboard.KeyProbe/WechatDashboard.KeyProbe.csproj`
+- Create: `src/WechatDashboard.KeyProbe/Program.cs`
 - Create: `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseSnapshotService.cs`
-- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseDecryptor.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseKeyDeriver.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseDecryptor.cs` only if direct SQLCipher V4 access fails compatibility fixtures
 - Create: `src/WechatDashboard.Infrastructure/Capture/WeChatV4MessageReader.cs`
+- Create: `src/WechatDashboard.Infrastructure/Capture/WeChatMessageContentDecoder.cs`
 - Create: `src/WechatDashboard.Infrastructure/Capture/WeChatCaptureDiagnostics.cs`
-- Modify: `tools/wechat-local-reader/wechat_local_reader.py`
 - Modify: `src/WechatDashboard.Infrastructure/Capture/WeChatLocalReaderService.cs`
 - Modify: `src/WechatDashboard.Infrastructure/Capture/WeChatLocalCommandCaptureAdapter.cs`
+- Modify: `src/WechatDashboard.Infrastructure/Capture/ProjectToolPaths.cs`
 - Modify: `src/WechatDashboard.App/MainWindow.xaml`
 - Modify: `src/WechatDashboard.App/MainWindow.xaml.cs`
 - Modify: `tests/WechatDashboard.Tests/Program.cs`
+- Retain temporarily: `tools/wechat-local-reader/wechat_local_reader.py` and tests as migration oracle; remove from final Release after Step 15
 
 - [ ] Step 1: Add stage-result contracts for path discovery, key acquisition, key validation, snapshot, decryption, schema inspection, shard indexing, message query, and pipeline persistence.
 - [ ] Step 2: Stop collapsing adapter exceptions into `0 messages`; expose a sanitized per-stage error in WPF diagnostics.
-- [ ] Step 3: Add `IWeChatDatabaseKeyProvider` and preserve the current read-only scanner as one provider instead of the only initialization path.
+- [ ] Step 3: Add `IWeChatDatabaseKeyProvider` with `NativeHookKeyProvider`, `ReadOnlyMemoryKeyProvider`, and `ImportedKeyProvider`.
 - [ ] Step 4: Add an imported-key provider for controlled testing with a trusted 64-character hexadecimal DB master key.
-- [ ] Step 5: Define an external Hook provider protocol using a separate process, explicit per-run authorization, tool version and SHA-256 reporting, and no key output in logs.
+- [ ] Step 5: Implement x64 `WechatDashboard.KeyProbe.exe`, P/Invoke the authorized `wx_key.dll`, require explicit per-run user action, and transfer the key over a current-user-only random named pipe without key output in arguments, environment, stdout/stderr, or logs.
 - [ ] Step 6: Add offline fixtures proving the DB master key is separately derived against each database salt using PBKDF2-HMAC-SHA512 and page HMAC validation.
-- [ ] Step 7: Discover all required databases, copy stable snapshots, decrypt only changed files, preserve `session/`, `contact/`, and `message/` paths, and atomically publish verified SQLite files.
+- [ ] Step 7: Discover all required databases and copy stable DB/WAL/SHM snapshots. First prove direct read-only SQLCipher V4 access; use managed page decryption only if compatibility fixtures demonstrate it is necessary.
 - [ ] Step 8: Implement V4 schema reading directly: `SessionTable`, `Timestamp`/`DBInfo`, `Msg_<md5(username)>`, `Name2Id`, plain/zstd message content, and non-text summaries.
 - [ ] Step 9: Add a configurable first-run bootstrap range of 7 days, 30 days, or all history; use per-shard high-water offsets only after bootstrap.
 - [ ] Step 10: Add tests where key validation succeeds but a required database, table, shard, or message table is missing, and assert the exact diagnostic stage.
 - [ ] Step 11: Validate on Weixin 4.1.10.31 using only counts, schema names, time ranges, and a known test message; do not log real message content.
 - [ ] Step 12: Minimize WeChat and verify incremental capture, deduplication, mention detection, Todo creation, and dashboard refresh.
+- [ ] Step 13: Dual-run C# and Python on offline fixtures and approved real-machine aggregate checks; compare database counts, message IDs, timestamps, chat/sender mapping, content summaries, ordering, pagination, and offsets.
+- [ ] Step 14: Split install-root paths from `%LocalAppData%\WechatDashboard`, produce a self-contained `win-x64` staging bundle, and verify installed operation from paths containing spaces and Chinese characters.
+- [ ] Step 15: Validate on a clean Windows x64 machine with no Python and no Python `PATH`; after acceptance, remove Python, PowerShell probing, plaintext key files, and PyInstaller artifacts from Release packaging.
+- [ ] Step 16: Archive `wx_key.dll` authorization evidence, source, version, SHA-256, dependency list, security scan, and Authenticode signing results for the exact released binary.
 
 ## Milestone 3: Capture Source Settings UI
 
@@ -425,16 +436,16 @@ Expected result:
 
 ## Immediate Next Work
 
-Current priority as of 2026-08-08 is Milestone 6, followed by Milestones 7 and 8. Do not start native Feishu/DingTalk integrations or additional dashboard chart types before the reliability baseline is green unless a separate user requirement changes the priority.
+Current priority was Milestone 6 as of 2026-08-08. The user decision on 2026-08-11 explicitly adds Milestone 2.4 native C# WeChat migration and no-Python installation readiness as the active capture-system priority; unrelated Feishu/DingTalk or chart expansion remains deferred.
 
 Immediate sequence:
 
-1. Correct the Python newest-first test contract and confirm all 47 tests pass.
-2. Add explicit offset failure coverage and persist truthful per-Adapter run diagnostics.
-3. Introduce structured per-Adapter results and persist true diagnostic history.
-4. Replace approximate top counters with SQL aggregates and add high-volume-day tests.
-5. Implement the Todo workbench and reminder lifecycle.
-6. Add FTS5 search, combined filters and the unified rule center.
+1. Correct the Python newest-first test contract and freeze it as the migration oracle.
+2. Implement and test isolated x64 `WechatDashboard.KeyProbe.exe` with the authorized `wx_key.dll` and protected named-pipe transfer.
+3. Port WeChat V4 key validation, snapshots, SQLCipher/zstd/schema parsing and incremental reads to C# with offline fixture parity.
+4. Dual-run C# and Python, complete privacy-safe real-machine validation, then pass the clean-machine no-Python installation test.
+5. Add explicit offset failure coverage and persist truthful per-Adapter run diagnostics.
+6. Continue the remaining reliability, Todo, search and rule-center milestones after the capture migration slice is green.
 
 Milestones 1, 2, 2.1, 2.2, and 2.3 are implemented at the framework level. Milestone 2.4 is partially implemented through the Python reader and WPF service path: DB Key file import, database initialization, V4 local message reading, date-bounded pagination, UTF-8-safe JSON output, and XML media summary display all exist.
 
@@ -461,7 +472,7 @@ Historical validation baseline on 2026-06-30:
 
 Still open:
 
-1. Decide whether `tools\wx-key-tools` is committed as local tooling or documented as user-supplied. If committed, add source URL, version, SHA-256, license status, and security review notes.
+1. Closed by the 2026-08-11 project decision: the selected `wx_key.dll` may be distributed with KeyProbe. The remaining release task is to archive the exact binary's authorization evidence, source URL, version, SHA-256, dependency closure, security review, and signature.
 2. Finish user-facing configuration for manually selecting `db_storage`, importing a DB Key file, and clearing/reinitializing local reader state.
 3. Unify the dedicated `微信消息` read path with the main pipeline experience where appropriate: persistence, `@我` Todo creation, and dashboard refresh semantics.
 4. Improve diagnostics so WPF clearly separates key extraction, key validation, database copy/decrypt, schema query, message query, JSON parse, and UI display errors.

@@ -127,8 +127,9 @@ public interface IMessageCaptureAdapter
 阶段划分：
 
 1. **本地导出桥接阶段**：WPF 配置本地导出工具路径或导出目录，工具输出 JSONL/JSON，系统通过 `WeChatLocalExportAdapter` 转换为 `CapturedMessage`。该阶段不在主程序中实现微信库解析，优先验证增量采集、去重、`@我` Todo 和看板刷新。
-2. **本地库只读阶段**：通过隔离的 `wechat-local-reader` 进程完成密钥获取、数据库快照、解密、V4 分片索引和结构化消息输出。WPF 只负责启动工具、传入 offset 和解析结果，不在主进程保存或打印数据库密钥。读取器不修改微信原始文件。
-3. **多源本地采集阶段**：沉淀 `ExternalCommandCaptureAdapter`、`LocalFileWatchCaptureAdapter`、`LocalDatabaseCaptureAdapter`，让飞书、石化通、钉钉也能按本地文件、外部命令、官方 API 或可见窗口等方式接入。
+2. **过渡期本地库只读阶段**：当前仍通过隔离的 Python `wechat-local-reader` 进程完成数据库快照、解密、V4 分片索引和结构化消息输出。WPF 只负责启动工具、传入 offset 和解析结果，不在主进程保存或打印数据库密钥。该实现作为迁移期间的兼容路径和行为对照基线。
+3. **目标本地库只读阶段**：使用独立 x64 C# `WechatDashboard.KeyProbe.exe` 加载获准使用的 `wx_key.dll` 获取主密钥，再由 C# `WeChatLocalDatabaseCaptureAdapter` 完成多库校验、快照、SQLCipher V4 读取、zstd/XML 解码和增量采集。最终发布包不包含 Python 运行时、PyInstaller 产物或 `.py` 文件。
+4. **多源本地采集阶段**：沉淀 `ExternalCommandCaptureAdapter`、`LocalFileWatchCaptureAdapter`、`LocalDatabaseCaptureAdapter`，让飞书、石化通、钉钉也能按本地文件、外部命令、官方 API 或可见窗口等方式接入。
 
 本地消息映射：
 
@@ -169,7 +170,7 @@ tools\result\capture-inbox\WeChatLocalExport
 读取工具：tools\wechat-local-reader\wechat-local-reader.exe
 ```
 
-本地库文件是加密格式。首次初始化必须由用户明确授权选用一种数据库密钥提供器。密钥只保存在应用本机工具目录的受保护配置中，不进入应用日志、SQLite 消息库、项目目录或 Git 仓库。初始化完成前，`WeChat.LocalDatabase` 保持禁用。
+本地库文件是加密格式。首次初始化必须由用户明确授权选用一种数据库密钥提供器。目标实现中明文密钥只存在于 KeyProbe 与读取器的短生命周期内存中，通过当前用户可访问的随机命名管道传递；不得进入应用日志、SQLite 消息库、项目目录、命令行或 Git 仓库。初始化完成前，`WeChat.LocalDatabase` 保持禁用。
 
 #### 4.1.2 WeTrace 方案调研与借鉴边界
 
@@ -191,30 +192,31 @@ tools\result\capture-inbox\WeChatLocalExport
 2. WeTrace 明确区分“数据库主密钥”和“每个数据库按 salt 派生的页密钥”；当前实现必须避免把单库派生密钥误当作所有数据库通用密钥。
 3. WeTrace 先解密完整数据库集合，再构建会话和消息分片索引；当前实现不能只验证 `message_0.db` 或只依赖最近会话摘要。
 4. WeTrace 首次加载面向完整历史数据库；当前读取器首次默认只回看五分钟，会把“历史消息未导入”误判成“没有聊天消息”。
-5. WeTrace 的源码仓库采用 `CC BY-NC-SA 4.0`，并且真正执行 Hook 的 `wx_key.dll` 未提交到源码仓库。项目只借鉴公开的数据流程、接口边界和表结构认识，不直接复制其实现或分发该 DLL。
+5. WeTrace 的源码仓库采用 `CC BY-NC-SA 4.0`，并且真正执行 Hook 的 `wx_key.dll` 未提交到该源码仓库。本项目不从 WeTrace 复制缺失二进制；项目方于 2026-08-11 确认当前选定的 `wx_key.dll` 已取得对外发布授权，可以作为受控原生组件随安装包发布。发布记录仍必须归档授权凭据、实际来源、版本和 SHA-256，不能仅以本段设计决策替代授权证据。
 
 第三方工具接入约束：
 
 1. 不在 WPF 进程内加载第三方密钥 DLL。
-2. 外部 Hook 提取器必须以独立进程运行，并通过最小 JSON 协议返回成功状态或受保护的密钥引用。
+2. Hook 提取器必须以独立 x64 C# 进程运行；状态可通过最小 JSON 协议返回，明文密钥只通过当前用户可访问的随机命名管道传递，不得写入 stdout/stderr。
 3. 每次涉及重启微信、注入或 Hook 时必须单独提示并取得用户确认。
 4. 必须记录工具名称、版本、SHA-256 和来源，但不能记录提取到的密钥。
-5. 未通过许可证和安全审查时，只允许用户自行配置外部工具路径，不随安装包分发。
+5. 当前选定的 `wx_key.dll` 允许随安装包发布，但每个发布版本仍必须完成授权凭据、来源、版本、SHA-256、依赖闭包和安全扫描记录；无法对应到已归档授权的二进制不得进入安装包。
 
 本项目落地方案：
 
 1. 把 WeTrace 证明有效的“密钥获取 -> 全库解密 -> V4 会话和分片读取”作为本地数据库采集主线，替代继续堆叠 UIA/OCR 或单点内存扫描。
-2. WPF 主程序只编排采集，不持有逆向实现；所有密钥获取实现都挂在 `IWeChatDatabaseKeyProvider` 后面。
-3. 默认仍保留只读内存扫描作为低侵入诊断路径；当它无法拿到主密钥时，允许用户选择“手动导入 DB Key”或“调用外部 Key 工具”。
-4. 外部 Key 工具只作为用户本机显式授权的独立进程运行，统一放在项目 `tools\wx-key-tools` 下；生成的 key、日志、配置、解密库统一写入 `tools\result`。
-5. 读取器拿到 64 位十六进制主密钥后，必须对 `session`、`contact` 和至少一个 `message` 数据库分别校验；校验失败时不得继续解析消息，也不得把失败折叠成“采集 0 条”。
+2. WPF 主程序只编排采集，不直接加载 `wx_key.dll`；所有密钥获取实现都挂在 `IWeChatDatabaseKeyProvider` 后面。
+3. 微信 4.1.x 目标默认使用 `NativeHookKeyProvider` 启动 `WechatDashboard.KeyProbe.exe`；只读内存扫描保留为低侵入诊断路径，手动导入保留为恢复路径。
+4. `WechatDashboard.KeyProbe.exe` 与已授权的 `wx_key.dll` 作为受控组件随安装包发布。Hook 必须由用户显式操作触发，KeyProbe 崩溃或超时不得导致 WPF 崩溃。
+5. C# 读取器拿到 64 位十六进制主密钥后，必须对 `session`、`contact` 和至少一个 `message` 数据库分别校验；校验失败时不得继续解析消息，也不得把失败折叠成“采集 0 条”。
+6. Python reader 在迁移期仅作为兼容路径和 golden oracle；完成逐字段对照、真实机脱敏验证和无 Python 干净机验收后，从 Release 和安装包中删除。
 
 外部工具选择（更新于 2026-06-27）：
 
 1. `ylytdeng/wechat-decrypt` 的 Windows key 提取路径仍然是扫描 `Weixin.exe` 进程内存中的 SQLCipher raw key 模式，和当前只读扫描方案同类。它适合作为数据库结构、SQLCipher 参数和导出链路参考，但不是当前 key 获取失败的首选替代方案。
 2. `gzygood/DbkeyHook` 的 README 明确指出 PC 微信 `4.0.3.39` 以后 dbkey 使用后会释放，以往搜索内存的方法不再能够找到 dbkey；该项目通过 Hook 初始化数据库获取 key。其 release `v1.0.4` 提供 `DbkeyHookCMD.exe`，说明支持微信 `4.1.x`，并支持 `-pid` 指定已打开微信进程。
-3. 因此当前外部 Provider 优先适配 `DbkeyHookCMD.exe -pid {pid}` 这类命令行工具。项目只负责调用用户配置的命令、解析 stdout 或 `dbkey.txt` 中的 64 位十六进制 key，并继续执行自己的多库校验、快照、解密和消息读取。
-4. `DbkeyHook` 当前仓库未声明许可证，且 release 是外部二进制；在完成来源、哈希和许可证审查前，不能把它纳入安装包或仓库，只能由用户自行下载、配置路径并逐次授权运行。
+3. 该调研说明 Hook Provider 对微信 4.1.x 是必要方向，但 `DbkeyHookCMD.exe` 只保留为历史参考，不作为目标安装包依赖。
+4. 目标实现使用项目方确认已获对外发布授权的 `wx_key.dll`，由自有 `WechatDashboard.KeyProbe.exe` 调用；不得以 `DbkeyHook` 或 WeTrace 的许可证替代当前 DLL 的独立授权和来源记录。
 
 #### 4.1.3 微信 4.x 密钥提供器与初始化
 
@@ -222,30 +224,30 @@ tools\result\capture-inbox\WeChatLocalExport
 
 | Provider | 作用 | 默认状态 |
 | --- | --- | --- |
-| `ReadOnlyMemoryKeyProvider` | 保留当前只读扫描和数据库首页校验能力 | 可用，作为低侵入方案和诊断手段 |
-| `ExternalHookKeyProvider` | 调用经用户配置、版本匹配的独立密钥提取工具 | 默认禁用，逐次授权 |
-| `ImportedKeyProvider` | 导入用户从可信工具获得的 64 位十六进制主密钥 | 默认禁用，显式操作 |
+| `NativeHookKeyProvider` | 启动独立 x64 `WechatDashboard.KeyProbe.exe`，由其加载获准发布的 `wx_key.dll` | 目标默认，逐次显式操作 |
+| `ReadOnlyMemoryKeyProvider` | 使用 `OpenProcess`、`VirtualQueryEx`、`ReadProcessMemory` 做只读候选扫描和数据库首页校验 | 诊断/兼容路径 |
+| `ImportedKeyProvider` | 导入用户从可信工具获得的 64 位十六进制主密钥 | 恢复路径，显式操作 |
 
 外部 Key 工具协议：
 
-1. WPF 配置项只保存工具命令、版本信息和用户授权状态，不保存明文密钥；明文主密钥只允许通过进程 stdout 或受保护临时通道传给读取器。
-2. 推荐 stdout 返回 JSON：
+1. WPF 只保存 KeyProbe 路径、DLL 版本、SHA-256 和用户授权状态，不保存明文密钥。
+2. WPF 为每次提取创建不可预测的命名管道名称，只允许当前用户连接；KeyProbe 通过管道发送固定长度密钥后立即清零缓冲区并退出。
+3. stdout 只返回不含密钥的状态 JSON，例如：
 
    ```json
    {
      "ok": true,
-     "provider": "external-hook",
+     "provider": "native-hook",
      "version": "1.0.0",
      "wechat_version": "4.1.10.31",
-     "db_key": "<64 hex chars>"
+     "key_delivered": true
    }
    ```
 
-3. 为兼容用户已有工具，也允许 stdout 中包含 `DB Key: <64 hex chars>` 这类纯文本输出；读取器只提取 64 位十六进制主密钥，不把完整 stdout 写入日志。
-4. 失败时返回 `{"ok": false, "error_code": "...", "message": "..."}` 或非零退出码；诊断页显示错误分类和工具元信息，不显示 stdout/stderr 原文中的敏感片段。
-5. 外部工具命令必须可禁用、可清空、可替换；用户切换微信版本或账号目录后必须重新校验主密钥。
-6. 命令行支持 `{pid}` 或 `{wechat_pid}` 占位符；读取器会按检测到的 `Weixin.exe` 进程逐个尝试，例如 `"D:\tools\DbkeyHookCMD.exe" -pid {pid}`。
-7. 如果外部工具只把 key 写入文件，读取器允许配置 Key 文件路径，例如 `D:\Program Files (x86)\Tencent\Weixin\dbkey.txt`，并从该文件提取 64 位十六进制 key。
+4. 失败时返回 `{"ok": false, "error_code": "...", "message": "..."}` 或非零退出码；诊断页只显示错误分类和工具元信息，不显示原始敏感输出。
+5. WPF 按窗口标题、工作集和进程状态选择候选 `Weixin.exe`，把 PID 作为普通参数传给 KeyProbe；密钥不得作为参数或环境变量传递。
+6. 用户切换微信版本、账号目录或目标进程后必须重新获取并执行多库校验。
+7. 迁移期间保留现有 PowerShell/Key 文件路径用于兼容和回归对照，但它不是最终安装包契约；最终验收后删除明文 Key 文件工作流。
 
 统一初始化流程：
 
@@ -276,7 +278,7 @@ tools\result\capture-inbox\WeChatLocalExport
 6. 下一步先实现 Provider 抽象和阶段化诊断，再接入用户授权的外部密钥工具进行对照验证。
 7. 在主密钥验证、全库解密、会话读取、消息分片匹配和真实消息读取全部通过前，系统不能宣称已经支持后台读取微信消息。
 
-因此，当前“采集不到微信聊天消息”的直接原因不应再按 OCR 或消息表字段优先排查。只要主密钥没有通过多库校验，后续 `SessionTable`、`Msg_<md5(username)>` 和 `Name2Id` 读取都不会进入可信状态。下一阶段的关键路径是先让 `ImportedKeyProvider` 或 `ExternalHookKeyProvider` 提供可验证主密钥，再复用现有解密和分片读取链路。
+因此，当前“采集不到微信聊天消息”的直接原因不应再按 OCR 或消息表字段优先排查。只要主密钥没有通过多库校验，后续 `SessionTable`、`Msg_<md5(username)>` 和 `Name2Id` 读取都不会进入可信状态。下一阶段的关键路径是先让 `NativeHookKeyProvider` 或 `ImportedKeyProvider` 提供可验证主密钥，再由 C# 读取器完成校验、快照和分片读取。
 
 #### 4.1.4 数据库快照、解密和 V4 消息读取
 
@@ -308,6 +310,14 @@ V4 会话与消息索引：
 4. 数据库更新后先完成快照和增量解密，再重建变化分片索引，最后查询新增消息。
 5. `SourceMessageKey` 优先使用 `username + database + server_id`；没有 `server_id` 时回退到 `username + database + local_id + create_time`。
 
+C# 目标实现约束：
+
+1. 优先使用现有 `SQLitePCLRaw.bundle_e_sqlcipher` 对稳定快照执行 SQLCipher V4 只读查询；必须以离线 fixture 证明微信实际参数兼容，不能仅凭 `cipher_compatibility = 4` 假设成功。
+2. 若原生 SQLCipher 无法完整兼容，则使用 `System.Security.Cryptography` 独立实现 PBKDF2-HMAC-SHA512、HMAC 校验和 AES-256-CBC 页面解密，并以 Python reader 输出作为迁移期 golden oracle。
+3. zstd 正文使用经过版本锁定和许可证审查的 .NET 实现；XML 摘要使用 .NET XML API，输出契约与现有 Python reader 保持一致。
+4. C# provider、快照、密钥派生、数据库读取和内容解码必须拆分测试，不能把逆向、文件复制和业务映射重新集中到 `MainWindow.xaml.cs`。
+5. 主密钥和派生密钥使用可清零缓冲区；如需跨进程或跨重启保存，使用 Windows DPAPI，并提供清除/重新初始化入口。
+
 #### 4.1.5 阶段化诊断与验收
 
 采集诊断不能再把所有失败折叠成“采集 0 条”。每次运行至少输出以下非敏感阶段：
@@ -331,6 +341,8 @@ V4 会话与消息索引：
 4. 首次历史导入成功后，发送一条已知测试消息，验证增量同步和去重。
 5. 最小化微信窗口重复测试，确认采集不依赖 UIA/OCR。
 6. 最后验证 `@白驹过隙`、`@戴少峰` Todo 创建和 WPF 看板刷新。
+7. 在未安装 Python、未配置 Python `PATH` 的干净 Windows x64 环境安装 Release 包，验证 KeyProbe、C# reader、SQLCipher/zstd 依赖、升级和卸载行为。
+8. 人为终止或制造 KeyProbe 超时，确认 WPF 保持运行、敏感缓冲区被清理且诊断信息不包含 DB Key。
 
 #### 4.1.6 当前实现状态（2026-06-30）
 
@@ -351,7 +363,7 @@ V4 会话与消息索引：
 当前边界：
 
 1. DB Key 获取依赖外部 `wx_key` 工具，不应在 WPF 进程内加载第三方 Hook DLL。
-2. `tools\wx-key-tools` 作为项目内本地工具目录存在，但提交或分发前必须补充来源、版本、SHA-256、许可证和安全审查结论。
+2. `tools\wx-key-tools` 作为当前本地工具目录存在；项目方已确认选定 DLL 可对外发布，但 Release 前仍必须把授权凭据、来源、版本、SHA-256、依赖和安全审查结论对应到安装包中的实际二进制。
 3. `tools\result` 下可能包含 DB Key、派生 key、解密数据库和真实消息内容，必须保持 gitignore，不能提交。
 4. `微信消息` tab 当前直接读取本地数据库分页结果；`采集一次` 和 `开始微信监听` 仍走 `MessageCapturePipeline`，两条路径后续需要统一用户体验和状态展示。
 5. 非文本消息当前显示摘要，不下载或渲染图片、视频、表情、文件本体。
@@ -363,6 +375,19 @@ V4 会话与消息索引：
 2. 如果 UI 显示 XML 原文，优先检查 `tools\wechat-local-reader\wechat_local_reader.py` 的 `summarize_message_content` 是否在消息输出前被调用。
 3. 如果读取失败，优先区分 DB Key 文件不存在、key 与账号目录不匹配、解密失败、schema 查询失败和 WPF JSON 解析失败，不要直接回退到 OCR 排查。
 4. 提交前确认没有把 `tools\result`、`wx-key-found.txt`、`all_keys.json`、解密数据库或真实消息 JSON 加入 Git。
+
+#### 4.1.7 目标架构决策（2026-08-11）
+
+以下是已确定的目标，不代表当前代码已经完成：
+
+1. 微信本地数据库采集最终迁移为 C#，运行时不依赖 Python；当前 Python reader 保留到对照迁移和系统验收完成。
+2. 新增独立 x64 `WechatDashboard.KeyProbe.exe`，通过 P/Invoke 加载 `wx_key.dll`；WPF 主进程不得直接加载该 DLL。
+3. 项目方确认选定的 `wx_key.dll` 已取得对外发布授权，允许随安装包发布。发布流水线必须同时归档授权凭据、来源、版本、SHA-256、依赖清单和安全扫描结果。
+4. KeyProbe 与 WPF 通过当前用户限定的随机命名管道传递密钥，stdout/stderr 只允许非敏感状态；正常流程不生成明文 `wx-key-found.txt` 或 `all_keys.json`。
+5. C# 读取器负责多库校验、稳定快照、SQLCipher V4、会话/联系人/消息分片、zstd/XML 解码、分页和增量 offset；`MessageCapturePipeline` 之后的去重、分类、Todo 和看板行为保持不变。
+6. 迁移顺序固定为 KeyProbe 替换、C# 加密/fixture、C# schema/内容读取、双跑对照、真实机脱敏验证、无 Python 安装验收、删除 Release Python 依赖。
+7. 安装目录只放程序和只读工具；应用数据库、配置、日志、DPAPI 密钥材料和快照统一放到 `%LocalAppData%\WechatDashboard`，不能继续依赖解决方案目录或当前工作目录。
+
 ### 4.2 消息标准化
 
 不同来源的消息统一转成内部模型：
@@ -1194,6 +1219,41 @@ WechatDashboard/
 | `tools/wechat-local-reader/wechat_local_reader.py` | DB Key 导入、数据库校验/解密、V4 消息读取、XML 摘要、JSON 输出 |
 | `tools/wechat-local-reader/test_wechat_local_reader.py` | Python reader 单元测试 |
 | `tools/wx-key-tools/run-wx-key-probe.ps1` | 调用本机 `wx_key` 工具并把 DB Key 写入 `tools/result` |
+
+目标 Release 结构（尚未实现）：
+
+```text
+WechatDashboard/
+  WechatDashboard.exe
+  WechatDashboard.KeyProbe.exe
+  tools/
+    wx-key/
+      wx_key.dll
+      <已审计的原生依赖>
+  licenses/
+    THIRD-PARTY-NOTICES.md
+
+%LocalAppData%/WechatDashboard/
+  data/
+  settings/
+  logs/
+  reader/
+  snapshots/
+```
+
+目标新增或替换文件：
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/WechatDashboard.KeyProbe/Program.cs` | 独立 x64 原生 Hook 生命周期、命名管道密钥交付和脱敏状态 |
+| `src/WechatDashboard.Application/Capture/IWeChatDatabaseKeyProvider.cs` | 微信主密钥 Provider 契约 |
+| `src/WechatDashboard.Infrastructure/Capture/NativeHookKeyProvider.cs` | 编排 KeyProbe、授权、超时、取消和错误映射 |
+| `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseSnapshotService.cs` | 创建稳定 DB/WAL/SHM 快照 |
+| `src/WechatDashboard.Infrastructure/Capture/WeChatDatabaseKeyDeriver.cs` | 多库 salt 派生和页面 HMAC 校验 |
+| `src/WechatDashboard.Infrastructure/Capture/WeChatV4MessageReader.cs` | SQLCipher V4、会话、联系人和消息分片读取 |
+| `src/WechatDashboard.Infrastructure/Capture/WeChatMessageContentDecoder.cs` | zstd、XML 和非文本消息摘要 |
+| `src/WechatDashboard.Infrastructure/Capture/ProjectToolPaths.cs` | 分离安装根目录与 `%LocalAppData%\WechatDashboard` 可变数据目录 |
+
 ## 15. 结论
 
 该系统应以“本地优先、规则优先、合规采集、可解释排序”为核心。第一版不追求一次性解决所有微信历史消息读取问题，而是先建立稳定的数据模型、待办闭环和看板能力，再通过采集适配器逐步提升实时覆盖率。这样可以在技术风险和合规风险可控的前提下，尽快交付对用户真正有价值的 `@我` 待办理和项目消息看板。

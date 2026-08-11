@@ -24,6 +24,15 @@ Current verified state:
 - Verification on 2026-08-09: the standard solution build and WPF independent-output build both succeeded with 0 warnings and 0 errors; all 39 .NET regression tests passed. Use the independent output only while a Visual Studio debug process locks the default app DLLs.
 - Python verification still runs 47 tests with 1 failing expectation in `test_read_messages_aggregates_across_shards`: implementation sorts newest-first, while the test expects the older Alice row first. This is unchanged from the pre-transaction baseline and remains the next test-baseline task.
 
+Target architecture decision (2026-08-11; not yet the current implementation):
+
+- The final WeChat local-database path will be native C# and will not require Python at runtime.
+- A separate self-contained x64 `WechatDashboard.KeyProbe.exe` will P/Invoke the selected `wx_key.dll`; the WPF process must not load the DLL directly.
+- The project owner confirmed that the selected `wx_key.dll` is authorized for external distribution. Each release must still archive the authorization evidence, source, version, SHA-256, dependency closure, security scan, and signing result for the exact binary shipped.
+- KeyProbe will transfer the key through a random current-user-only named pipe. Keys must not appear in arguments, environment variables, stdout/stderr, logs, normal plaintext files, or the application SQLite database.
+- The C# reader will own multi-database validation, stable DB/WAL/SHM snapshots, SQLCipher V4 access or managed page decryption, `SessionTable`/`Name2Id`/`Msg_<md5>` reads, zstd/XML decoding, pagination, and incremental offsets.
+- Python remains only as a migration compatibility path and golden oracle. Remove Python, PyInstaller artifacts, `.py` files, PowerShell probing, and plaintext key files from Release only after parity and clean-machine acceptance.
+
 Sensitive state:
 
 - Never print or commit DB Keys, `wx-key-found.txt`, `all_keys.json`, decrypted databases, capture JSON containing real messages, or files under `tools\result`.
@@ -42,6 +51,8 @@ tools/wx-key-tools/                  Local external DB Key helper wrapper and to
 tools/result/                        Generated local outputs; ignored; may contain secrets
 design/                              Canonical design, progress, and system-test documents
 ```
+
+Planned Release additions are `src/WechatDashboard.KeyProbe/` and the native C# WeChat reader components under `Infrastructure/Capture`; installed mutable state moves to `%LocalAppData%\WechatDashboard`.
 
 ## Current Architecture
 
@@ -158,18 +169,15 @@ Only the source reader, tests, and wrapper script are safe to review in normal c
 
 Follow `design/2026-06-04-development-plan.md`. Keep design changes in `design/wechat-message-monitor-wpf-design.md`; avoid creating extra design documents for the same方案 unless the user asks for a separate handoff artifact.
 
-Immediate next work, in priority order:
+Immediate next work, in priority order after the 2026-08-11 native-reader decision:
 
-1. Restore the Python test baseline by making the cross-shard ordering test match the documented newest-first contract, then rerun all verification commands serially.
-2. Add an explicit offset-not-advanced-on-failure test, then persist capture-run diagnostics.
-3. Add structured per-Adapter run results and persist real last-success, last-failure, duration, counts, error stage and sanitized error summary for diagnostics.
-4. Replace recent-message-sample top counters with accurate SQL aggregate queries.
-5. Finish the Todo workbench acceptance slice: project selection UI, explicit custom snooze, resume/time-zone refresh hooks, Windows Toast/quiet hours/per-source controls, ViewModel tests and WPF UI automation.
-6. Add FTS5 full-text search and combined source/chat/sender/project/date/mention/Todo filters.
-7. Unify project keywords, priority contacts, urgency terms and weights in a rule center; persist classification/urgency reasons and support test input and correction.
-8. Add deterministic local project daily/weekly reports, followed by backup/restore, integrity checks and retention controls.
-9. Continue extracting the remaining capture/settings/diagnostics/dashboard responsibilities from `MainWindow.xaml.cs`, with discoverable tests and CI.
+1. Restore the Python test baseline and freeze its newest-first behavior as the migration oracle.
+2. Implement the isolated x64 KeyProbe and protected named-pipe contract around the authorized `wx_key.dll`.
+3. Port key validation, snapshots, SQLCipher V4, schema/message parsing, zstd/XML, pagination and offsets to C# with offline fixture parity.
+4. Dual-run C# and Python, complete privacy-safe real-machine validation, then pass a clean-machine installation test with no Python available.
+5. Split install-root paths from `%LocalAppData%\WechatDashboard`, archive release authorization/provenance evidence, sign artifacts, and remove Python from Release.
+6. Resume structured Adapter diagnostics, SQL aggregate counters, Todo acceptance, search/rule-center, reporting and remaining `MainWindow.xaml.cs` extraction after the migration slice is green.
 
-Secondary capture work remains valid but follows the reliability baseline: decide the `tools\wx-key-tools` distribution policy, finish manual DB Key/data-directory/reinitialization UI, and complete minimized-WeChat system validation using privacy-safe counts.
+The `wx_key.dll` distribution decision is closed by the project owner's 2026-08-11 authorization confirmation, subject to per-release evidence and binary provenance. Manual DB Key/data-directory/reinitialization UI and minimized-WeChat validation remain required fallback and acceptance work.
 
-Do not implement hidden in-process key extraction in WPF. If self-developed key extraction is revisited, keep it as a separate optional local tool with explicit user action and sanitized outputs.
+Do not implement hidden in-process key extraction in WPF. Use the separate KeyProbe only after explicit user action, isolate native failures, and keep all outputs sanitized.

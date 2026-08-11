@@ -1,8 +1,10 @@
 # WeChat 本地数据库采集系统测试步骤
 
-更新时间：2026-06-30
+更新时间：2026-08-11
 
 ## 1. 测试目标
+
+本文同时保留“当前 Python 兼容链路”的可执行回归步骤，并定义“纯 C# + `WechatDashboard.KeyProbe.exe` + `wx_key.dll`”目标链路的发布验收。文中明确标注为当前实现的命令在迁移完成前继续有效；目标验收不得被当前 Python 通过结果替代。
 
 验证当前程序是否可以在本机完成下面的完整链路：
 
@@ -14,7 +16,7 @@
 
 本测试不验证 UIA/OCR 可见窗口采集。OCR 只作为兜底能力，不是本地数据库采集主路径。
 
-## 当前实现基线（2026-06-30）
+## 历史实现基线（2026-06-30）
 
 当前工作树的已验证基线：
 
@@ -24,6 +26,17 @@
 - WPF `微信消息` tab 默认读取当天消息，每页 50 条，字段为 `消息内容`、`群名称`、`发消息人`。
 - 非文本 XML 消息不应再显示 XML 原文，应显示 `[图片]`、`[视频]`、`[表情]`、`[文件]`、`[链接] 标题 - 描述` 或 `[位置]`。
 - 所有 key、配置、解密库和临时输出应留在 `tools\result`，不要提交到 Git。
+
+## 目标发布基线（决策于 2026-08-11）
+
+目标链路尚未实现完成，验收时必须满足：
+
+1. WPF 启动独立 x64 `WechatDashboard.KeyProbe.exe`，KeyProbe 通过 P/Invoke 加载获准对外发布的 `wx_key.dll`；WPF 主进程不直接加载该 DLL。
+2. KeyProbe 只在用户显式操作后运行，明文 Key 通过当前用户限定的随机命名管道传递，不进入参数、环境变量、stdout/stderr、日志或普通明文文件。
+3. C# 读取器完成多库校验、DB/WAL/SHM 稳定快照、SQLCipher V4、`SessionTable`、`Name2Id`、`Msg_<md5>`、zstd/XML、分页和增量 offset。
+4. Release 安装包不包含 Python、PyInstaller 产物、`.py` 文件或 PowerShell Key 探测脚本。
+5. 程序和只读工具位于安装目录；数据库、设置、日志、DPAPI 材料和快照位于 `%LocalAppData%\WechatDashboard`。
+6. 每个发布版本归档实际 `wx_key.dll` 的授权凭据、来源、版本、SHA-256、依赖清单和安全扫描结果。
 ## 2. 安全边界
 
 测试过程中不要把以下内容复制到聊天、日志或 Git：
@@ -49,7 +62,7 @@
    D:\study\code\wechatDashboard
    ```
 
-4. Python 可用：
+4. 当前 Python 兼容链路回归时 Python 可用；最终 Release 干净机验收不得安装或配置 Python：
 
    ```powershell
    python --version
@@ -111,6 +124,15 @@ Test-Path D:\study\code\wechatDashboard\tools\wx-key-tools\run-wx-key-probe.ps1
 True
 ```
 
+目标 C# 链路应改为检查发布 staging/安装目录中的：
+
+```text
+WechatDashboard.KeyProbe.exe
+tools\wx-key\wx_key.dll
+```
+
+目标验收不再要求 `run-wx-key-probe.ps1` 或完整 Flutter `wx_key.exe`。如果 `wx_key.dll` 还有原生依赖，必须根据依赖闭包一并检查，不能通过复制整个未审计工具目录掩盖缺失依赖。
+
 ## 4. 代码级测试
 
 从仓库根目录执行：
@@ -164,6 +186,19 @@ All 24 tests passed.
 ```
 
 如果看到 `SQLitePCLRaw.lib.e_sqlite3` 的 NuGet 漏洞告警，先记录为依赖治理问题；这不影响本轮 DB Key 和本地读取链路验证。
+
+### 4.3 目标 C# 读取器和 KeyProbe 测试
+
+实现目标链路后，.NET 测试至少新增并全部通过：
+
+1. `NativeHookKeyProvider` 正确选择 KeyProbe、传入 PID，并在超时、取消、非零退出和管道断开时返回脱敏错误。
+2. KeyProbe 的 P/Invoke 生命周期始终执行 `CleanupHook`，且状态输出不包含 64 位十六进制 Key。
+3. 命名管道仅允许当前用户连接，Key 长度/格式不正确时拒绝进入数据库验证。
+4. PBKDF2-HMAC-SHA512、多库 salt 派生、页面 HMAC 和 AES-256-CBC 与离线 fixture 期望一致。
+5. SQLCipher 直接读取与手工解密的选择有明确兼容性测试，不允许只凭配置假设成功。
+6. DB/WAL/SHM 快照、会话/联系人/多消息分片、zstd/XML、排序、分页和 offset 均有测试。
+7. 对同一 fixture，C# 与 Python golden oracle 的消息 ID、时间、群名、发送人、内容摘要、顺序和下一 offset 一致。
+8. 故意终止 KeyProbe 或破坏 DLL 时，WPF 不崩溃，日志不出现 Key。
 
 ## 5. 提取 DB Key
 
@@ -441,6 +476,7 @@ dotnet run --project src\WechatDashboard.App\WechatDashboard.App.csproj
 
 - WPF 从源码运行时会优先使用仓库里的 `tools\wechat-local-reader\wechat_local_reader.py`。
 - `wx-key-found.txt`、`config.json`、`all_keys.json`、解密数据库和 capture JSON 都写入 `tools/result`，不要提交到 Git。
+- 上述两点只描述当前兼容实现。目标 Release 必须走 C# reader 和 KeyProbe，并把可变数据写入 `%LocalAppData%\WechatDashboard`；不得因当前步骤通过就宣称已经完成无 Python 安装验收。
 
 ## 9. WPF 单次采集
 
@@ -639,7 +675,9 @@ Get-Process Weixin -ErrorAction SilentlyContinue |
 
 ## 13. 通过标准
 
-系统测试通过必须同时满足：
+### 13.1 当前兼容链路通过标准
+
+迁移期间回归当前实现必须同时满足：
 
 1. Python reader 单元测试通过。
 2. .NET 控制台回归测试通过。
@@ -652,6 +690,21 @@ Get-Process Weixin -ErrorAction SilentlyContinue |
 9. 微信最小化后，本地数据库采集仍可用。
 10. 测试结束后已删除临时 DB Key、解密数据库和 capture JSON。
 
+### 13.2 最终无 Python Release 通过标准
+
+只有以下条件全部满足，才能宣称“安装后不依赖 Python”：
+
+1. 所有 .NET、KeyProbe、加密 fixture、schema、zstd/XML、分页和 offset 测试通过。
+2. Python golden oracle 在冻结基线上全绿，且 C# 对照结果逐字段一致；随后 Release staging 中不再包含 Python 组件。
+3. 在未安装 Python、`PATH` 中没有 Python、未安装 .NET SDK 的干净 Windows x64 机器上安装成功。
+4. WPF 可自动定位安装目录中的 KeyProbe 和 `wx_key.dll`，不依赖解决方案目录、当前工作目录或硬编码 `D:\study` 路径。
+5. 自动提取 Key、首次初始化、当天分页读取、单次采集、监听、重启恢复和微信最小化增量采集全部成功。
+6. KeyProbe 失败、超时、DLL 不匹配、微信权限更高或数据库 schema 变化时，WPF 保持运行并给出脱敏阶段错误。
+7. Key 不出现在进程命令行、环境变量、stdout/stderr、普通日志、崩溃信息、SQLite 业务库或普通明文文件中。
+8. 安装、覆盖升级、修复和卸载不会误删 `%LocalAppData%\WechatDashboard` 用户数据；用户主动清理时有明确确认。
+9. 已归档该发布包内 `wx_key.dll` 的授权凭据、来源、版本、SHA-256、依赖清单、安全扫描和签名结果。
+10. 主程序、KeyProbe、受控原生组件和安装包完成签名；安全软件/EDR 验证结果已记录。
+
 ## 14. 测试记录模板
 
 ```text
@@ -662,6 +715,13 @@ DB Key 提取工具：
 
 Python 测试结果：
 .NET 测试结果：
+
+C# reader/fixture 对照：
+无 Python 干净机：
+安装包版本：
+wx_key.dll 版本与 SHA-256：
+授权凭据归档位置：
+签名/安全扫描结果：
 
 WPF 自动提取Key：
 - 结果：
