@@ -795,11 +795,13 @@ class WeChatV4SchemaReaderTests(unittest.TestCase):
             self.assertEqual(1, diag["shards_scanned"])
             self.assertEqual(2, diag["rows_read"])
 
-            # First message should resolve sender via Name2Id.
-            self.assertEqual("Alice", messages[0]["senderName"])
-            self.assertEqual("Hello @白驹过隙", messages[0]["content"])
+            # Cross-shard results follow the documented newest-first contract.
+            self.assertEqual("Bob", messages[0]["senderName"])
+            self.assertEqual("Second message", messages[0]["content"])
             self.assertEqual("Test Room", messages[0]["chatName"])
             self.assertEqual("Text", messages[0]["messageType"])
+            self.assertEqual("Alice", messages[1]["senderName"])
+            self.assertEqual("Hello @白驹过隙", messages[1]["content"])
 
     def test_read_messages_skips_malformed_message_shard(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -378,7 +378,7 @@ C# 目标实现约束：
 
 #### 4.1.7 目标架构决策（2026-08-11）
 
-以下是已确定的目标，不代表当前代码已经完成：
+以下是已确定的目标，其中 KeyProbe/Provider 第一阶段已于 2026-08-11 落地，其余项目不代表当前代码已经完成：
 
 1. 微信本地数据库采集最终迁移为 C#，运行时不依赖 Python；当前 Python reader 保留到对照迁移和系统验收完成。
 2. 新增独立 x64 `WechatDashboard.KeyProbe.exe`，通过 P/Invoke 加载 `wx_key.dll`；WPF 主进程不得直接加载该 DLL。
@@ -387,6 +387,8 @@ C# 目标实现约束：
 5. C# 读取器负责多库校验、稳定快照、SQLCipher V4、会话/联系人/消息分片、zstd/XML 解码、分页和增量 offset；`MessageCapturePipeline` 之后的去重、分类、Todo 和看板行为保持不变。
 6. 迁移顺序固定为 KeyProbe 替换、C# 加密/fixture、C# schema/内容读取、双跑对照、真实机脱敏验证、无 Python 安装验收、删除 Release Python 依赖。
 7. 安装目录只放程序和只读工具；应用数据库、配置、日志、DPAPI 密钥材料和快照统一放到 `%LocalAppData%\WechatDashboard`，不能继续依赖解决方案目录或当前工作目录。
+
+第一阶段实现检查点：已新增 x64 KeyProbe、动态 DLL 导出调用、参数白名单、脱敏 JSON、当前用户命名管道、零化密钥租约、`NativeHookKeyProvider` 和 WPF兼容接入；Debug/Release 构建 0 警告/0 错误，.NET 44/44、Python 47/47。真实微信 Hook、C# SQLCipher/schema/zstd、安装数据目录拆分和无 Python Release 尚未完成。
 
 ### 4.2 消息标准化
 

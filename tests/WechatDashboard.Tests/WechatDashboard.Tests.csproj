@@ -4,6 +4,7 @@
     <ProjectReference Include="..\..\src\WechatDashboard.Application\WechatDashboard.Application.csproj" />
     <ProjectReference Include="..\..\src\WechatDashboard.Domain\WechatDashboard.Domain.csproj" />
     <ProjectReference Include="..\..\src\WechatDashboard.Infrastructure\WechatDashboard.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\WechatDashboard.KeyProbe\WechatDashboard.KeyProbe.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

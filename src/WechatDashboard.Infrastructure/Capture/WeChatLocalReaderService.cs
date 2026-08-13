@@ -34,6 +34,8 @@ public sealed class WeChatLocalReaderService
     private readonly string? _readerExePath;
     // 外部命令执行器（用于启动 Python/PowerShell 进程）
     private readonly IExternalCommandRunner _commandRunner;
+    // 目标原生 Key Provider：通过独立 KeyProbe + 命名管道获取 Key
+    private readonly IWeChatDatabaseKeyProvider? _databaseKeyProvider;
     // 引导历史范围：7d/30d/all，控制初始化时回溯多少天的消息
     private string _bootstrapRange = "30d";
     // 用户导入的 DB Key（可选）
@@ -52,7 +54,9 @@ public sealed class WeChatLocalReaderService
     /// 构造函数：定位工具目录、结果目录、配置/密钥路径，
     /// 优先查找 Python 脚本（便于热更新），找不到时回退到打包 exe。
     /// </summary>
-    public WeChatLocalReaderService(IExternalCommandRunner? commandRunner = null)
+    public WeChatLocalReaderService(
+        IExternalCommandRunner? commandRunner = null,
+        IWeChatDatabaseKeyProvider? databaseKeyProvider = null)
     {
         _commandRunner = commandRunner ?? new ProcessExternalCommandRunner();
 
@@ -78,6 +82,8 @@ public sealed class WeChatLocalReaderService
         {
             _readerExePath = exePath;
         }
+
+        _databaseKeyProvider = databaseKeyProvider ?? CreateDefaultNativeKeyProvider();
     }
 
     /// <summary>配置文件路径（config.json）。</summary>
@@ -173,14 +179,54 @@ public sealed class WeChatLocalReaderService
     }
 
     /// <summary>
-    /// 提取微信 DB Key：调用 wx_key PowerShell 探测脚本从微信进程内存扫描密钥。
-    /// 前置条件：探测脚本存在、wx_key.dll 已解压、微信进程正在运行。
-    /// 成功后更新 ExternalKeyFile，失败时填充 _lastError 并返回 null。
+    /// 提取微信 DB Key：默认通过独立 C# KeyProbe 和受限命名管道获取；
+    /// 显式传入旧脚本时保留 PowerShell/Key 文件兼容路径。
+    /// 成功后只在兼容路径更新 ExternalKeyFile，失败时填充 _lastError 并返回 null。
     /// </summary>
     public async Task<WeChatDatabaseKeyExtractionResult?> ExtractDatabaseKeyAsync(
         WeChatDatabaseKeyExtractionOptions options,
         CancellationToken cancellationToken)
     {
+        // 显式传入旧脚本时保留兼容测试/回退；默认优先使用隔离的 C# KeyProbe。
+        if (options.ScriptPath is null && _databaseKeyProvider is not null)
+        {
+            ImportedDatabaseKey = null;
+            var nativeTargetPid = options.TargetProcessId ?? FindWeixinTargetProcessId();
+            if (nativeTargetPid is null)
+            {
+                _lastError = "未找到 Weixin 进程，请先登录并打开微信。";
+                return null;
+            }
+
+            try
+            {
+                using var keyLease = await _databaseKeyProvider.AcquireAsync(
+                    new WeChatDatabaseKeyRequest(
+                        nativeTargetPid.Value,
+                        TimeSpan.FromSeconds(Math.Clamp(options.Seconds, 1, 600))),
+                    cancellationToken);
+                ImportedDatabaseKey = keyLease.ToHexString();
+                ExternalKeyFile = null;
+                _lastError = null;
+                _isInitialized = null;
+                return new WeChatDatabaseKeyExtractionResult(
+                    nativeTargetPid.Value,
+                    KeyPath: null,
+                    LogPath: null,
+                    Provider: _databaseKeyProvider.Name);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                ImportedDatabaseKey = null;
+                _lastError = $"DB Key 提取失败：{SanitizeKeyDiagnostic(exception.Message)}";
+                return null;
+            }
+        }
+
         var scriptPath = options.ScriptPath ?? FindWxKeyProbeScript();
         if (string.IsNullOrWhiteSpace(scriptPath) || !File.Exists(scriptPath))
         {
@@ -244,7 +290,11 @@ public sealed class WeChatLocalReaderService
         ExternalKeyFile = keyPath;
         _lastError = null;
         _isInitialized = null;
-        return new WeChatDatabaseKeyExtractionResult(targetPid.Value, keyPath, logPath);
+        return new WeChatDatabaseKeyExtractionResult(
+            targetPid.Value,
+            keyPath,
+            logPath,
+            Provider: "legacy-powershell");
     }
 
     /// <summary>
@@ -330,12 +380,14 @@ public sealed class WeChatLocalReaderService
     {
         if (IsInitialized)
         {
+            ImportedDatabaseKey = null;
             return true;
         }
 
         if (!IsAvailable)
         {
             _lastError = "WeChat local reader is not installed. Run the setup first.";
+            ImportedDatabaseKey = null;
             return false;
         }
 
@@ -343,6 +395,7 @@ public sealed class WeChatLocalReaderService
         if (dbDir is null)
         {
             _lastError = "Could not find WeChat data directory (db_storage). Ensure WeChat is running.";
+            ImportedDatabaseKey = null;
             return false;
         }
 
@@ -417,6 +470,11 @@ public sealed class WeChatLocalReaderService
             _lastError = $"Failed to run reader init: {ex.Message}";
             _isInitialized = false;
             return false;
+        }
+        finally
+        {
+            // 过渡期 Python reader 仍通过环境变量接收 Key；子进程结束后立即释放服务内引用。
+            ImportedDatabaseKey = null;
         }
     }
 
@@ -745,6 +803,73 @@ public sealed class WeChatLocalReaderService
         return File.Exists(candidate) ? candidate : null;
     }
 
+    /// <summary>构造默认原生 Provider；未找到 KeyProbe 或 DLL 时保留旧 PowerShell 回退。</summary>
+    private static IWeChatDatabaseKeyProvider? CreateDefaultNativeKeyProvider()
+    {
+        var keyProbePath = FindKeyProbeExecutable();
+        var dllPath = FindWxKeyDllPath();
+        return keyProbePath is not null && dllPath is not null
+            ? new NativeHookKeyProvider(keyProbePath, dllPath)
+            : null;
+    }
+
+    /// <summary>优先定位安装目录中的 KeyProbe，源码环境再回退到其最新 bin 输出。</summary>
+    private static string? FindKeyProbeExecutable()
+    {
+        var directCandidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "WechatDashboard.KeyProbe.exe"),
+            Path.Combine(ProjectToolPaths.WxKeyToolsDirectory, "WechatDashboard.KeyProbe.exe"),
+            Path.Combine(ProjectToolPaths.WxKeyToolsDirectory, "key-probe", "WechatDashboard.KeyProbe.exe")
+        };
+        var direct = directCandidates.FirstOrDefault(File.Exists);
+        if (direct is not null)
+        {
+            return Path.GetFullPath(direct);
+        }
+
+        var buildRoot = Path.Combine(
+            ProjectToolPaths.ProjectRoot,
+            "src",
+            "WechatDashboard.KeyProbe",
+            "bin");
+        if (!Directory.Exists(buildRoot))
+        {
+            return null;
+        }
+
+        return Directory.EnumerateFiles(
+                buildRoot,
+                "WechatDashboard.KeyProbe.exe",
+                SearchOption.AllDirectories)
+            .Select(path => new FileInfo(path))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .FirstOrDefault()
+            ?.FullName;
+    }
+
+    /// <summary>定位当前已授权 wx_key.dll 的实际文件。</summary>
+    private static string? FindWxKeyDllPath()
+    {
+        var installedCandidate = Path.Combine(
+            ProjectToolPaths.WxKeyToolsDirectory,
+            "wx-key",
+            "wx_key.dll");
+        if (File.Exists(installedCandidate))
+        {
+            return installedCandidate;
+        }
+
+        var legacyDirectory = FindWxKeyDllDirectory();
+        if (legacyDirectory is null)
+        {
+            return null;
+        }
+
+        var legacyCandidate = Path.Combine(legacyDirectory, "wx_key.dll");
+        return File.Exists(legacyCandidate) ? legacyCandidate : null;
+    }
+
     /// <summary>定位 wx_key.dll 目录（wx_key-windows-v2.1.8 解压后的 dll 路径）。</summary>
     private static string? FindWxKeyDllDirectory()
     {
@@ -824,6 +949,17 @@ public sealed class WeChatLocalReaderService
             RegexOptions.CultureInvariant);
     }
 
+    /// <summary>防止原生异常意外把 64 位十六进制 Key 带入 WPF 状态文本。</summary>
+    private static string SanitizeKeyDiagnostic(string value)
+    {
+        var redacted = Regex.Replace(
+            value ?? "",
+            @"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])",
+            "<REDACTED_KEY>",
+            RegexOptions.CultureInvariant);
+        return redacted.Length <= 500 ? redacted : redacted[..500];
+    }
+
     /// <summary>查找可用 PowerShell：依次尝试 pwsh/powershell.exe/powershell，验证可执行。</summary>
     private static string FindPowerShellExecutable()
     {
@@ -880,7 +1016,7 @@ public sealed record WeChatLocalMessagePage(
     int PageNumber,
     int PageSize);
 
-/// <summary>DB Key 提取选项：脚本路径、DLL 目录、输出路径、超时秒数、目标进程 ID。</summary>
+/// <summary>DB Key 提取选项：默认使用原生 Provider；脚本/目录/输出路径仅供旧兼容流程。</summary>
 public sealed record WeChatDatabaseKeyExtractionOptions(
     string? ScriptPath = null,
     string? DllDirectory = null,
@@ -889,8 +1025,9 @@ public sealed record WeChatDatabaseKeyExtractionOptions(
     int Seconds = 300,
     int? TargetProcessId = null);
 
-/// <summary>DB Key 提取结果：目标进程 ID、Key 文件路径、日志路径。</summary>
+/// <summary>DB Key 提取结果：原生路径不落盘，旧路径保留可选 Key/日志文件。</summary>
 public sealed record WeChatDatabaseKeyExtractionResult(
     int TargetProcessId,
-    string KeyPath,
-    string LogPath);
+    string? KeyPath,
+    string? LogPath,
+    string Provider);

@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WechatDashboard.App", "src\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WechatDashboard.Tests", "tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj", "{267B19CA-1C91-464D-BDA6-CE168E448F75}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WechatDashboard.KeyProbe", "src\WechatDashboard.KeyProbe\WechatDashboard.KeyProbe.csproj", "{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -85,6 +87,18 @@ Global
 		{267B19CA-1C91-464D-BDA6-CE168E448F75}.Release|x64.Build.0 = Release|Any CPU
 		{267B19CA-1C91-464D-BDA6-CE168E448F75}.Release|x86.ActiveCfg = Release|Any CPU
 		{267B19CA-1C91-464D-BDA6-CE168E448F75}.Release|x86.Build.0 = Release|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Debug|x64.Build.0 = Debug|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Debug|x86.Build.0 = Debug|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Release|x64.ActiveCfg = Release|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Release|x64.Build.0 = Release|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Release|x86.ActiveCfg = Release|Any CPU
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -95,5 +109,6 @@ Global
 		{A4DB307E-26E9-4D17-97FA-204DB83FFECF} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{FE9C3879-5934-4338-A0D4-1E54DBC84754} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{267B19CA-1C91-464D-BDA6-CE168E448F75} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{D2D7C315-9534-4CF1-90C2-DA0979E35CD9} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

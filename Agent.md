@@ -22,7 +22,7 @@ Current verified state:
 - The chart dashboard supports project, time and group-name dimensions with bar, ring and line presentation. Followed projects can contain multiple matching keywords and merge multiple chats into one project bucket.
 - Todo workbench implementation is present in the current working tree: arbitrary persisted messages can become idempotent Todos, active items are grouped into overdue/today/upcoming/undated, detail editing and persisted reminders/snooze history are wired, and Todo detail can locate the original message context.
 - Verification on 2026-08-09: the standard solution build and WPF independent-output build both succeeded with 0 warnings and 0 errors; all 39 .NET regression tests passed. Use the independent output only while a Visual Studio debug process locks the default app DLLs.
-- Python verification still runs 47 tests with 1 failing expectation in `test_read_messages_aggregates_across_shards`: implementation sorts newest-first, while the test expects the older Alice row first. This is unchanged from the pre-transaction baseline and remains the next test-baseline task.
+- Python verification now passes all 47 tests. The stale `test_read_messages_aggregates_across_shards` assertion was updated to the documented newest-first `(sentAt, id)` contract without changing production sorting.
 
 Target architecture decision (2026-08-11; not yet the current implementation):
 
@@ -32,6 +32,14 @@ Target architecture decision (2026-08-11; not yet the current implementation):
 - KeyProbe will transfer the key through a random current-user-only named pipe. Keys must not appear in arguments, environment variables, stdout/stderr, logs, normal plaintext files, or the application SQLite database.
 - The C# reader will own multi-database validation, stable DB/WAL/SHM snapshots, SQLCipher V4 access or managed page decryption, `SessionTable`/`Name2Id`/`Msg_<md5>` reads, zstd/XML decoding, pagination, and incremental offsets.
 - Python remains only as a migration compatibility path and golden oracle. Remove Python, PyInstaller artifacts, `.py` files, PowerShell probing, and plaintext key files from Release only after parity and clean-machine acceptance.
+
+Native-reader implementation checkpoint (2026-08-11):
+
+- Added the x64 `WechatDashboard.KeyProbe` project, strict non-secret argument parsing, dynamic `wx_key.dll` exports, sanitized JSON status, and key delivery over a current-user-only random named pipe.
+- Added `IWeChatDatabaseKeyProvider`, a zeroing `WeChatDatabaseKeyLease`, and `NativeHookKeyProvider`; `WeChatLocalReaderService` prefers this provider when KeyProbe is available and keeps the PowerShell path only as an explicit compatibility fallback.
+- WPF no longer requires a plaintext Key file after native extraction and preserves the in-memory key until compatibility Python initialization starts; that environment-variable handoff is transitional and is cleared after init.
+- Verification: full Debug/Release solution builds pass with 0 warnings/0 errors, all 44 .NET tests pass, all 47 Python tests pass, and KeyProbe invalid-argument/missing-DLL smoke tests return sanitized JSON.
+- No real Weixin process Hook was executed in this checkpoint because each real extraction requires explicit per-run authorization. C# SQLCipher/schema/zstd reading, install/data-root separation, Release staging, signing, and clean-machine acceptance remain open.
 
 Sensitive state:
 

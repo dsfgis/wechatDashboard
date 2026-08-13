@@ -275,6 +275,14 @@ Reference reviewed on 2026-06-10:
 - [ ] Step 15: Validate on a clean Windows x64 machine with no Python and no Python `PATH`; after acceptance, remove Python, PowerShell probing, plaintext key files, and PyInstaller artifacts from Release packaging.
 - [ ] Step 16: Archive `wx_key.dll` authorization evidence, source, version, SHA-256, dependency list, security scan, and Authenticode signing results for the exact released binary.
 
+Implementation checkpoint (2026-08-11):
+
+- Implemented the first migration slice: x64 `WechatDashboard.KeyProbe`, dynamic `wx_key.dll` loading, sanitized status, current-user-only random named-pipe delivery, `IWeChatDatabaseKeyProvider`, zeroing key lease, `NativeHookKeyProvider`, WPF/service integration, and explicit legacy PowerShell fallback.
+- Restored the Python golden oracle to 47/47 by correcting the stale cross-shard expectation to the established newest-first contract; production reader ordering was not changed.
+- Debug/Release solution builds pass with 0 warnings/0 errors and all 44 .NET regression tests pass. No-secret invalid-argument and missing-DLL KeyProbe smoke tests also pass.
+- Step 5 is code-complete for the non-live path but remains unchecked until an explicitly authorized real Weixin Hook test validates the actual DLL exports, architecture, timeout, cleanup, and named-pipe delivery.
+- Steps 6-16 remain open. The compatibility Python reader still receives the in-memory key through a temporary child-process environment entry; this must disappear when the C# reader takes over.
+
 ## Milestone 3: Capture Source Settings UI
 
 Purpose: let the user enable, disable, and inspect capture sources without editing code.

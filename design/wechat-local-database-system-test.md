@@ -37,6 +37,8 @@
 4. Release 安装包不包含 Python、PyInstaller 产物、`.py` 文件或 PowerShell Key 探测脚本。
 5. 程序和只读工具位于安装目录；数据库、设置、日志、DPAPI 材料和快照位于 `%LocalAppData%\WechatDashboard`。
 6. 每个发布版本归档实际 `wx_key.dll` 的授权凭据、来源、版本、SHA-256、依赖清单和安全扫描结果。
+
+当前开发检查点（2026-08-11）：KeyProbe、命名管道、Provider 和 WPF兼容接入已经实现；Debug/Release 全解决方案构建均为 0 警告/0 错误，.NET 44/44、Python 47/47。尚未执行真实微信 Hook，也尚未实现 C# 数据库读取和无 Python 安装包，因此不能按第 13.2 节判定最终通过。
 ## 2. 安全边界
 
 测试过程中不要把以下内容复制到聊天、日志或 Git：

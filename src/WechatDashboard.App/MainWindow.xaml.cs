@@ -403,8 +403,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            ExternalKeyFileTextBox.Text = result.KeyPath;
-            SummaryText = $"DB Key 提取成功（微信 PID {result.TargetProcessId}），Key 文件已写入 tools/result。点击\"初始化本地库\"继续。";
+            if (result.KeyPath is not null)
+            {
+                ExternalKeyFileTextBox.Text = result.KeyPath;
+                SummaryText = $"DB Key 提取成功（微信 PID {result.TargetProcessId}），已生成兼容 Key 文件。点击\"初始化本地库\"继续。";
+            }
+            else
+            {
+                ExternalKeyFileTextBox.Text = "";
+                SummaryText = $"DB Key 提取成功（微信 PID {result.TargetProcessId}），密钥已通过受保护通道送达。点击\"初始化本地库\"继续。";
+            }
         }
         finally
         {
@@ -456,7 +464,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _readerService.BootstrapRange = tag;
         }
 
-        _readerService.ImportedDatabaseKey = ImportedDatabaseKeyBox?.Password;
+        var manuallyImportedKey = ImportedDatabaseKeyBox?.Password;
+        if (!string.IsNullOrWhiteSpace(manuallyImportedKey))
+        {
+            _readerService.ImportedDatabaseKey = manuallyImportedKey;
+        }
         _readerService.ExternalKeyCommand = ExternalKeyCommandTextBox?.Text;
         _readerService.ExternalKeyFile = ExternalKeyFileTextBox?.Text;
     }

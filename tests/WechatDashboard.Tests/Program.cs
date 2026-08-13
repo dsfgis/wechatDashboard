@@ -11,6 +11,7 @@ using WechatDashboard.Domain.Enums;
 using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Background;
 using WechatDashboard.Infrastructure.Persistence;
+using WechatDashboard.KeyProbe;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -47,6 +48,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("WeChat local export adapter captures local database export messages incrementally", TestWeChatLocalExportCaptureAdapterAsync),
     ("WeChat local command adapter captures structured messages and passes offsets", TestWeChatLocalCommandCaptureAdapterAsync),
     ("WeChat local command adapter exposes staged diagnostics from reader", TestWeChatLocalCommandStagedDiagnosticsAsync),
+    ("KeyProbe options accept only non-sensitive bounded arguments", TestKeyProbeOptionsAsync),
+    ("Native hook provider rejects missing binaries before process access", TestNativeHookKeyProviderRejectsMissingBinariesAsync),
+    ("WeChat local reader service extracts DB key through native provider", TestWeChatLocalReaderServiceExtractsNativeDatabaseKeyAsync),
     ("WeChat local reader service extracts DB key through PowerShell probe", TestWeChatLocalReaderServiceExtractsDatabaseKeyAsync),
     ("WeChat local reader service reads today messages with paging", TestWeChatLocalReaderServiceReadsPagedMessagesAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
@@ -198,7 +202,8 @@ static async Task TestManualMessageToTodoAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
     Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
-    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
 
     var messageRepository = new SqliteMessageRepository(databasePath);
     var todoRepository = new SqliteTodoRepository(databasePath);
@@ -1414,6 +1419,105 @@ static async Task TestWeChatLocalReaderServiceExtractsDatabaseKeyAsync()
     AssertTrue(probeArguments.Contains(keyPath), "Probe should write to the configured key file.");
     AssertTrue(probeArguments.Contains("-LogPath"), "Probe should receive LogPath.");
     AssertTrue(probeArguments.Contains(logPath), "Probe should write logs to the configured log path.");
+    AssertEqual("legacy-powershell", result.Provider, "Explicit script options should keep the compatibility provider.");
+}
+
+static Task TestKeyProbeOptionsAsync()
+{
+    var dllPath = Path.Combine(Path.GetTempPath(), "wx key", "wx_key.dll");
+    var parsed = KeyProbeOptions.TryParse(
+        new[]
+        {
+            "--pid", "1234",
+            "--pipe-name", "WechatDashboard.KeyProbe.test-1",
+            "--dll-path", dllPath,
+            "--timeout-seconds", "45"
+        },
+        out var options,
+        out var error);
+
+    AssertTrue(parsed, $"Valid KeyProbe arguments should parse: {error}");
+    AssertNotNull(options, "Parsed KeyProbe options should be returned.");
+    AssertEqual(1234, options!.ProcessId, "PID should round-trip.");
+    AssertEqual("WechatDashboard.KeyProbe.test-1", options.PipeName, "Pipe name should round-trip.");
+    AssertEqual(Path.GetFullPath(dllPath), options.DllPath, "DLL path should normalize without exposing a key.");
+    AssertEqual(TimeSpan.FromSeconds(45), options.Timeout, "Timeout should round-trip.");
+
+    var rejected = KeyProbeOptions.TryParse(
+        new[]
+        {
+            "--pid", "1234",
+            "--pipe-name", "invalid\\pipe",
+            "--dll-path", dllPath,
+            "--timeout-seconds", "45"
+        },
+        out _,
+        out _);
+    AssertFalse(rejected, "Pipe names containing separators must be rejected.");
+
+    var unknownRejected = KeyProbeOptions.TryParse(
+        new[]
+        {
+            "--pid", "1234",
+            "--pipe-name", "WechatDashboard.KeyProbe.test-1",
+            "--dll-path", dllPath,
+            "--timeout-seconds", "45",
+            "--db-key", new string('a', 64)
+        },
+        out _,
+        out _);
+    AssertFalse(unknownRejected, "Unknown arguments must be rejected so secrets cannot be added to the command line.");
+    return Task.CompletedTask;
+}
+
+static async Task TestWeChatLocalReaderServiceExtractsNativeDatabaseKeyAsync()
+{
+    var fixtureKey = Enumerable.Repeat((byte)0xAB, WeChatDatabaseKeyLease.KeyLength).ToArray();
+    var provider = new FakeWeChatDatabaseKeyProvider(fixtureKey);
+    var service = new WeChatLocalReaderService(
+        new FakeExternalCommandRunner(new ExternalCommandResult(0, "", "")),
+        provider);
+
+    var result = await service.ExtractDatabaseKeyAsync(
+        new WeChatDatabaseKeyExtractionOptions(Seconds: 12, TargetProcessId: 4321),
+        CancellationToken.None);
+
+    AssertNotNull(result, "Native provider should return a DB key extraction result.");
+    AssertEqual("native-hook", result!.Provider, "Result should identify the native provider.");
+    AssertEqual(4321, result.TargetProcessId, "Configured target PID should reach the native provider.");
+    AssertTrue(result.KeyPath is null, "Native extraction must not create a plaintext key file.");
+    AssertTrue(result.LogPath is null, "Native extraction must not expose a key probe log path.");
+    AssertNotNull(provider.LastRequest, "Native provider should receive an acquisition request.");
+    AssertEqual(4321, provider.LastRequest!.ProcessId, "Provider request should carry the target PID.");
+    AssertEqual(TimeSpan.FromSeconds(12), provider.LastRequest.Timeout, "Provider request should carry the bounded timeout.");
+    AssertEqual(string.Concat(Enumerable.Repeat("ab", 32)), service.ImportedDatabaseKey!, "Transitional reader init should receive the fixture key in memory.");
+    service.ImportedDatabaseKey = null;
+}
+
+static async Task TestNativeHookKeyProviderRejectsMissingBinariesAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+    var provider = new NativeHookKeyProvider(
+        Path.Combine(root, "WechatDashboard.KeyProbe.exe"),
+        Path.Combine(root, "wx_key.dll"));
+    var rejected = false;
+    try
+    {
+        using var _ = await provider.AcquireAsync(
+            new WeChatDatabaseKeyRequest(1234, TimeSpan.FromSeconds(1)),
+            CancellationToken.None);
+    }
+    catch (FileNotFoundException exception)
+    {
+        rejected = true;
+        AssertFalse(
+            System.Text.RegularExpressions.Regex.IsMatch(
+                exception.Message,
+                "(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])"),
+            "Missing-binary diagnostics must not contain a key-shaped value.");
+    }
+
+    AssertTrue(rejected, "Native provider must fail before process access when KeyProbe is missing.");
 }
 
 static async Task TestWeChatLocalReaderServiceReadsPagedMessagesAsync()
@@ -1867,6 +1971,28 @@ public sealed class FakeExternalCommandRunner : IExternalCommandRunner
         LastEnvironment = environment;
         _onRun?.Invoke(executablePath, LastArguments, workingDirectory, environment);
         return Task.FromResult(_result);
+    }
+}
+
+public sealed class FakeWeChatDatabaseKeyProvider : IWeChatDatabaseKeyProvider
+{
+    private readonly byte[] _keyBytes;
+
+    public FakeWeChatDatabaseKeyProvider(ReadOnlySpan<byte> keyBytes)
+    {
+        _keyBytes = keyBytes.ToArray();
+    }
+
+    public string Name => "native-hook";
+
+    public WeChatDatabaseKeyRequest? LastRequest { get; private set; }
+
+    public Task<WeChatDatabaseKeyLease> AcquireAsync(
+        WeChatDatabaseKeyRequest request,
+        CancellationToken cancellationToken)
+    {
+        LastRequest = request;
+        return Task.FromResult(new WeChatDatabaseKeyLease(_keyBytes));
     }
 }
 
