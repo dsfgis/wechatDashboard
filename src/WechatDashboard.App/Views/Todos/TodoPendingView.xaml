@@ -68,23 +68,53 @@
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
                 <Expander IsExpanded="True" Margin="0,0,0,8">
-                    <Expander.Header><TextBlock Foreground="#D97706" FontWeight="SemiBold"><Run Text="已置顶（"/><Run Text="{Binding Pinned.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="已置顶（"/><Run Text="{Binding Pinned.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Pinned}" />
+                        </StackPanel>
+                    </Expander.Header>
                     <ItemsControl ItemsSource="{Binding Pinned}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
                 <Expander IsExpanded="True" Margin="0,0,0,8">
-                    <Expander.Header><TextBlock Foreground="#DC2626" FontWeight="SemiBold"><Run Text="已逾期（"/><Run Text="{Binding Overdue.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Foreground="#DC2626" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="已逾期（"/><Run Text="{Binding Overdue.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Overdue}" />
+                        </StackPanel>
+                    </Expander.Header>
                     <ItemsControl ItemsSource="{Binding Overdue}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
                 <Expander IsExpanded="True" Margin="0,0,0,8">
-                    <Expander.Header><TextBlock Foreground="#D97706" FontWeight="SemiBold"><Run Text="今日到期（"/><Run Text="{Binding DueToday.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="今日到期（"/><Run Text="{Binding DueToday.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding DueToday}" />
+                        </StackPanel>
+                    </Expander.Header>
                     <ItemsControl ItemsSource="{Binding DueToday}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
                 <Expander IsExpanded="True" Margin="0,0,0,8">
-                    <Expander.Header><TextBlock FontWeight="SemiBold"><Run Text="后续到期（"/><Run Text="{Binding Upcoming.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="后续到期（"/><Run Text="{Binding Upcoming.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Upcoming}" />
+                        </StackPanel>
+                    </Expander.Header>
                     <ItemsControl ItemsSource="{Binding Upcoming}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
                 <Expander IsExpanded="True">
-                    <Expander.Header><TextBlock FontWeight="SemiBold"><Run Text="无截止时间（"/><Run Text="{Binding NoDueDate.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock></Expander.Header>
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="无截止时间（"/><Run Text="{Binding NoDueDate.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding NoDueDate}" />
+                        </StackPanel>
+                    </Expander.Header>
                     <ItemsControl ItemsSource="{Binding NoDueDate}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
             </StackPanel>

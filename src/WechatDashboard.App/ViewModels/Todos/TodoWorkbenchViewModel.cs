@@ -48,6 +48,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         CompleteCommand = new AsyncRelayCommand(CompleteAsync, parameter => parameter is TodoListItemViewModel);
         TogglePinCommand = new AsyncRelayCommand(TogglePinAsync, parameter => parameter is TodoListItemViewModel);
         SelectAllCommand = new RelayCommand(_ => ToggleSelectAll(), _ => ActiveCount > 0);
+        SelectCategoryCommand = new RelayCommand(SelectCategory, CanSelectCategory);
         CompleteSelectedCommand = new AsyncRelayCommand(_ => CompleteSelectedAsync(), _ => SelectedCount > 0);
         ClearCompletedCommand = new AsyncRelayCommand(_ => ClearCompletedAsync(), _ => Completed.Count > 0);
     }
@@ -63,6 +64,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     public AsyncRelayCommand CompleteCommand { get; }
     public AsyncRelayCommand TogglePinCommand { get; }
     public RelayCommand SelectAllCommand { get; }
+    public RelayCommand SelectCategoryCommand { get; }
     public AsyncRelayCommand CompleteSelectedCommand { get; }
     public AsyncRelayCommand ClearCompletedCommand { get; }
 
@@ -190,6 +192,24 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         UpdateSelectionState();
     }
 
+    private static bool CanSelectCategory(object? parameter) =>
+        parameter is IEnumerable<TodoListItemViewModel> rows && rows.Any();
+
+    private void SelectCategory(object? parameter)
+    {
+        if (parameter is not IEnumerable<TodoListItemViewModel> rows)
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            row.IsSelected = true;
+        }
+
+        UpdateSelectionState();
+    }
+
     private async Task CompleteSelectedAsync()
     {
         var selectedIds = ActiveRows().Where(row => row.IsSelected).Select(row => row.Id).Distinct().ToArray();
@@ -257,6 +277,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         OnPropertyChanged(nameof(SelectAllButtonText));
         CompleteSelectedCommand.RaiseCanExecuteChanged();
         SelectAllCommand.RaiseCanExecuteChanged();
+        SelectCategoryCommand.RaiseCanExecuteChanged();
     }
 }
 

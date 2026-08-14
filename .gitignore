@@ -11,3 +11,12 @@ __pycache__/
 *.db-wal
 tools/result/
 .ai-code-tracker.json
+
+# Local Codex-generated and scratch artifacts
+/.codex-school-list.jpg
+/.codex_tmp/
+/=
+/design/project-summary.md
+/fix_school_excel.mjs
+/patch_test.txt
+/school_excel_builder.mjs
