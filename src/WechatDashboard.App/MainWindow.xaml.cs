@@ -112,7 +112,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 SidebarNavigation.SelectedItem = SidebarNavigation.Items
                     .OfType<ListBoxItem>()
                     .FirstOrDefault(item => item.Tag?.ToString() == tabIndex.ToString());
-            });
+            },
+            async () => await RefreshAsync());
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;

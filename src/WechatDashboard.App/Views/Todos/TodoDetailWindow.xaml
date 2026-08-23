@@ -22,6 +22,10 @@
                     <ComboBox ItemsSource="{Binding Statuses}" SelectedItem="{Binding Status}" Margin="0,4,0,0" />
                 </StackPanel>
             </Grid>
+            <TextBlock Text="分组" Foreground="#6B7280" />
+            <ComboBox ItemsSource="{Binding GroupOptions}" DisplayMemberPath="Name"
+                      SelectedItem="{Binding SelectedGroup}" IsEnabled="{Binding IsGroupEditable}"
+                      Margin="0,4,0,12" />
             <TextBlock Text="截止时间（yyyy-MM-dd HH:mm，留空表示无截止时间）" Foreground="#6B7280" />
             <TextBox Text="{Binding DueAtText, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8" />
             <WrapPanel Margin="0,0,0,16">

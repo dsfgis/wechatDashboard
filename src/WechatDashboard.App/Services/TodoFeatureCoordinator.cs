@@ -24,16 +24,19 @@ public sealed class TodoFeatureCoordinator : IDisposable
         Func<IReadOnlyList<string>> aliases,
         Func<IReadOnlyList<string>> followedChats,
         Func<FollowedChatFilterMode> filterMode,
-        Action<int> selectTab)
+        Action<int> selectTab,
+        Func<Task> onTodoCreated)
     {
         _selectTab = selectTab;
         var clock = SystemClock.Instance;
         var todoRepository = new SqliteTodoRepository(databasePath);
         var messageRepository = new SqliteMessageRepository(databasePath);
         var reminderRepository = new SqliteReminderRepository(databasePath);
+        var groupRepository = new SqliteTodoGroupRepository(databasePath);
         var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
         var todoService = new TodoApplicationService(unitOfWork, clock);
         var reminderService = new ReminderApplicationService(unitOfWork, clock);
+        var groupService = new TodoGroupApplicationService(groupRepository, clock);
         var dialogs = new TodoDialogService();
         Workbench = new TodoWorkbenchViewModel(
             todoRepository,
@@ -41,10 +44,12 @@ public sealed class TodoFeatureCoordinator : IDisposable
             reminderRepository,
             todoService,
             reminderService,
+            groupService,
             new TodoDueBucketPolicy(TimeZoneInfo.Local),
             clock,
             dialogs,
-            NavigateToMessageAsync);
+            NavigateToMessageAsync,
+            onTodoCreated);
         MessageFeed = new MessageFeedViewModel(
             messageRepository,
             todoService,

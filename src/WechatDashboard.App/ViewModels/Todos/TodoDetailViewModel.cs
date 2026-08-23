@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using WechatDashboard.App.Presentation;
 using WechatDashboard.App.Services;
 using WechatDashboard.Application.Common;
@@ -11,6 +12,7 @@ namespace WechatDashboard.App.ViewModels.Todos;
 public sealed class TodoDetailViewModel : ObservableObject
 {
     private readonly TodoApplicationService _todoService;
+    private readonly TodoGroupApplicationService _groupService;
     private readonly ReminderApplicationService _reminderService;
     private readonly IReminderRepository _reminders;
     private readonly IClock _clock;
@@ -28,10 +30,12 @@ public sealed class TodoDetailViewModel : ObservableObject
     private int _reminderHour;
     private int _reminderMinute;
     private string _statusText = "";
+    private TodoGroupOption _selectedGroup = TodoGroupOption.Ungrouped;
 
     public TodoDetailViewModel(
         TodoListItemViewModel row,
         TodoApplicationService todoService,
+        TodoGroupApplicationService groupService,
         ReminderApplicationService reminderService,
         IReminderRepository reminders,
         IClock clock,
@@ -42,6 +46,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         _todo = row.Todo;
         _currentReminder = row.Reminder;
         _todoService = todoService;
+        _groupService = groupService;
         _reminderService = reminderService;
         _reminders = reminders;
         _clock = clock;
@@ -61,7 +66,10 @@ public sealed class TodoDetailViewModel : ObservableObject
         SourceChatName = row.SourceChatName;
         SenderName = row.SenderName;
         SentAt = row.SentAt;
-        OriginalContent = row.SourceMessage?.Content ?? "原始消息已不存在";
+        OriginalContent = row.SourceMessage?.Content ?? (row.Todo.SourceMessageId is null
+            ? row.Todo.Description ?? row.Todo.Title
+            : "原始消息已不存在");
+        GroupName = row.GroupName;
         SaveCommand = new AsyncRelayCommand(_ => SaveAsync());
         ScheduleReminderCommand = new AsyncRelayCommand(_ => ScheduleReminderAsync());
         SnoozeTenMinutesCommand = new AsyncRelayCommand(_ => SnoozeAsync(TimeSpan.FromMinutes(10)));
@@ -74,6 +82,7 @@ public sealed class TodoDetailViewModel : ObservableObject
     public event EventHandler? RequestClose;
     public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
     public IReadOnlyList<TodoStatus> Statuses { get; } = Enum.GetValues<TodoStatus>();
+    public ObservableCollection<TodoGroupOption> GroupOptions { get; } = new();
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
@@ -89,6 +98,14 @@ public sealed class TodoDetailViewModel : ObservableObject
     public string SenderName { get; }
     public string SentAt { get; }
     public string OriginalContent { get; }
+    public string GroupName { get; private set; }
+    public bool IsGroupEditable => Status is TodoStatus.Pending or TodoStatus.InProgress or TodoStatus.Waiting;
+
+    public TodoGroupOption SelectedGroup
+    {
+        get => _selectedGroup;
+        set => SetProperty(ref _selectedGroup, value);
+    }
 
     public string Title
     {
@@ -111,7 +128,13 @@ public sealed class TodoDetailViewModel : ObservableObject
     public TodoStatus Status
     {
         get => _status;
-        set => SetProperty(ref _status, value);
+        set
+        {
+            if (SetProperty(ref _status, value))
+            {
+                OnPropertyChanged(nameof(IsGroupEditable));
+            }
+        }
     }
 
     public string DueAtText
@@ -148,6 +171,29 @@ public sealed class TodoDetailViewModel : ObservableObject
         private set => SetProperty(ref _statusText, value);
     }
 
+    public async Task LoadGroupsAsync()
+    {
+        try
+        {
+            var groups = await _groupService.GetAllAsync(CancellationToken.None);
+            GroupOptions.Clear();
+            GroupOptions.Add(TodoGroupOption.Ungrouped);
+            foreach (var group in groups)
+            {
+                GroupOptions.Add(new TodoGroupOption(group.Id, group.Name));
+            }
+
+            SelectedGroup = GroupOptions.FirstOrDefault(item => item.Id == _todo.GroupId) ?? TodoGroupOption.Ungrouped;
+        }
+        catch (Exception)
+        {
+            GroupOptions.Clear();
+            GroupOptions.Add(new TodoGroupOption(_todo.GroupId, GroupName));
+            SelectedGroup = GroupOptions[0];
+            _dialogs.ShowError("分组加载失败，请稍后重新打开详情。", "加载失败");
+        }
+    }
+
     private async Task SaveAsync()
     {
         if (!TryParseOptionalTime(DueAtText, out var dueAt))
@@ -157,15 +203,27 @@ public sealed class TodoDetailViewModel : ObservableObject
         }
 
         var updated = await _todoService.UpdateAsync(
-            new UpdateTodoRequest(_todo.Id, Title, Description, _todo.ProjectId, Priority, dueAt, Status, _todo.UpdatedAt),
+            new UpdateTodoRequest(
+                _todo.Id,
+                Title,
+                Description,
+                _todo.ProjectId,
+                Priority,
+                dueAt,
+                Status,
+                _todo.UpdatedAt,
+                SelectedGroup.Id),
             CancellationToken.None);
         if (updated is null)
         {
-            _dialogs.ShowError("待办已被其他操作修改，请关闭详情并重新打开。", "保存冲突");
+            await LoadGroupsAsync();
+            _dialogs.ShowError("待办已被其他操作修改，或所选分组已不存在。请重新选择后重试。", "保存冲突");
             return;
         }
 
         _todo = updated;
+        GroupName = SelectedGroup.Name;
+        OnPropertyChanged(nameof(GroupName));
         DueAtText = FormatTime(updated.DueAt);
         StatusText = "待办已保存。";
         await _refreshWorkbench();

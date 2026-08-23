@@ -42,6 +42,13 @@ public sealed class SqliteDatabaseInitializer
             checksum: "todo-pinning-v1",
             sql: TodoPinningMigrationSql,
             cancellationToken);
+        await ApplyMigrationAsync(
+            connection,
+            version: 3,
+            name: "todo-groups",
+            checksum: "todo-groups-v1",
+            sql: TodoGroupsMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -126,6 +133,21 @@ public sealed class SqliteDatabaseInitializer
         ALTER TABLE todo_items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
         CREATE INDEX idx_todo_active_pinned_due
             ON todo_items(status, is_pinned DESC, due_at, updated_at DESC);
+        """;
+
+    private const string TodoGroupsMigrationSql = """
+        CREATE TABLE todo_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(normalized_name)
+        );
+
+        ALTER TABLE todo_items
+            ADD COLUMN group_id INTEGER NULL REFERENCES todo_groups(id);
+
+        CREATE INDEX idx_todo_items_group_id ON todo_items(group_id);
         """;
 
     /// <summary>

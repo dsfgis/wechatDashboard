@@ -11,6 +11,11 @@ public interface ITodoUnitOfWork
         DateTimeOffset now,
         CancellationToken cancellationToken);
 
+    Task<CreateManualTodoResult> CreateManualAsync(
+        CreateManualTodoRequest request,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
     Task<SnoozeReminderResult> SnoozeReminderAsync(
         long reminderId,
         DateTimeOffset snoozeUntil,

@@ -17,10 +17,12 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private readonly IReminderRepository _reminders;
     private readonly TodoApplicationService _todoService;
     private readonly ReminderApplicationService _reminderService;
+    private readonly TodoGroupApplicationService _groupService;
     private readonly TodoDueBucketPolicy _bucketPolicy;
     private readonly IClock _clock;
     private readonly ITodoDialogService _dialogs;
     private readonly Func<long, Task> _navigateToMessage;
+    private readonly Func<Task> _onTodoCreated;
     private string _statusText = "正在加载待办...";
 
     public TodoWorkbenchViewModel(
@@ -29,20 +31,25 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         IReminderRepository reminders,
         TodoApplicationService todoService,
         ReminderApplicationService reminderService,
+        TodoGroupApplicationService groupService,
         TodoDueBucketPolicy bucketPolicy,
         IClock clock,
         ITodoDialogService dialogs,
-        Func<long, Task> navigateToMessage)
+        Func<long, Task> navigateToMessage,
+        Func<Task> onTodoCreated)
     {
         _todos = todos;
         _messages = messages;
         _reminders = reminders;
         _todoService = todoService;
         _reminderService = reminderService;
+        _groupService = groupService;
         _bucketPolicy = bucketPolicy;
         _clock = clock;
         _dialogs = dialogs;
         _navigateToMessage = navigateToMessage;
+        _onTodoCreated = onTodoCreated;
+        AddTodoCommand = new AsyncRelayCommand(_ => AddTodoAsync());
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync());
         OpenDetailCommand = new AsyncRelayCommand(OpenDetailAsync, parameter => parameter is TodoListItemViewModel);
         CompleteCommand = new AsyncRelayCommand(CompleteAsync, parameter => parameter is TodoListItemViewModel);
@@ -60,6 +67,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     public ObservableCollection<TodoListItemViewModel> NoDueDate { get; } = new();
     public ObservableCollection<TodoListItemViewModel> Completed { get; } = new();
     public AsyncRelayCommand RefreshCommand { get; }
+    public AsyncRelayCommand AddTodoCommand { get; }
     public AsyncRelayCommand OpenDetailCommand { get; }
     public AsyncRelayCommand CompleteCommand { get; }
     public AsyncRelayCommand TogglePinCommand { get; }
@@ -126,13 +134,27 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         var viewModel = new TodoDetailViewModel(
             row,
             _todoService,
+            _groupService,
             _reminderService,
             _reminders,
             _clock,
             async () => await RefreshAsync(),
             _navigateToMessage,
             _dialogs);
+        await viewModel.LoadGroupsAsync();
         await _dialogs.ShowAsync(viewModel);
+    }
+
+    private async Task AddTodoAsync()
+    {
+        var viewModel = new TodoCreateViewModel(
+            _todoService,
+            _groupService,
+            _clock,
+            _dialogs,
+            _onTodoCreated);
+        await viewModel.LoadGroupsAsync();
+        await _dialogs.ShowCreateAsync(viewModel);
     }
 
     private async Task CompleteAsync(object? parameter)
@@ -151,7 +173,8 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
                 row.Todo.Priority,
                 row.Todo.DueAt,
                 TodoStatus.Done,
-                row.Todo.UpdatedAt),
+                row.Todo.UpdatedAt,
+                row.Todo.GroupId),
             CancellationToken.None);
         if (updated is null)
         {
@@ -240,6 +263,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private async Task<IReadOnlyList<TodoListItemViewModel>> CreateRowsAsync(IEnumerable<TodoItem> source)
     {
         var todos = source.ToArray();
+        var groupLookup = (await _groupService.GetAllAsync(CancellationToken.None)).ToDictionary(item => item.Id, item => item.Name);
         var messageIds = todos.Where(item => item.SourceMessageId.HasValue).Select(item => item.SourceMessageId!.Value).Distinct().ToArray();
         var messageLookup = (await _messages.GetByIdsAsync(messageIds, CancellationToken.None)).ToDictionary(item => item.Id);
         var rows = new List<TodoListItemViewModel>(todos.Length);
@@ -248,11 +272,15 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             var reminders = await _reminders.GetForTodoAsync(todo.Id, CancellationToken.None);
             var currentReminder = reminders.LastOrDefault(item => item.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching or ReminderStatus.Delivered);
             messageLookup.TryGetValue(todo.SourceMessageId ?? 0, out var message);
+            var groupName = todo.GroupId is { } groupId && groupLookup.TryGetValue(groupId, out var name)
+                ? name
+                : "未分组";
             rows.Add(new TodoListItemViewModel(
                 todo,
                 message,
                 currentReminder,
                 _bucketPolicy.Classify(todo.DueAt, _clock.Now),
+                groupName,
                 UpdateSelectionState));
         }
 
@@ -291,12 +319,14 @@ public sealed class TodoListItemViewModel : ObservableObject
         Message? sourceMessage,
         TodoReminder? reminder,
         TodoDueBucket bucket,
+        string groupName,
         Action selectionChanged)
     {
         Todo = todo;
         SourceMessage = sourceMessage;
         Reminder = reminder;
         Bucket = bucket;
+        GroupName = groupName;
         _selectionChanged = selectionChanged;
     }
 
@@ -304,6 +334,7 @@ public sealed class TodoListItemViewModel : ObservableObject
     public Message? SourceMessage { get; }
     public TodoReminder? Reminder { get; }
     public TodoDueBucket Bucket { get; }
+    public string GroupName { get; }
     public long Id => Todo.Id;
     public bool IsPinned => Todo.IsPinned;
     public string PinButtonText => IsPinned ? "取消置顶" : "置顶";
@@ -323,10 +354,14 @@ public sealed class TodoListItemViewModel : ObservableObject
     public string Title => Todo.Title;
     public string DueAt => Todo.DueAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";
     public string ReminderAt => Reminder?.ScheduledAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";
-    public string Source => SourceMessage is null ? "-" : FormatSource(SourceMessage.Source);
-    public string SourceChatName => SourceMessage?.ChatName ?? "无来源消息";
+    public string Source => Todo.SourceMessageId is null
+        ? "手动添加"
+        : SourceMessage is null ? "来源消息丢失" : FormatSource(SourceMessage.Source);
+    public string SourceChatName => Todo.SourceMessageId is null
+        ? "无来源消息"
+        : SourceMessage?.ChatName ?? "原始消息已不存在";
     public string SenderName => SourceMessage?.SenderName ?? "-";
-    public string MessageContent => SourceMessage?.Content ?? Todo.Title;
+    public string MessageContent => SourceMessage?.Content ?? Todo.Description ?? Todo.Title;
     public string SentAt => SourceMessage?.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";
     public string CompletedAt => Todo.CompletedAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";
 

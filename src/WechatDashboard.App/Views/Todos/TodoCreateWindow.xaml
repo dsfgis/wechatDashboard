@@ -1,0 +1,58 @@
+<Window x:Class="WechatDashboard.App.Views.Todos.TodoCreateWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="添加待办" Width="620" Height="650" MinWidth="560" MinHeight="560"
+        WindowStartupLocation="CenterOwner" Background="#F4F6F8"
+        FocusManager.FocusedElement="{Binding ElementName=TitleTextBox}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="20">
+            <TextBlock Text="添加待办" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16" />
+            <TextBlock Text="标题（必填）" Foreground="#6B7280" />
+            <TextBox x:Name="TitleTextBox" Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8" />
+            <TextBlock Text="备注" Foreground="#6B7280" />
+            <TextBox Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8"
+                     MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap" />
+            <Grid Margin="0,0,0,12">
+                <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
+                <StackPanel Margin="0,0,8,0">
+                    <TextBlock Text="优先级" Foreground="#6B7280" />
+                    <ComboBox ItemsSource="{Binding Priorities}" SelectedItem="{Binding Priority}" Margin="0,4,0,0" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                    <TextBlock Text="分组" Foreground="#6B7280" />
+                    <ComboBox ItemsSource="{Binding GroupOptions}" DisplayMemberPath="Name"
+                              SelectedItem="{Binding SelectedGroup}" Margin="0,4,0,0" />
+                </StackPanel>
+            </Grid>
+            <TextBlock Text="新增分组" Foreground="#6B7280" />
+            <DockPanel Margin="0,4,0,12">
+                <Button DockPanel.Dock="Right" Content="新增并选中" Command="{Binding AddGroupCommand}" Padding="14,6" Margin="8,0,0,0" />
+                <TextBox Text="{Binding NewGroupName, UpdateSourceTrigger=PropertyChanged}" Padding="8" ToolTip="输入自定义待办分组名称" />
+            </DockPanel>
+            <TextBlock Text="截止时间（yyyy-MM-dd HH:mm，留空表示无截止时间）" Foreground="#6B7280" />
+            <TextBox Text="{Binding DueAtText, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8" />
+            <CheckBox Content="创建后设置首次提醒" IsChecked="{Binding HasReminder}" Margin="0,0,0,8" />
+            <Grid Margin="0,0,0,16" IsEnabled="{Binding HasReminder}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <DatePicker SelectedDate="{Binding ReminderDate, UpdateSourceTrigger=PropertyChanged}" MinWidth="150" />
+                <ComboBox Grid.Column="1" ItemsSource="{Binding ReminderHours}" SelectedItem="{Binding ReminderHour}"
+                          ItemStringFormat="{}{0:00}" Width="64" Margin="8,0,4,0" />
+                <TextBlock Grid.Column="2" Text="时" VerticalAlignment="Center" />
+                <ComboBox Grid.Column="3" ItemsSource="{Binding ReminderMinutes}" SelectedItem="{Binding ReminderMinute}"
+                          ItemStringFormat="{}{0:00}" Width="64" Margin="8,0,4,0" />
+                <TextBlock Grid.Column="4" Text="分" VerticalAlignment="Center" />
+            </Grid>
+            <TextBlock Text="{Binding StatusText}" Foreground="#B45309" TextWrapping="Wrap" Margin="0,0,0,12" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Command="{Binding CancelCommand}" IsCancel="True" Padding="16,7" Margin="0,0,8,0" />
+                <Button Content="保存待办" Command="{Binding SaveCommand}" IsDefault="True" Padding="16,7" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Window>

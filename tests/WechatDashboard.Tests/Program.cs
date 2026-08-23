@@ -1,3 +1,6 @@
+using System.IO;
+using WechatDashboard.App.Services;
+using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Capture;
@@ -26,6 +29,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
     ("Message context query locates the source message by stable id", TestMessageContextQueryAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
+    ("Todo group migration preserves existing todos and is idempotent", TestTodoGroupMigrationAsync),
+    ("Todo group migration rolls back when schema creation fails", TestTodoGroupMigrationRollbackAsync),
+    ("Todo groups normalize names and reject duplicates", TestTodoGroupsAsync),
+    ("Manual Todo creation persists a group and optional reminder atomically", TestManualTodoCreationAsync),
+    ("Todo group changes persist through completion", TestTodoGroupLifecycleAsync),
+    ("Manual Todo create view model prevents duplicate submission", TestTodoCreateViewModelAsync),
+    ("Todo rows show groups and truthful manual source", TestTodoRowPresentationAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
     ("Todo repository persists pinning and sorts pinned active todos first", TestTodoPinningAsync),
@@ -938,6 +948,447 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.LocalDatabase"), "Live adapters should include Shihuatong local database adapter.");
 
+    return Task.CompletedTask;
+}
+
+static async Task TestTodoGroupMigrationAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var repository = new SqliteTodoRepository(databasePath);
+    var now = new DateTimeOffset(2026, 8, 23, 9, 0, 0, TimeSpan.FromHours(8));
+    var saved = await repository.SaveAsync(
+        new TodoItem(
+            0,
+            null,
+            null,
+            "迁移前待办",
+            "必须原样保留",
+            TodoStatus.Pending,
+            PriorityLevel.P1,
+            now.AddDays(1),
+            now,
+            now,
+            null,
+            false),
+        CancellationToken.None);
+
+    await initializer.InitializeAsync(CancellationToken.None);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadWrite,
+        Pooling = false
+    }.ToString());
+    await connection.OpenAsync();
+    await using var tableCommand = connection.CreateCommand();
+    tableCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='todo_groups';";
+    AssertEqual(1L, (long)(await tableCommand.ExecuteScalarAsync() ?? 0L), "Migration should create todo_groups exactly once.");
+
+    await using var columnCommand = connection.CreateCommand();
+    columnCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('todo_items') WHERE name='group_id';";
+    AssertEqual(1L, (long)(await columnCommand.ExecuteScalarAsync() ?? 0L), "Migration should add nullable group_id exactly once.");
+
+    await using var migrationCommand = connection.CreateCommand();
+    migrationCommand.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=3 AND name='todo-groups';";
+    AssertEqual(1L, (long)(await migrationCommand.ExecuteScalarAsync() ?? 0L), "Migration v3 should be recorded exactly once.");
+
+    var loaded = await repository.GetByIdAsync(saved.Id, CancellationToken.None);
+    AssertNotNull(loaded, "Existing Todo must remain after migration.");
+    AssertEqual("迁移前待办", loaded!.Title, "Migration must preserve title.");
+    AssertEqual("必须原样保留", loaded.Description, "Migration must preserve description.");
+    AssertEqual(PriorityLevel.P1, loaded.Priority, "Migration must preserve priority.");
+    AssertEqual(now.AddDays(1), loaded.DueAt, "Migration must preserve due time.");
+}
+
+static async Task TestTodoGroupMigrationRollbackAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+
+    await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadWriteCreate,
+        Pooling = false
+    }.ToString()))
+    {
+        await connection.OpenAsync();
+        await using var conflict = connection.CreateCommand();
+        conflict.CommandText = "CREATE TABLE todo_groups (id INTEGER PRIMARY KEY);";
+        await conflict.ExecuteNonQueryAsync();
+    }
+
+    var failed = false;
+    try
+    {
+        await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    }
+    catch (SqliteException)
+    {
+        failed = true;
+    }
+
+    AssertTrue(failed, "A conflicting v3 table should stop initialization.");
+    await using var verification = new SqliteConnection(new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadWrite,
+        Pooling = false
+    }.ToString());
+    await verification.OpenAsync();
+
+    await using var columnCommand = verification.CreateCommand();
+    columnCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('todo_items') WHERE name='group_id';";
+    AssertEqual(0L, (long)(await columnCommand.ExecuteScalarAsync() ?? 0L), "Failed v3 must roll back group_id creation.");
+
+    await using var indexCommand = verification.CreateCommand();
+    indexCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_todo_items_group_id';";
+    AssertEqual(0L, (long)(await indexCommand.ExecuteScalarAsync() ?? 0L), "Failed v3 must not leave its index.");
+
+    await using var migrationCommand = verification.CreateCommand();
+    migrationCommand.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=3;";
+    AssertEqual(0L, (long)(await migrationCommand.ExecuteScalarAsync() ?? 0L), "Failed v3 must not be recorded as applied.");
+}
+
+static async Task TestTodoGroupsAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 8, 23, 9, 15, 0, TimeSpan.FromHours(8));
+    var repository = new SqliteTodoGroupRepository(databasePath);
+    var service = new TodoGroupApplicationService(repository, new FixedClock(now));
+    var created = await service.CreateAsync("  工作  ", CancellationToken.None);
+    var duplicate = await service.CreateAsync("工作", CancellationToken.None);
+    var latin = await service.CreateAsync("Alpha", CancellationToken.None);
+    var latinDuplicate = await service.CreateAsync("alpha", CancellationToken.None);
+    var unicode = await service.CreateAsync("Cafe\u0301", CancellationToken.None);
+    var unicodeDuplicate = await service.CreateAsync("Café", CancellationToken.None);
+    var groups = await service.GetAllAsync(CancellationToken.None);
+
+    AssertEqual(CreateTodoGroupOutcome.Created, created.Outcome, "First normalized group should be created.");
+    AssertEqual("工作", created.Group.Name, "Display name should be trimmed.");
+    AssertEqual(CreateTodoGroupOutcome.Existing, duplicate.Outcome, "Identical normalized group should return existing.");
+    AssertEqual(created.Group.Id, duplicate.Group.Id, "Duplicate should return the persisted group.");
+    AssertEqual(CreateTodoGroupOutcome.Existing, latinDuplicate.Outcome, "Case-only duplicate should return existing.");
+    AssertEqual(latin.Group.Id, latinDuplicate.Group.Id, "Case-only duplicate should keep one row.");
+    AssertEqual(CreateTodoGroupOutcome.Existing, unicodeDuplicate.Outcome, "Unicode-equivalent duplicate should return existing.");
+    AssertEqual(unicode.Group.Id, unicodeDuplicate.Group.Id, "Unicode-equivalent names should keep one row.");
+    AssertEqual(3, groups.Count, "Only three normalized groups should be stored.");
+    AssertEqual("Alpha,Café,工作", string.Join(",", groups.Select(item => item.Name)), "Groups should reload in stable name order.");
+
+    var rejectedBlank = false;
+    try
+    {
+        await service.CreateAsync("   ", CancellationToken.None);
+    }
+    catch (ArgumentException)
+    {
+        rejectedBlank = true;
+    }
+
+    AssertTrue(rejectedBlank, "Blank group names must be rejected before persistence.");
+
+    var concurrentName = $"并发-{Guid.NewGuid():N}";
+    var concurrentResults = await Task.WhenAll(
+        service.CreateAsync(concurrentName, CancellationToken.None),
+        service.CreateAsync(concurrentName, CancellationToken.None));
+    AssertEqual(1, concurrentResults.Count(item => item.Outcome == CreateTodoGroupOutcome.Created), "Concurrent normalized group creation should create one row.");
+    AssertEqual(1, concurrentResults.Count(item => item.Outcome == CreateTodoGroupOutcome.Existing), "Concurrent duplicate should return an existing business result.");
+    AssertEqual(concurrentResults[0].Group.Id, concurrentResults[1].Group.Id, "Concurrent duplicate results should resolve to the same group.");
+}
+
+static async Task TestManualTodoCreationAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 8, 23, 10, 0, 0, TimeSpan.FromHours(8));
+    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), new FixedClock(now));
+    var group = (await groupService.CreateAsync("本周工作", CancellationToken.None)).Group;
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    var reminderAt = now.AddHours(1);
+    var result = await todoService.CreateManualAsync(
+        new CreateManualTodoRequest(
+            "  编写周报  ",
+            "整理本周交付结果",
+            null,
+            now.AddDays(1),
+            reminderAt,
+            group.Id),
+        CancellationToken.None);
+
+    AssertEqual(CreateManualTodoOutcome.Created, result.Outcome, "Valid manual Todo should be created.");
+    AssertNotNull(result.Todo, "Created result should include the Todo.");
+    AssertEqual("编写周报", result.Todo!.Title, "Manual Todo title should be trimmed.");
+    AssertEqual(PriorityLevel.P2, result.Todo.Priority, "Manual Todo should default to P2.");
+    AssertEqual(TodoStatus.Pending, result.Todo.Status, "Manual Todo should start Pending.");
+    AssertEqual<long?>(null, result.Todo.SourceMessageId, "Manual Todo must not fake a source message.");
+    AssertFalse(result.Todo.IsAutoCreated, "Manual Todo must not be marked automatic.");
+    AssertFalse(result.Todo.IsPinned, "Manual Todo should not be pinned by default.");
+    AssertEqual(group.Id, result.Todo.GroupId, "Selected group should persist.");
+
+    var reminders = await new SqliteReminderRepository(databasePath).GetForTodoAsync(result.Todo.Id, CancellationToken.None);
+    AssertEqual(1, reminders.Count, "First reminder should be inserted with the Todo.");
+    AssertEqual(reminderAt, reminders.Single().ScheduledAt, "Reminder time should round-trip.");
+
+    var defaultResult = await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("仅标题", null, null, null, null, null),
+        CancellationToken.None);
+    AssertEqual(CreateManualTodoOutcome.Created, defaultResult.Outcome, "Title-only manual Todo should be valid.");
+    AssertEqual(PriorityLevel.P2, defaultResult.Todo!.Priority, "Title-only manual Todo should default to P2.");
+    AssertEqual(TodoStatus.Pending, defaultResult.Todo.Status, "Title-only manual Todo should start pending.");
+    AssertEqual<long?>(null, defaultResult.Todo.GroupId, "Ungrouped should persist as a null relation.");
+    AssertEqual<long?>(null, defaultResult.Todo.ProjectId, "Manual Todo should not invent a project.");
+    AssertEqual<long?>(null, defaultResult.Todo.SourceMessageId, "Manual Todo should not invent a source message.");
+    AssertEqual<DateTimeOffset?>(null, defaultResult.Todo.DueAt, "Omitted due time should remain null.");
+    AssertFalse(defaultResult.Todo.IsAutoCreated, "Manual Todo should not be marked automatic.");
+    AssertFalse(defaultResult.Todo.IsPinned, "Manual Todo should not be pinned by default.");
+    AssertEqual(0, (await new SqliteReminderRepository(databasePath).GetForTodoAsync(defaultResult.Todo.Id, CancellationToken.None)).Count, "Omitted reminder should not create a reminder row.");
+
+    var missingGroup = await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("无效分组", null, PriorityLevel.P1, null, null, long.MaxValue),
+        CancellationToken.None);
+    AssertEqual(CreateManualTodoOutcome.GroupMissing, missingGroup.Outcome, "Missing group should be a recoverable outcome.");
+    AssertEqual(2, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Missing group must not leave a Todo.");
+
+    await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadWrite,
+        Pooling = false
+    }.ToString()))
+    {
+        await connection.OpenAsync();
+        await using var trigger = connection.CreateCommand();
+        trigger.CommandText = """
+            CREATE TRIGGER fail_manual_reminder
+            BEFORE INSERT ON todo_reminders
+            BEGIN
+                SELECT RAISE(ABORT, 'fixture reminder failure');
+            END;
+            """;
+        await trigger.ExecuteNonQueryAsync();
+    }
+
+    var reminderFailureRaised = false;
+    try
+    {
+        await todoService.CreateManualAsync(
+            new CreateManualTodoRequest("提醒失败回滚", null, PriorityLevel.P2, null, now.AddHours(2), group.Id),
+            CancellationToken.None);
+    }
+    catch (SqliteException)
+    {
+        reminderFailureRaised = true;
+    }
+
+    AssertTrue(reminderFailureRaised, "Injected reminder failure should be observable to the application layer.");
+    AssertEqual(2, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Reminder failure must roll back the Todo insert.");
+}
+
+static async Task TestTodoGroupLifecycleAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 8, 23, 11, 0, 0, TimeSpan.FromHours(8));
+    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), new FixedClock(now));
+    var firstGroup = (await groupService.CreateAsync("工作", CancellationToken.None)).Group;
+    var secondGroup = (await groupService.CreateAsync("个人", CancellationToken.None)).Group;
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    var created = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("生命周期", null, PriorityLevel.P1, null, null, firstGroup.Id),
+        CancellationToken.None)).Todo!;
+
+    var moved = await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            created.Id,
+            created.Title,
+            created.Description,
+            created.ProjectId,
+            created.Priority,
+            created.DueAt,
+            TodoStatus.Pending,
+            created.UpdatedAt,
+            secondGroup.Id),
+        CancellationToken.None);
+    AssertNotNull(moved, "Group change should update the existing Todo.");
+    AssertEqual(secondGroup.Id, moved!.GroupId, "Changed group should round-trip.");
+
+    var cleared = await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            moved.Id,
+            moved.Title,
+            moved.Description,
+            moved.ProjectId,
+            moved.Priority,
+            moved.DueAt,
+            TodoStatus.Pending,
+            moved.UpdatedAt,
+            null),
+        CancellationToken.None);
+    AssertNotNull(cleared, "Group should be clearable without replacing the Todo.");
+    AssertEqual<long?>(null, cleared!.GroupId, "Cleared group should persist as null.");
+
+    var reassigned = await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            cleared.Id,
+            cleared.Title,
+            cleared.Description,
+            cleared.ProjectId,
+            cleared.Priority,
+            cleared.DueAt,
+            TodoStatus.Pending,
+            cleared.UpdatedAt,
+            secondGroup.Id),
+        CancellationToken.None);
+    AssertNotNull(reassigned, "Cleared group should be assignable again.");
+
+    var missingGroupUpdate = await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            reassigned!.Id,
+            reassigned.Title,
+            reassigned.Description,
+            reassigned.ProjectId,
+            reassigned.Priority,
+            reassigned.DueAt,
+            TodoStatus.Pending,
+            reassigned.UpdatedAt,
+            long.MaxValue),
+        CancellationToken.None);
+    AssertEqual<TodoItem?>(null, missingGroupUpdate, "Missing group update should be recoverable rather than leaking a foreign-key exception.");
+    var afterRejectedGroup = await new SqliteTodoRepository(databasePath).GetByIdAsync(reassigned.Id, CancellationToken.None);
+    AssertEqual(secondGroup.Id, afterRejectedGroup!.GroupId, "Rejected group update must leave the persisted group unchanged.");
+
+    var completed = await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            reassigned!.Id,
+            reassigned.Title,
+            reassigned.Description,
+            reassigned.ProjectId,
+            reassigned.Priority,
+            reassigned.DueAt,
+            TodoStatus.Done,
+            reassigned.UpdatedAt,
+            reassigned.GroupId),
+        CancellationToken.None);
+    AssertNotNull(completed, "Todo should complete through the existing lifecycle.");
+    AssertEqual(secondGroup.Id, completed!.GroupId, "Completion must retain the group.");
+    AssertEqual(TodoStatus.Done, completed.Status, "Completion status should persist.");
+}
+
+static async Task TestTodoCreateViewModelAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), clock);
+    var group = (await groupService.CreateAsync("工作", CancellationToken.None)).Group;
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var createdCount = 0;
+    var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var dialogs = new FakeTodoDialogService();
+    var viewModel = new TodoCreateViewModel(
+        todoService,
+        groupService,
+        clock,
+        dialogs,
+        () =>
+        {
+            createdCount++;
+            return Task.CompletedTask;
+        });
+    viewModel.RequestClose += (_, _) => closed.TrySetResult();
+    await viewModel.LoadGroupsAsync();
+    viewModel.Title = "   ";
+    viewModel.SaveCommand.Execute(null);
+    AssertEqual("标题不能为空。", viewModel.StatusText, "Whitespace-only title should keep the form open with a business error.");
+    AssertEqual(0, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Invalid title must not persist a Todo.");
+
+    viewModel.Title = "  手动创建  ";
+    viewModel.Description = "不依赖消息";
+    viewModel.SelectedGroup = viewModel.GroupOptions.Single(item => item.Id == group.Id);
+    viewModel.DueAtText = "2026/08/24";
+    viewModel.SaveCommand.Execute(null);
+    AssertEqual(1, dialogs.Errors.Count, "Non-canonical due time should be rejected before persistence.");
+
+    viewModel.DueAtText = "2026-08-24 13:00";
+    viewModel.HasReminder = true;
+    viewModel.ReminderDate = now.LocalDateTime.Date;
+    viewModel.ReminderHour = now.Hour;
+    viewModel.ReminderMinute = now.Minute;
+    viewModel.SaveCommand.Execute(null);
+    AssertEqual(2, dialogs.Errors.Count, "Reminder at the current time should be rejected.");
+
+    viewModel.ReminderMinute = now.Minute + 5;
+
+    viewModel.SaveCommand.Execute(null);
+    viewModel.SaveCommand.Execute(null);
+    await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    var active = await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None);
+    AssertEqual(1, active.Count, "Rapid duplicate submission should create only one Todo.");
+    AssertEqual("手动创建", active.Single().Title, "Create view model should persist a trimmed title.");
+    AssertEqual(group.Id, active.Single().GroupId, "Create view model should persist the selected group.");
+    var expectedLocalDue = new DateTime(2026, 8, 24, 13, 0, 0, DateTimeKind.Unspecified);
+    AssertEqual(new DateTimeOffset(expectedLocalDue, TimeZoneInfo.Local.GetUtcOffset(expectedLocalDue)), active.Single().DueAt, "Canonical due time should use the local offset.");
+    AssertEqual(1, (await new SqliteReminderRepository(databasePath).GetForTodoAsync(active.Single().Id, CancellationToken.None)).Count, "Valid future reminder should persist.");
+    AssertEqual(1, createdCount, "Successful submission should notify the shell exactly once.");
+}
+
+static Task TestTodoRowPresentationAsync()
+{
+    var now = new DateTimeOffset(2026, 8, 23, 12, 30, 0, TimeSpan.FromHours(8));
+    var manual = new TodoItem(
+        1,
+        null,
+        null,
+        "手动标题",
+        "手动备注",
+        TodoStatus.Pending,
+        PriorityLevel.P2,
+        null,
+        now,
+        now,
+        null,
+        false)
+    {
+        GroupId = 7
+    };
+    var manualRow = new TodoListItemViewModel(
+        manual,
+        null,
+        null,
+        TodoDueBucket.NoDueDate,
+        "工作",
+        () => { });
+    AssertEqual("工作", manualRow.GroupName, "Todo row should display the resolved group.");
+    AssertEqual("手动添加", manualRow.Source, "Source-less Todo should be labelled manual.");
+    AssertEqual("无来源消息", manualRow.SourceChatName, "Manual Todo should not fake a chat.");
+    AssertEqual("手动备注", manualRow.MessageContent, "Manual Todo should display its description.");
+
+    var missingSourceRow = new TodoListItemViewModel(
+        manual with { SourceMessageId = 999 },
+        null,
+        null,
+        TodoDueBucket.NoDueDate,
+        "工作",
+        () => { });
+    AssertEqual("来源消息丢失", missingSourceRow.Source, "Missing source must not be labelled manual.");
+    AssertEqual("原始消息已不存在", missingSourceRow.SourceChatName, "Missing source should be explicit.");
     return Task.CompletedTask;
 }
 
@@ -1994,6 +2445,19 @@ public sealed class FakeWeChatDatabaseKeyProvider : IWeChatDatabaseKeyProvider
         LastRequest = request;
         return Task.FromResult(new WeChatDatabaseKeyLease(_keyBytes));
     }
+}
+
+public sealed class FakeTodoDialogService : ITodoDialogService
+{
+    public List<(string Message, string Title)> Errors { get; } = new();
+
+    public Task ShowAsync(TodoDetailViewModel viewModel) => Task.CompletedTask;
+
+    public Task ShowCreateAsync(TodoCreateViewModel viewModel) => Task.CompletedTask;
+
+    public bool Confirm(string message, string title) => true;
+
+    public void ShowError(string message, string title) => Errors.Add((message, title));
 }
 
 public sealed class FixedClock(DateTimeOffset now) : IClock

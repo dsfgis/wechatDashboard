@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\WechatDashboard.App\WechatDashboard.App.csproj" />
     <ProjectReference Include="..\..\src\WechatDashboard.Application\WechatDashboard.Application.csproj" />
     <ProjectReference Include="..\..\src\WechatDashboard.Domain\WechatDashboard.Domain.csproj" />
     <ProjectReference Include="..\..\src\WechatDashboard.Infrastructure\WechatDashboard.Infrastructure.csproj" />
@@ -12,6 +13,7 @@
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
 
 </Project>

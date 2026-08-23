@@ -32,6 +32,9 @@ public sealed record TodoItem(
     DateTimeOffset? CompletedAt,
     bool IsAutoCreated)
 {
+    /// <summary>用户自定义待办分组；为空表示未分组。</summary>
+    public long? GroupId { get; init; }
+
     /// <summary>是否固定显示在活动待办列表顶部。</summary>
     public bool IsPinned { get; init; }
 }

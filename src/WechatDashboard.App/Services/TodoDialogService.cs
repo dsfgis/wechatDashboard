@@ -13,6 +13,13 @@ public sealed class TodoDialogService : ITodoDialogService
         return Task.CompletedTask;
     }
 
+    public Task ShowCreateAsync(TodoCreateViewModel viewModel)
+    {
+        var window = new TodoCreateWindow(viewModel) { Owner = System.Windows.Application.Current.MainWindow };
+        window.ShowDialog();
+        return Task.CompletedTask;
+    }
+
     public bool Confirm(string message, string title)
     {
         return MessageBox.Show(message, title, MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;

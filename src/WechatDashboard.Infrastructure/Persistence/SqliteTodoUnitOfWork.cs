@@ -69,6 +69,51 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         return new CreateTodoResult(CreateTodoOutcome.Created, savedTodo);
     }
 
+    public async Task<CreateManualTodoResult> CreateManualAsync(
+        CreateManualTodoRequest request,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
+        if (request.GroupId is { } groupId &&
+            await SqliteTodoGroupRepository.GetByIdAsync(connection, transaction, groupId, cancellationToken) is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new CreateManualTodoResult(CreateManualTodoOutcome.GroupMissing, null);
+        }
+
+        var todo = new TodoItem(
+            Id: 0,
+            SourceMessageId: null,
+            ProjectId: null,
+            Title: request.Title,
+            Description: request.Description,
+            Status: TodoStatus.Pending,
+            Priority: request.Priority ?? PriorityLevel.P2,
+            DueAt: request.DueAt,
+            CreatedAt: now,
+            UpdatedAt: now,
+            CompletedAt: null,
+            IsAutoCreated: false)
+        {
+            GroupId = request.GroupId,
+            IsPinned = false
+        };
+        var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
+        if (request.FirstReminderAt is { } reminderAt)
+        {
+            await SqliteReminderRepository.InsertAsync(
+                connection,
+                transaction,
+                NewReminder(savedTodo.Id, reminderAt, parentReminderId: null, now),
+                cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new CreateManualTodoResult(CreateManualTodoOutcome.Created, savedTodo);
+    }
+
     public async Task<SnoozeReminderResult> SnoozeReminderAsync(
         long reminderId,
         DateTimeOffset snoozeUntil,
@@ -119,11 +164,18 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
         await using var transaction = connection.BeginTransaction();
+        if (request.GroupId is { } groupId &&
+            await SqliteTodoGroupRepository.GetByIdAsync(connection, transaction, groupId, cancellationToken) is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
         await using var update = connection.CreateCommand();
         update.Transaction = transaction;
         update.CommandText = """
             UPDATE todo_items
-            SET title = $title, description = $description, project_id = $projectId,
+            SET title = $title, description = $description, project_id = $projectId, group_id = $groupId,
                 priority = $priority, due_at = $dueAt, status = $status,
                 updated_at = $now, completed_at = $completedAt,
                 is_pinned = CASE WHEN $status IN ($done, $ignored) THEN 0 ELSE is_pinned END
@@ -132,6 +184,7 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         update.Parameters.AddWithValue("$title", request.Title);
         update.Parameters.AddWithValue("$description", request.Description is null ? DBNull.Value : request.Description);
         update.Parameters.AddWithValue("$projectId", request.ProjectId is null ? DBNull.Value : request.ProjectId.Value);
+        update.Parameters.AddWithValue("$groupId", request.GroupId is null ? DBNull.Value : request.GroupId.Value);
         update.Parameters.AddWithValue("$priority", request.Priority.ToString());
         update.Parameters.AddWithValue("$dueAt", request.DueAt is null ? DBNull.Value : request.DueAt.Value.ToString("O"));
         update.Parameters.AddWithValue("$status", request.Status.ToString());

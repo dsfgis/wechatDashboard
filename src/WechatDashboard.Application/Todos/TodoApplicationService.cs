@@ -22,6 +22,22 @@ public enum CreateTodoOutcome
 
 public sealed record CreateTodoResult(CreateTodoOutcome Outcome, TodoItem? Todo);
 
+public sealed record CreateManualTodoRequest(
+    string Title,
+    string? Description,
+    PriorityLevel? Priority,
+    DateTimeOffset? DueAt,
+    DateTimeOffset? FirstReminderAt,
+    long? GroupId);
+
+public enum CreateManualTodoOutcome
+{
+    Created,
+    GroupMissing
+}
+
+public sealed record CreateManualTodoResult(CreateManualTodoOutcome Outcome, TodoItem? Todo);
+
 public sealed record UpdateTodoRequest(
     long TodoId,
     string Title,
@@ -30,7 +46,8 @@ public sealed record UpdateTodoRequest(
     PriorityLevel Priority,
     DateTimeOffset? DueAt,
     TodoStatus Status,
-    DateTimeOffset ExpectedUpdatedAt);
+    DateTimeOffset ExpectedUpdatedAt,
+    long? GroupId = null);
 
 /// <summary>任意消息转 Todo 的用例服务；事务细节由工作单元实现。</summary>
 public sealed class TodoApplicationService
@@ -59,6 +76,30 @@ public sealed class TodoApplicationService
         }
 
         return _unitOfWork.CreateFromMessageAsync(request, _clock.Now, cancellationToken);
+    }
+
+    public Task<CreateManualTodoResult> CreateManualAsync(
+        CreateManualTodoRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Title))
+        {
+            throw new ArgumentException("Todo title is required.", nameof(request));
+        }
+
+        if (request.FirstReminderAt is { } reminderAt && reminderAt <= _clock.Now)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Reminder time must be in the future.");
+        }
+
+        return _unitOfWork.CreateManualAsync(
+            request with
+            {
+                Title = request.Title.Trim(),
+                Priority = request.Priority ?? PriorityLevel.P2
+            },
+            _clock.Now,
+            cancellationToken);
     }
 
     public Task<TodoItem?> UpdateAsync(UpdateTodoRequest request, CancellationToken cancellationToken)

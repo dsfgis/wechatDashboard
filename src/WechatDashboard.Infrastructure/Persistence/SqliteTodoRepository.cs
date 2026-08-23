@@ -47,7 +47,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 updated_at,
                 completed_at,
                 is_auto_created,
-                is_pinned
+                is_pinned,
+                group_id
             )
             VALUES (
                 $sourceMessageId,
@@ -61,7 +62,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 $updatedAt,
                 $completedAt,
                 $isAutoCreated,
-                $isPinned
+                $isPinned,
+                $groupId
             )
             RETURNING id;
             """;
@@ -96,7 +98,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 updated_at,
                 completed_at,
                 is_auto_created,
-                is_pinned
+                is_pinned,
+                group_id
             FROM todo_items
             WHERE status = $status
             ORDER BY
@@ -130,7 +133,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT id, source_message_id, project_id, title, description, status,
-                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned, group_id
             FROM todo_items
             WHERE status IN ($pending, $inProgress, $waiting)
             ORDER BY is_pinned DESC, due_at IS NULL, due_at,
@@ -166,7 +169,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Transaction = transaction;
         command.CommandText = """
             SELECT id, source_message_id, project_id, title, description, status,
-                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned, group_id
             FROM todo_items WHERE id = $id;
             """;
         command.Parameters.AddWithValue("$id", id);
@@ -190,7 +193,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Transaction = transaction;
         command.CommandText = """
             SELECT id, source_message_id, project_id, title, description, status,
-                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned, group_id
             FROM todo_items
             WHERE source_message_id = $sourceMessageId
             ORDER BY created_at, id
@@ -220,7 +223,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
                 updated_at,
                 completed_at,
                 is_auto_created,
-                is_pinned
+                is_pinned,
+                group_id
             FROM todo_items
             WHERE status IN ($done, $ignored)
             ORDER BY completed_at DESC, updated_at DESC;
@@ -459,6 +463,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
         command.Parameters.AddWithValue("$completedAt", ToDbValue(todo.CompletedAt?.ToString("O")));
         command.Parameters.AddWithValue("$isAutoCreated", todo.IsAutoCreated ? 1 : 0);
         command.Parameters.AddWithValue("$isPinned", todo.IsPinned ? 1 : 0);
+        command.Parameters.AddWithValue("$groupId", ToDbValue(todo.GroupId));
     }
 
     /// <summary>从 DataReader 映射为 TodoItem 实体。</summary>
@@ -478,7 +483,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
             CompletedAt: GetNullableDateTimeOffset(reader, 10),
             IsAutoCreated: reader.GetInt32(11) == 1)
         {
-            IsPinned = reader.GetInt32(12) == 1
+            IsPinned = reader.GetInt32(12) == 1,
+            GroupId = GetNullableInt64(reader, 13)
         };
     }
 
