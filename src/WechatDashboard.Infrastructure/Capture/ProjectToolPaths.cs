@@ -4,10 +4,31 @@ namespace WechatDashboard.Infrastructure.Capture;
 
 /// <summary>
 /// 项目工具路径定位器：统一管理项目根目录、工具目录、结果目录等路径。
-/// 通过向上查找解决方案文件（.sln）与微信读取脚本定位项目根目录。
+/// 开发环境通过向上查找解决方案文件定位项目根目录；安装环境不依赖源码布局。
 /// </summary>
 public static class ProjectToolPaths
 {
+    /// <summary>已安装只读程序根目录。</summary>
+    public static string InstallRoot => Path.GetFullPath(AppContext.BaseDirectory);
+
+    /// <summary>当前用户的可变应用数据根目录。</summary>
+    public static string UserDataRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WechatDashboard");
+
+    /// <summary>原生微信读取器的无密钥状态目录。</summary>
+    public static string WeChatNativeReaderDirectory => Path.Combine(UserDataRoot, "Reader");
+
+    /// <summary>原生微信读取器的稳定快照目录。</summary>
+    public static string WeChatNativeSnapshotDirectory => Path.Combine(
+        WeChatNativeReaderDirectory,
+        "Snapshots");
+
+    /// <summary>原生微信读取器的临时目录。</summary>
+    public static string WeChatNativeTemporaryDirectory => Path.Combine(
+        WeChatNativeReaderDirectory,
+        "Temp");
+
     /// <summary>项目根目录（含 .sln 的目录）。</summary>
     public static string ProjectRoot => ResolveProjectRoot();
 
@@ -33,7 +54,7 @@ public static class ProjectToolPaths
     public static string DataDirectory => Path.Combine(ResultDirectory, "data");
 
     /// <summary>
-    /// 定位项目根目录：依次从当前工作目录、基目录向上查找 .sln + 微信读取脚本。
+    /// 定位项目根目录：依次从当前工作目录、基目录向上查找解决方案文件。
     /// </summary>
     private static string ResolveProjectRoot()
     {
@@ -66,14 +87,7 @@ public static class ProjectToolPaths
         while (directory is not null)
         {
             var solutionPath = Path.Combine(directory.FullName, "WechatDashboard.sln");
-            var readerPath = Path.Combine(
-                directory.FullName,
-                "tools",
-                "wechat-local-reader",
-                "wechat_local_reader.py");
-
-            // 同时存在 .sln 和读取脚本即认为是项目根
-            if (File.Exists(solutionPath) && File.Exists(readerPath))
+            if (File.Exists(solutionPath))
             {
                 return directory.FullName;
             }

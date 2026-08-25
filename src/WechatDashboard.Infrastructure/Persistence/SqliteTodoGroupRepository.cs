@@ -17,7 +17,7 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, name, normalized_name, created_at FROM todo_groups ORDER BY name COLLATE NOCASE, id;";
+        command.CommandText = "SELECT id, name, normalized_name, color, created_at FROM todo_groups ORDER BY name COLLATE NOCASE, id;";
         var groups = new List<TodoGroup>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -42,7 +42,7 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT id, name, normalized_name, created_at FROM todo_groups WHERE id = $id;";
+        command.CommandText = "SELECT id, name, normalized_name, color, created_at FROM todo_groups WHERE id = $id;";
         command.Parameters.AddWithValue("$id", id);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadGroup(reader) : null;
@@ -51,6 +51,7 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
     public async Task<CreateTodoGroupResult> CreateAsync(
         string name,
         string normalizedName,
+        string color,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -59,17 +60,18 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
         {
             await using var insert = connection.CreateCommand();
             insert.CommandText = """
-                INSERT INTO todo_groups(name, normalized_name, created_at)
-                VALUES ($name, $normalizedName, $createdAt)
+                INSERT INTO todo_groups(name, normalized_name, color, created_at)
+                VALUES ($name, $normalizedName, $color, $createdAt)
                 RETURNING id;
                 """;
             insert.Parameters.AddWithValue("$name", name);
             insert.Parameters.AddWithValue("$normalizedName", normalizedName);
+            insert.Parameters.AddWithValue("$color", color);
             insert.Parameters.AddWithValue("$createdAt", now.ToString("O"));
             var id = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken));
             return new CreateTodoGroupResult(
                 CreateTodoGroupOutcome.Created,
-                new TodoGroup(id, name, normalizedName, now));
+                new TodoGroup(id, name, normalizedName, color, now));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
         {
@@ -89,7 +91,7 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, name, normalized_name, created_at FROM todo_groups WHERE normalized_name = $normalizedName;";
+        command.CommandText = "SELECT id, name, normalized_name, color, created_at FROM todo_groups WHERE normalized_name = $normalizedName;";
         command.Parameters.AddWithValue("$normalizedName", normalizedName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadGroup(reader) : null;
@@ -99,5 +101,6 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
         reader.GetInt64(0),
         reader.GetString(1),
         reader.GetString(2),
-        DateTimeOffset.Parse(reader.GetString(3)));
+        reader.GetString(3),
+        DateTimeOffset.Parse(reader.GetString(4)));
 }

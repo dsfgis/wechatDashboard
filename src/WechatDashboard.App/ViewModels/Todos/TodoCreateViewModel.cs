@@ -8,10 +8,12 @@ using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.App.ViewModels.Todos;
 
-public sealed record TodoGroupOption(long? Id, string Name)
+public sealed record TodoGroupOption(long? Id, string Name, string Color)
 {
-    public static TodoGroupOption Ungrouped { get; } = new(null, "未分组");
+    public static TodoGroupOption Ungrouped { get; } = new(null, "未分组", TodoGroupColorPolicy.DefaultColor);
 }
+
+public sealed record TodoGroupColorOption(string Name, string Color);
 
 public sealed class TodoCreateViewModel : ObservableObject
 {
@@ -29,6 +31,7 @@ public sealed class TodoCreateViewModel : ObservableObject
     private int _reminderHour;
     private int _reminderMinute;
     private TodoGroupOption _selectedGroup = TodoGroupOption.Ungrouped;
+    private TodoGroupColorOption _selectedNewGroupColor;
     private string _newGroupName = "";
     private string _statusText = "";
     private bool _isSaved;
@@ -45,6 +48,17 @@ public sealed class TodoCreateViewModel : ObservableObject
         _clock = clock;
         _dialogs = dialogs;
         _onCreated = onCreated;
+        NewGroupColors =
+        [
+            new("灰色", TodoGroupColorPolicy.DefaultColor),
+            new("红色", TodoGroupColorPolicy.Red),
+            new("橙色", TodoGroupColorPolicy.Orange),
+            new("绿色", TodoGroupColorPolicy.Green),
+            new("蓝色", TodoGroupColorPolicy.Blue),
+            new("紫色", TodoGroupColorPolicy.Purple),
+            new("粉色", TodoGroupColorPolicy.Pink)
+        ];
+        _selectedNewGroupColor = NewGroupColors[0];
         var reminder = _clock.Now.LocalDateTime.AddMinutes(5);
         _reminderDate = reminder.Date;
         _reminderHour = reminder.Hour;
@@ -57,6 +71,7 @@ public sealed class TodoCreateViewModel : ObservableObject
     public event EventHandler? RequestClose;
     public ObservableCollection<TodoGroupOption> GroupOptions { get; } = new();
     public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
+    public IReadOnlyList<TodoGroupColorOption> NewGroupColors { get; }
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
@@ -72,6 +87,7 @@ public sealed class TodoCreateViewModel : ObservableObject
     public int ReminderHour { get => _reminderHour; set => SetProperty(ref _reminderHour, value); }
     public int ReminderMinute { get => _reminderMinute; set => SetProperty(ref _reminderMinute, value); }
     public TodoGroupOption SelectedGroup { get => _selectedGroup; set => SetProperty(ref _selectedGroup, value); }
+    public TodoGroupColorOption SelectedNewGroupColor { get => _selectedNewGroupColor; set => SetProperty(ref _selectedNewGroupColor, value); }
     public string NewGroupName { get => _newGroupName; set => SetProperty(ref _newGroupName, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
 
@@ -85,7 +101,7 @@ public sealed class TodoCreateViewModel : ObservableObject
             GroupOptions.Add(TodoGroupOption.Ungrouped);
             foreach (var group in groups)
             {
-                GroupOptions.Add(new TodoGroupOption(group.Id, group.Name));
+                GroupOptions.Add(new TodoGroupOption(group.Id, group.Name, group.Color));
             }
 
             SelectedGroup = GroupOptions.FirstOrDefault(item => item.Id == selectedId) ?? TodoGroupOption.Ungrouped;
@@ -104,7 +120,7 @@ public sealed class TodoCreateViewModel : ObservableObject
     {
         try
         {
-            var result = await _groups.CreateAsync(NewGroupName, CancellationToken.None);
+            var result = await _groups.CreateAsync(NewGroupName, SelectedNewGroupColor.Color, CancellationToken.None);
             await LoadGroupsAsync();
             SelectedGroup = GroupOptions.First(item => item.Id == result.Group.Id);
             NewGroupName = "";

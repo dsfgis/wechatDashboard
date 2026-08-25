@@ -4,12 +4,13 @@
         xmlns:local="clr-namespace:WechatDashboard.App"
         xmlns:todoViews="clr-namespace:WechatDashboard.App.Views.Todos"
         xmlns:messageViews="clr-namespace:WechatDashboard.App.Views.Messages"
-        Title="微信项目消息看板"
+        Title="IM消息看板"
         Height="760"
         Width="1180"
         MinHeight="640"
         MinWidth="980"
         Loaded="MainWindow_Loaded"
+        StateChanged="MainWindow_StateChanged"
         Closing="MainWindow_Closing">
     <Window.Resources>
         <Style TargetType="TextBlock">
@@ -113,7 +114,7 @@
 
         <Border Background="#1F2937" Padding="14">
             <DockPanel LastChildFill="True">
-                <TextBlock DockPanel.Dock="Top" Text="&#x5FAE;&#x4FE1;&#x770B;&#x677F;" Foreground="White"
+                <TextBlock DockPanel.Dock="Top" Text="IM消息看板" Foreground="White"
                            FontSize="18" FontWeight="SemiBold" Margin="8,4,0,20" />
                 <ListBox x:Name="SidebarNavigation" DockPanel.Dock="Top" SelectedIndex="0"
                          Style="{StaticResource SidebarNavigationStyle}" ItemContainerStyle="{StaticResource SidebarNavigationItemStyle}"
@@ -170,7 +171,7 @@
                     </TextBlock>
                 </StackPanel>
                 <StackPanel Visibility="Collapsed" DockPanel.Dock="Left">
-                    <TextBlock Text="微信项目消息看板" FontSize="24" FontWeight="SemiBold" Foreground="#111827" />
+                    <TextBlock Text="IM消息看板" FontSize="24" FontWeight="SemiBold" Foreground="#111827" />
                     <TextBlock Text="{Binding SummaryText}" Margin="0,6,0,0" Foreground="#4B5563" />
                     <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
                 </StackPanel>
@@ -200,20 +201,6 @@
                                     <ComboBoxItem Content="30天" Tag="30d" />
                                     <ComboBoxItem Content="全部" Tag="all" />
                                 </ComboBox>
-                            </StackPanel>
-                            <StackPanel Width="180" Margin="0,0,10,8">
-                                <TextBlock Text="DB Key" Style="{StaticResource FieldLabelTextStyle}" />
-                                <PasswordBox x:Name="ImportedDatabaseKeyBox" />
-                            </StackPanel>
-                            <StackPanel Width="230" Margin="0,0,10,8">
-                                <TextBlock Text="Key 工具" Style="{StaticResource FieldLabelTextStyle}" />
-                                <TextBox x:Name="ExternalKeyCommandTextBox"
-                                         ToolTip="例如：&quot;D:\tools\DbkeyHookCMD.exe&quot; -pid {pid}" />
-                            </StackPanel>
-                            <StackPanel Width="180" Margin="0,0,0,8">
-                                <TextBlock Text="Key 文件" Style="{StaticResource FieldLabelTextStyle}" />
-                                <TextBox x:Name="ExternalKeyFileTextBox"
-                                         ToolTip="外部工具写出的 dbkey.txt，可留空" />
                             </StackPanel>
                         </WrapPanel>
                         <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">

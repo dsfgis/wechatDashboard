@@ -17,6 +17,7 @@ public interface ITodoGroupRepository
     Task<CreateTodoGroupResult> CreateAsync(
         string name,
         string normalizedName,
+        string color,
         DateTimeOffset now,
         CancellationToken cancellationToken);
 }

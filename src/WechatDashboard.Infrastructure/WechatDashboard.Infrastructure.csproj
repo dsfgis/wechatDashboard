@@ -8,6 +8,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="9.0.10" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.10" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
   </ItemGroup>
 
   <PropertyGroup>

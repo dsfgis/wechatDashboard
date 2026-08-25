@@ -70,6 +70,7 @@ public sealed class TodoDetailViewModel : ObservableObject
             ? row.Todo.Description ?? row.Todo.Title
             : "原始消息已不存在");
         GroupName = row.GroupName;
+        GroupColor = row.GroupColor;
         SaveCommand = new AsyncRelayCommand(_ => SaveAsync());
         ScheduleReminderCommand = new AsyncRelayCommand(_ => ScheduleReminderAsync());
         SnoozeTenMinutesCommand = new AsyncRelayCommand(_ => SnoozeAsync(TimeSpan.FromMinutes(10)));
@@ -99,6 +100,7 @@ public sealed class TodoDetailViewModel : ObservableObject
     public string SentAt { get; }
     public string OriginalContent { get; }
     public string GroupName { get; private set; }
+    public string GroupColor { get; private set; }
     public bool IsGroupEditable => Status is TodoStatus.Pending or TodoStatus.InProgress or TodoStatus.Waiting;
 
     public TodoGroupOption SelectedGroup
@@ -180,7 +182,7 @@ public sealed class TodoDetailViewModel : ObservableObject
             GroupOptions.Add(TodoGroupOption.Ungrouped);
             foreach (var group in groups)
             {
-                GroupOptions.Add(new TodoGroupOption(group.Id, group.Name));
+                GroupOptions.Add(new TodoGroupOption(group.Id, group.Name, group.Color));
             }
 
             SelectedGroup = GroupOptions.FirstOrDefault(item => item.Id == _todo.GroupId) ?? TodoGroupOption.Ungrouped;
@@ -188,7 +190,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         catch (Exception)
         {
             GroupOptions.Clear();
-            GroupOptions.Add(new TodoGroupOption(_todo.GroupId, GroupName));
+            GroupOptions.Add(new TodoGroupOption(_todo.GroupId, GroupName, GroupColor));
             SelectedGroup = GroupOptions[0];
             _dialogs.ShowError("分组加载失败，请稍后重新打开详情。", "加载失败");
         }
@@ -223,7 +225,9 @@ public sealed class TodoDetailViewModel : ObservableObject
 
         _todo = updated;
         GroupName = SelectedGroup.Name;
+        GroupColor = SelectedGroup.Color;
         OnPropertyChanged(nameof(GroupName));
+        OnPropertyChanged(nameof(GroupColor));
         DueAtText = FormatTime(updated.DueAt);
         StatusText = "待办已保存。";
         await _refreshWorkbench();

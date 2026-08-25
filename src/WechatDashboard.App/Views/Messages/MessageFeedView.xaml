@@ -50,10 +50,10 @@
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
-                <DataGridTemplateColumn Header="操作" Width="100">
+                <DataGridTemplateColumn Header="操作" Width="115">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
-                            <Button Content="转为待办" Padding="9,4"
+                            <Button Content="{Binding TodoActionText}" ToolTip="{Binding TodoActionToolTip}" Padding="9,4"
                                     Command="{Binding DataContext.ConvertToTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                     CommandParameter="{Binding MessageId}" />
                         </DataTemplate>

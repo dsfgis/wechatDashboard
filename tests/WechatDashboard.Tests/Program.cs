@@ -1,4 +1,9 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using WechatDashboard.App.Services;
 using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.Application.Classification;
@@ -15,6 +20,7 @@ using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Background;
 using WechatDashboard.Infrastructure.Persistence;
 using WechatDashboard.KeyProbe;
+using ZstdSharp;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -24,6 +30,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("Todo due bucket policy separates overdue, today, upcoming and undated items", TestTodoDueBucketPolicyAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
+    ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
     ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
@@ -56,13 +63,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Window capture diagnostics service summarizes matching snapshots", TestWindowCaptureDiagnosticsServiceAsync),
     ("JSONL directory adapter captures only new messages and preserves source identity", TestJsonlDirectoryCaptureAdapterAsync),
     ("WeChat local export adapter captures local database export messages incrementally", TestWeChatLocalExportCaptureAdapterAsync),
-    ("WeChat local command adapter captures structured messages and passes offsets", TestWeChatLocalCommandCaptureAdapterAsync),
-    ("WeChat local command adapter exposes staged diagnostics from reader", TestWeChatLocalCommandStagedDiagnosticsAsync),
     ("KeyProbe options accept only non-sensitive bounded arguments", TestKeyProbeOptionsAsync),
     ("Native hook provider rejects missing binaries before process access", TestNativeHookKeyProviderRejectsMissingBinariesAsync),
-    ("WeChat local reader service extracts DB key through native provider", TestWeChatLocalReaderServiceExtractsNativeDatabaseKeyAsync),
-    ("WeChat local reader service extracts DB key through PowerShell probe", TestWeChatLocalReaderServiceExtractsDatabaseKeyAsync),
-    ("WeChat local reader service reads today messages with paging", TestWeChatLocalReaderServiceReadsPagedMessagesAsync),
+    ("WeChat local reader service initializes through the native C# reader", TestWeChatLocalReaderServiceExtractsNativeDatabaseKeyAsync),
+    ("WeChat local reader service reads native pages without a command runner", TestWeChatLocalReaderServiceReadsPagedMessagesAsync),
+    ("Native WeChat key derivation validates SQLCipher V4 databases", TestNativeWeChatKeyDerivationAsync),
+    ("Native WeChat reader queries V4 shards and adapter offsets", TestNativeWeChatReaderAsync),
+    ("Native WeChat reader matches the frozen Python oracle field by field", TestNativeWeChatReaderMatchesPythonOracleAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
@@ -253,6 +260,66 @@ static async Task TestManualMessageToTodoAsync()
     AssertEqual(1, reminders.Count, "The optional initial reminder should be persisted atomically.");
     AssertEqual(ReminderStatus.Scheduled, reminders.Single().Status, "The initial reminder should be scheduled.");
     AssertEqual(reminderAt, reminders.Single().ScheduledAt, "The selected reminder time should persist.");
+}
+
+static async Task TestMessageTodoStateLookupAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var now = new DateTimeOffset(2026, 8, 21, 12, 0, 0, TimeSpan.FromHours(8));
+    var automaticMessage = await messageRepository.SaveAsync(
+        CreateMessage(0, "自动待办群", "王工", "@张三 请处理") with
+        {
+            SourceMessageKey = $"auto-state-{Guid.NewGuid():N}",
+            IsMentionMe = true
+        },
+        CancellationToken.None);
+    var manualMessage = await messageRepository.SaveAsync(
+        CreateMessage(0, "手动待办群", "李工", "请核对") with
+        {
+            SourceMessageKey = $"manual-state-{Guid.NewGuid():N}",
+            IsMentionMe = false
+        },
+        CancellationToken.None);
+    var noTodoMessage = await messageRepository.SaveAsync(
+        CreateMessage(0, "普通消息群", "赵工", "已收到") with
+        {
+            SourceMessageKey = $"no-todo-state-{Guid.NewGuid():N}",
+            IsMentionMe = false
+        },
+        CancellationToken.None);
+
+    var automaticTodo = await todoRepository.SaveAsync(new TodoItem(
+        0, automaticMessage.Id, null, automaticMessage.Content, null,
+        TodoStatus.Pending, PriorityLevel.P2, null, now, now, null, true),
+        CancellationToken.None);
+    await todoRepository.SaveAsync(new TodoItem(
+        0, manualMessage.Id, null, manualMessage.Content, null,
+        TodoStatus.Done, PriorityLevel.P2, null, now, now, now, false),
+        CancellationToken.None);
+
+    var manualConversionAttempt = await new TodoApplicationService(
+        new SqliteTodoUnitOfWork(databasePath),
+        new FixedClock(now.AddMinutes(1))).CreateFromMessageAsync(
+            new CreateTodoFromMessageRequest(automaticMessage.Id, null, null, null, null, null, null),
+            CancellationToken.None);
+
+    var states = await todoRepository.GetBySourceMessageIdsAsync(
+        new[] { automaticMessage.Id, manualMessage.Id, noTodoMessage.Id, automaticMessage.Id },
+        CancellationToken.None);
+
+    AssertEqual(2, states.Count, "Only messages with a Todo should be returned once.");
+    AssertEqual(CreateTodoOutcome.ExistingTodo, manualConversionAttempt.Outcome, "Manual conversion must reuse an existing automatic Todo.");
+    AssertEqual(automaticTodo.Id, manualConversionAttempt.Todo!.Id, "Manual conversion must not replace the automatic Todo.");
+    AssertTrue(states[automaticMessage.Id].IsAutoCreated, "Automatic Todo state must remain distinguishable in the message feed.");
+    AssertEqual(TodoStatus.Pending, states[automaticMessage.Id].Status, "The active automatic Todo status should be returned.");
+    AssertFalse(states[manualMessage.Id].IsAutoCreated, "Manual Todo state must remain distinguishable in the message feed.");
+    AssertEqual(TodoStatus.Done, states[manualMessage.Id].Status, "Completed Todo status should be returned.");
+    AssertFalse(states.ContainsKey(noTodoMessage.Id), "A message without a Todo must remain convertible.");
 }
 
 static async Task TestReminderSnoozeAsync()
@@ -948,6 +1015,23 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.LocalDatabase"), "Live adapters should include Shihuatong local database adapter.");
 
+    var nativeReader = new FakeWeChatLocalDatabaseReader();
+    nativeReader.InitializeAsync(
+        new WeChatInitializationRequest(@"D:\fixture\db_storage", 1234, TimeSpan.FromSeconds(1)),
+        CancellationToken.None).GetAwaiter().GetResult();
+    var nativeService = new WeChatLocalReaderService(
+        nativeReader,
+        databaseRootLocator: () => @"D:\fixture\db_storage",
+        processIdLocator: () => 1234);
+    var nativeSource = CaptureAdapterFactory.CreateWeChatLocalDatabaseSource(nativeService);
+    AssertEqual(CaptureSourceKind.WeChatLocalDatabase, nativeSource.Kind, "Native source should use the C# database kind.");
+    var nativeAdapters = CaptureAdapterFactory.CreateAdapters(
+        new[] { nativeSource },
+        windowTextSnapshotProvider: null,
+        weChatLocalDatabaseReader: nativeReader);
+    AssertEqual(1, nativeAdapters.Count, "An initialized shared reader should create one native adapter.");
+    AssertTrue(nativeAdapters.Single() is WeChatLocalDatabaseCaptureAdapter, "Factory must register the native C# database adapter.");
+
     return Task.CompletedTask;
 }
 
@@ -997,6 +1081,14 @@ static async Task TestTodoGroupMigrationAsync()
     await using var migrationCommand = connection.CreateCommand();
     migrationCommand.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=3 AND name='todo-groups';";
     AssertEqual(1L, (long)(await migrationCommand.ExecuteScalarAsync() ?? 0L), "Migration v3 should be recorded exactly once.");
+
+    await using var colorColumnCommand = connection.CreateCommand();
+    colorColumnCommand.CommandText = "SELECT COUNT(*) FROM pragma_table_info('todo_groups') WHERE name='color' AND \"notnull\"=1;";
+    AssertEqual(1L, (long)(await colorColumnCommand.ExecuteScalarAsync() ?? 0L), "Migration should add one required color column to todo_groups.");
+
+    await using var colorMigrationCommand = connection.CreateCommand();
+    colorMigrationCommand.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=4 AND name='todo-group-colors';";
+    AssertEqual(1L, (long)(await colorMigrationCommand.ExecuteScalarAsync() ?? 0L), "Migration v4 should be recorded exactly once.");
 
     var loaded = await repository.GetByIdAsync(saved.Id, CancellationToken.None);
     AssertNotNull(loaded, "Existing Todo must remain after migration.");
@@ -1065,7 +1157,7 @@ static async Task TestTodoGroupsAsync()
     var now = new DateTimeOffset(2026, 8, 23, 9, 15, 0, TimeSpan.FromHours(8));
     var repository = new SqliteTodoGroupRepository(databasePath);
     var service = new TodoGroupApplicationService(repository, new FixedClock(now));
-    var created = await service.CreateAsync("  工作  ", CancellationToken.None);
+    var created = await service.CreateAsync("  工作  ", TodoGroupColorPolicy.Red, CancellationToken.None);
     var duplicate = await service.CreateAsync("工作", CancellationToken.None);
     var latin = await service.CreateAsync("Alpha", CancellationToken.None);
     var latinDuplicate = await service.CreateAsync("alpha", CancellationToken.None);
@@ -1075,8 +1167,10 @@ static async Task TestTodoGroupsAsync()
 
     AssertEqual(CreateTodoGroupOutcome.Created, created.Outcome, "First normalized group should be created.");
     AssertEqual("工作", created.Group.Name, "Display name should be trimmed.");
+    AssertEqual(TodoGroupColorPolicy.Red, created.Group.Color, "Selected group color should be persisted.");
     AssertEqual(CreateTodoGroupOutcome.Existing, duplicate.Outcome, "Identical normalized group should return existing.");
     AssertEqual(created.Group.Id, duplicate.Group.Id, "Duplicate should return the persisted group.");
+    AssertEqual(TodoGroupColorPolicy.Red, duplicate.Group.Color, "Creating a duplicate must retain the existing group's color.");
     AssertEqual(CreateTodoGroupOutcome.Existing, latinDuplicate.Outcome, "Case-only duplicate should return existing.");
     AssertEqual(latin.Group.Id, latinDuplicate.Group.Id, "Case-only duplicate should keep one row.");
     AssertEqual(CreateTodoGroupOutcome.Existing, unicodeDuplicate.Outcome, "Unicode-equivalent duplicate should return existing.");
@@ -1095,6 +1189,18 @@ static async Task TestTodoGroupsAsync()
     }
 
     AssertTrue(rejectedBlank, "Blank group names must be rejected before persistence.");
+
+    var rejectedUnsupportedColor = false;
+    try
+    {
+        await service.CreateAsync("不可读颜色", "#FFFFFF", CancellationToken.None);
+    }
+    catch (ArgumentException)
+    {
+        rejectedUnsupportedColor = true;
+    }
+
+    AssertTrue(rejectedUnsupportedColor, "Colors outside the readable preset palette must be rejected.");
 
     var concurrentName = $"并发-{Guid.NewGuid():N}";
     var concurrentResults = await Task.WhenAll(
@@ -1313,6 +1419,8 @@ static async Task TestTodoCreateViewModelAsync()
         });
     viewModel.RequestClose += (_, _) => closed.TrySetResult();
     await viewModel.LoadGroupsAsync();
+    AssertTrue(viewModel.NewGroupColors.Any(item => item.Name == "红色" && item.Color == TodoGroupColorPolicy.Red), "Create view model should offer red for new groups.");
+    AssertEqual(TodoGroupColorPolicy.DefaultColor, viewModel.GroupOptions.Single(item => item.Id == group.Id).Color, "Group options should expose the persisted color.");
     viewModel.Title = "   ";
     viewModel.SaveCommand.Execute(null);
     AssertEqual("标题不能为空。", viewModel.StatusText, "Whitespace-only title should keep the form open with a business error.");
@@ -1374,8 +1482,10 @@ static Task TestTodoRowPresentationAsync()
         null,
         TodoDueBucket.NoDueDate,
         "工作",
+        TodoGroupColorPolicy.Red,
         () => { });
     AssertEqual("工作", manualRow.GroupName, "Todo row should display the resolved group.");
+    AssertEqual(TodoGroupColorPolicy.Red, manualRow.GroupColor, "Todo row should expose the group's selected color.");
     AssertEqual("手动添加", manualRow.Source, "Source-less Todo should be labelled manual.");
     AssertEqual("无来源消息", manualRow.SourceChatName, "Manual Todo should not fake a chat.");
     AssertEqual("手动备注", manualRow.MessageContent, "Manual Todo should display its description.");
@@ -1386,6 +1496,7 @@ static Task TestTodoRowPresentationAsync()
         null,
         TodoDueBucket.NoDueDate,
         "工作",
+        TodoGroupColorPolicy.Red,
         () => { });
     AssertEqual("来源消息丢失", missingSourceRow.Source, "Missing source must not be labelled manual.");
     AssertEqual("原始消息已不存在", missingSourceRow.SourceChatName, "Missing source should be explicit.");
@@ -1745,134 +1856,6 @@ static async Task TestWeChatLocalExportCaptureAdapterAsync()
     AssertEqual("WeChat:local:10003", appendBatch.Messages[0].SourceMessageKey, "Appended message should preserve local message identity.");
 }
 
-static async Task TestWeChatLocalCommandCaptureAdapterAsync()
-{
-    var runner = new FakeExternalCommandRunner(new ExternalCommandResult(
-        ExitCode: 0,
-        StandardOutput: """
-                        {
-                          "nextOffset": "1700000000:10003",
-                          "messages": [
-                            {
-                              "id": "10003",
-                              "chatId": "room-digital",
-                              "chatName": "数字石化（二期）",
-                              "senderName": "刘荐辉",
-                              "content": "@白驹过隙 今天下班前反馈",
-                              "sentAt": "2026-06-06T09:20:00+08:00",
-                              "messageType": "Text"
-                            }
-                          ]
-                        }
-                        """,
-        StandardError: ""));
-    var adapter = new WeChatLocalCommandCaptureAdapter(
-        new WeChatLocalCommandOptions("wechat-local-reader.exe", new[] { "capture", "--format", "json" }),
-        runner);
-
-    var batch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>
-    {
-        [adapter.Name] = "1699999999:9999"
-    }), CancellationToken.None);
-
-    AssertEqual("WeChat.LocalDatabase", adapter.Name, "Command adapter should identify the local database source.");
-    AssertEqual(1, batch.Messages.Count, "Command adapter should capture structured messages.");
-    AssertEqual("WeChat:local:10003", batch.Messages[0].SourceMessageKey, "Command message should use stable local identity.");
-    AssertEqual("数字石化（二期）", batch.Messages[0].ChatName, "Command message should preserve chat name.");
-    AssertEqual("@白驹过隙 今天下班前反馈", batch.Messages[0].Content, "Command message should preserve content.");
-    AssertEqual("1700000000:10003", batch.NextOffset, "Command adapter should use the reader's next offset.");
-    AssertEqual("1699999999:9999", runner.LastEnvironment["WECHAT_DASHBOARD_OFFSET"], "Existing offset should be passed to the reader.");
-}
-
-static async Task TestWeChatLocalCommandStagedDiagnosticsAsync()
-{
-    var runner = new FakeExternalCommandRunner(new ExternalCommandResult(
-        ExitCode: 0,
-        StandardOutput: """
-                        {
-                          "status": "ok",
-                          "stages": [
-                            {"stage": "config", "status": "loaded", "db_dir": "D:/cache/xwechat_files/dsfgis_84f8/db_storage"},
-                            {"stage": "keys", "status": "loaded", "key_count": 12},
-                            {"stage": "decrypt", "status": "ok", "total": 12, "decrypted": 3, "skipped": 9, "failed": 0},
-                            {"stage": "offset", "status": "ok", "last_offset": 1700000000, "query_start": 1699999990},
-                            {"stage": "query", "status": "ok", "sessions": 5, "matched_tables": 3, "shards_scanned": 2, "rows_read": 1}
-                          ],
-                          "nextOffset": "1700000200",
-                          "messages": [
-                            {
-                              "id": "room@chatroom:message_0.db:1001:1700000100",
-                              "chatId": "room@chatroom",
-                              "chatName": "测试群",
-                              "senderName": "Alice",
-                              "content": "@白驹过隙 确认一下",
-                              "sentAt": 1700000100,
-                              "messageType": "Text"
-                            }
-                          ]
-                        }
-                        """,
-        StandardError: ""));
-    var adapter = new WeChatLocalCommandCaptureAdapter(
-        new WeChatLocalCommandOptions("wechat-local-reader.exe", new[] { "capture", "--format", "json" }),
-        runner);
-
-    var batch = await adapter.CaptureAsync(new CaptureContext(new Dictionary<string, string>()), CancellationToken.None);
-
-    AssertEqual(1, batch.Messages.Count, "Staged diagnostics test should still capture messages.");
-    AssertEqual("1700000200", batch.NextOffset, "Next offset should come from reader output.");
-    AssertNotNull(adapter.LastStages, "Adapter should expose staged diagnostics.");
-    AssertEqual("ok", adapter.LastStages!.Status, "Overall status should be ok.");
-    AssertEqual(5, adapter.LastStages.Stages.Count, "All five stages should be parsed.");
-    AssertEqual("decrypt", adapter.LastStages.Stages[2].Name, "Third stage should be decrypt.");
-    AssertEqual("ok", adapter.LastStages.Stages[2].Status, "Decrypt stage should be ok.");
-    AssertTrue(adapter.LastStages.Stages[2].Detail.Contains("decrypted=3"), "Decrypt detail should include decrypted count.");
-    AssertEqual("query", adapter.LastStages.Stages[4].Name, "Last stage should be query.");
-    AssertTrue(adapter.LastStages.Stages[4].Detail.Contains("rows_read=1"), "Query detail should include rows_read.");
-}
-static async Task TestWeChatLocalReaderServiceExtractsDatabaseKeyAsync()
-{
-    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
-    Directory.CreateDirectory(root);
-    var scriptPath = Path.Combine(root, "run-wx-key-probe.ps1");
-    var dllDirectory = Path.Combine(root, "dll");
-    var keyPath = Path.Combine(root, "wx-key-found.txt");
-    var logPath = Path.Combine(root, "wx-key-probe.log");
-    Directory.CreateDirectory(dllDirectory);
-    await File.WriteAllTextAsync(scriptPath, "# fake wx_key probe", CancellationToken.None);
-
-    var runner = new FakeExternalCommandRunner(
-        new ExternalCommandResult(0, "", ""),
-        onRun: (_, _, _, _) => File.WriteAllText(keyPath, "DB Key: " + new string('a', 64)));
-    var service = new WeChatLocalReaderService(runner);
-
-    var result = await service.ExtractDatabaseKeyAsync(
-        new WeChatDatabaseKeyExtractionOptions(
-            ScriptPath: scriptPath,
-            DllDirectory: dllDirectory,
-            KeyPath: keyPath,
-            LogPath: logPath,
-            Seconds: 7,
-            TargetProcessId: 1234),
-        CancellationToken.None);
-
-    AssertNotNull(result, "DB key extraction should return a result.");
-    AssertEqual(1234, result!.TargetProcessId, "Configured target PID should be used.");
-    AssertEqual(keyPath, result.KeyPath, "Result should expose the generated key file path.");
-    AssertEqual(keyPath, service.ExternalKeyFile, "Service should reuse the generated key file for reader init.");
-    var probeArguments = runner.LastArguments
-        ?? throw new InvalidOperationException("PowerShell probe arguments should be captured.");
-    AssertTrue(probeArguments.Contains("-TargetPid"), "Probe should receive TargetPid.");
-    AssertTrue(probeArguments.Contains("1234"), "Probe should receive the selected PID.");
-    AssertTrue(probeArguments.Contains("-DllDir"), "Probe should receive DllDir.");
-    AssertTrue(probeArguments.Contains(dllDirectory), "Probe should receive the wx_key DLL directory.");
-    AssertTrue(probeArguments.Contains("-KeyPath"), "Probe should receive KeyPath.");
-    AssertTrue(probeArguments.Contains(keyPath), "Probe should write to the configured key file.");
-    AssertTrue(probeArguments.Contains("-LogPath"), "Probe should receive LogPath.");
-    AssertTrue(probeArguments.Contains(logPath), "Probe should write logs to the configured log path.");
-    AssertEqual("legacy-powershell", result.Provider, "Explicit script options should keep the compatibility provider.");
-}
-
 static Task TestKeyProbeOptionsAsync()
 {
     var dllPath = Path.Combine(Path.GetTempPath(), "wx key", "wx_key.dll");
@@ -1923,26 +1906,25 @@ static Task TestKeyProbeOptionsAsync()
 
 static async Task TestWeChatLocalReaderServiceExtractsNativeDatabaseKeyAsync()
 {
-    var fixtureKey = Enumerable.Repeat((byte)0xAB, WeChatDatabaseKeyLease.KeyLength).ToArray();
-    var provider = new FakeWeChatDatabaseKeyProvider(fixtureKey);
+    var reader = new FakeWeChatLocalDatabaseReader();
     var service = new WeChatLocalReaderService(
-        new FakeExternalCommandRunner(new ExternalCommandResult(0, "", "")),
-        provider);
+        reader,
+        databaseRootLocator: () => @"D:\fixture\db_storage",
+        processIdLocator: () => 9876);
 
     var result = await service.ExtractDatabaseKeyAsync(
         new WeChatDatabaseKeyExtractionOptions(Seconds: 12, TargetProcessId: 4321),
         CancellationToken.None);
 
-    AssertNotNull(result, "Native provider should return a DB key extraction result.");
-    AssertEqual("native-hook", result!.Provider, "Result should identify the native provider.");
-    AssertEqual(4321, result.TargetProcessId, "Configured target PID should reach the native provider.");
-    AssertTrue(result.KeyPath is null, "Native extraction must not create a plaintext key file.");
-    AssertTrue(result.LogPath is null, "Native extraction must not expose a key probe log path.");
-    AssertNotNull(provider.LastRequest, "Native provider should receive an acquisition request.");
-    AssertEqual(4321, provider.LastRequest!.ProcessId, "Provider request should carry the target PID.");
-    AssertEqual(TimeSpan.FromSeconds(12), provider.LastRequest.Timeout, "Provider request should carry the bounded timeout.");
-    AssertEqual(string.Concat(Enumerable.Repeat("ab", 32)), service.ImportedDatabaseKey!, "Transitional reader init should receive the fixture key in memory.");
-    service.ImportedDatabaseKey = null;
+    AssertNotNull(result, "Native reader should return an initialization result.");
+    AssertEqual("native-csharp", result!.Provider, "Result should identify the in-process C# reader.");
+    AssertEqual(4321, result.TargetProcessId, "Configured target PID should reach the native reader.");
+    AssertNotNull(reader.LastInitializationRequest, "Native reader should receive an initialization request.");
+    AssertEqual(4321, reader.LastInitializationRequest!.ProcessId, "Initialization should carry the target PID.");
+    AssertEqual(TimeSpan.FromSeconds(12), reader.LastInitializationRequest.KeyTimeout, "Initialization should carry the bounded timeout.");
+    AssertEqual(@"D:\fixture\db_storage", reader.LastInitializationRequest.DatabaseRoot, "Initialization should use the discovered database root.");
+    AssertTrue(service.IsInitialized, "Successful extraction and validation should leave the native session ready.");
+    await service.DisposeAsync();
 }
 
 static async Task TestNativeHookKeyProviderRejectsMissingBinariesAsync()
@@ -1973,38 +1955,26 @@ static async Task TestNativeHookKeyProviderRejectsMissingBinariesAsync()
 
 static async Task TestWeChatLocalReaderServiceReadsPagedMessagesAsync()
 {
-    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
-    Directory.CreateDirectory(root);
-    var configPath = Path.Combine(root, "config.json");
-    await File.WriteAllTextAsync(configPath, "{}", CancellationToken.None);
-
-    var runner = new FakeExternalCommandRunner(new ExternalCommandResult(
-        ExitCode: 0,
-        StandardOutput: """
-                        {
-                          "status": "ok",
-                          "totalMessages": 75,
-                          "offset": 50,
-                          "limit": 50,
-                          "messages": [
-                            {
-                              "id": "room@chatroom:message_0.db:1051:1782702000",
-                              "chatId": "room@chatroom",
-                              "chatName": "项目群",
-                              "senderName": "Alice",
-                              "content": "第51条消息",
-                              "sentAt": "2026-06-29T10:00:00+08:00",
-                              "messageType": "Text"
-                            }
-                          ]
-                        }
-                        """,
-        StandardError: ""));
-    var service = new WeChatLocalReaderService(runner);
+    var sentAt = new DateTimeOffset(2026, 6, 29, 10, 0, 0, TimeSpan.FromHours(8));
+    var message = new CapturedMessage(
+        "WeChat",
+        "WeChat:local:room@chatroom:message_0.db:1051:1782702000",
+        "room@chatroom",
+        "项目群",
+        "Alice",
+        "第51条消息",
+        sentAt,
+        MessageType.Text);
+    var reader = new FakeWeChatLocalDatabaseReader(new[] { message }, totalCount: 75);
+    var service = new WeChatLocalReaderService(
+        reader,
+        databaseRootLocator: () => @"D:\fixture\db_storage",
+        processIdLocator: () => 1234);
+    AssertTrue(await service.InitializeAsync(CancellationToken.None), "Fixture reader should initialize.");
     var date = new DateTime(2026, 6, 29);
 
     var page = await service.ReadMessagesAsync(
-        new WeChatLocalMessageReadOptions(date, PageNumber: 2, PageSize: 50, ConfigPath: configPath),
+        new WeChatLocalMessageReadOptions(date, PageNumber: 2, PageSize: 50),
         CancellationToken.None);
 
     AssertNotNull(page, "Message page should be returned.");
@@ -2016,19 +1986,13 @@ static async Task TestWeChatLocalReaderServiceReadsPagedMessagesAsync()
     AssertEqual("项目群", page.Messages[0].ChatName, "Chat name should be parsed for the table.");
     AssertEqual("Alice", page.Messages[0].SenderName, "Sender should be parsed for the table.");
 
-    var arguments = runner.LastArguments
-        ?? throw new InvalidOperationException("Reader arguments should be captured.");
+    AssertNotNull(reader.LastReadRequest, "Native reader should receive a read request.");
     var localDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Unspecified);
-    var startTimestamp = new DateTimeOffset(localDate, TimeZoneInfo.Local.GetUtcOffset(localDate)).ToUnixTimeSeconds().ToString();
-    var endTimestamp = new DateTimeOffset(localDate.AddDays(1), TimeZoneInfo.Local.GetUtcOffset(localDate.AddDays(1))).ToUnixTimeSeconds().ToString();
-    AssertTrue(arguments.Contains("capture"), "Reader should run the capture command.");
-    AssertTrue(arguments.Contains("--start-timestamp"), "Reader should receive the local day start timestamp flag.");
-    AssertTrue(arguments.Contains(startTimestamp), "Reader should receive the local day start timestamp.");
-    AssertTrue(arguments.Contains("--end-timestamp"), "Reader should receive the next day timestamp flag.");
-    AssertTrue(arguments.Contains(endTimestamp), "Reader should receive the next day timestamp.");
-    AssertTrue(arguments.Contains("--offset"), "Reader should receive a paging offset flag.");
-    AssertTrue(arguments.Contains("50"), "Second page should use offset 50 and limit 50.");
-    AssertTrue(arguments.Contains("--limit"), "Reader should receive a page-size limit flag.");
+    var expectedStart = new DateTimeOffset(localDate, TimeZoneInfo.Local.GetUtcOffset(localDate));
+    AssertEqual(expectedStart, reader.LastReadRequest!.Start!.Value, "Reader should receive the local day start.");
+    AssertEqual(50, reader.LastReadRequest.Offset, "Second page should use offset 50.");
+    AssertEqual(50, reader.LastReadRequest.Limit, "Reader should receive the selected page size.");
+    await service.DisposeAsync();
 }
 
 static async Task TestCapturePipelineAsync()
@@ -2103,7 +2067,7 @@ static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
     var todoRepository = new SqliteTodoRepository(databasePath);
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
     var sources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
-        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand &&
+        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalDatabase &&
                          source.Kind != CaptureSourceKind.ShihuatongLocalDatabase)
         .ToArray();
     var pipeline = new MessageCapturePipeline(
@@ -2165,6 +2129,27 @@ static async Task TestCaptureSourceSettingsRepositoryAsync()
     var reloaded = await repository.GetAllAsync(CancellationToken.None);
     AssertTrue(reloaded.First(s => s.Kind == "WindowText").IsEnabled, "Updated setting should reflect enable change.");
 
+    await repository.SaveAsync(
+        new CaptureSourceSettings(0, "WeChat", "旧微信命令", "WeChatLocalCommand", "legacy-reader", false, now, now),
+        CancellationToken.None);
+    await repository.MigrateKindAsync(
+        "WeChat",
+        "WeChatLocalCommand",
+        "WeChatLocalDatabase",
+        "微信本地数据库",
+        "原生 C#（只读本地数据库）",
+        CancellationToken.None);
+    await repository.MigrateKindAsync(
+        "WeChat",
+        "WeChatLocalCommand",
+        "WeChatLocalDatabase",
+        "微信本地数据库",
+        "原生 C#（只读本地数据库）",
+        CancellationToken.None);
+    var migrated = await repository.GetAllAsync(CancellationToken.None);
+    AssertFalse(migrated.Any(s => s.Kind == "WeChatLocalCommand"), "Legacy command settings should be removed after migration.");
+    AssertFalse(migrated.Single(s => s.Kind == "WeChatLocalDatabase").IsEnabled, "Migration should preserve the legacy enabled flag.");
+
     await repository.DeleteAllAsync(CancellationToken.None);
     var afterDelete = await repository.GetAllAsync(CancellationToken.None);
     AssertEqual(0, afterDelete.Count, "All settings should be removable.");
@@ -2200,7 +2185,7 @@ static async Task TestCapturePipelineWithSavedSettingsAsync()
     await settingsRepository.SaveAllAsync(savedSettings, CancellationToken.None);
 
     var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
-        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalCommand &&
+        .Where(source => source.Kind != CaptureSourceKind.WeChatLocalDatabase &&
                          source.Kind != CaptureSourceKind.ShihuatongLocalDatabase)
         .ToArray();
     var effectiveSources = defaultSources.Select(source =>
@@ -2290,6 +2275,417 @@ static async Task TestFollowedProjectKeywordRepositoryAsync()
 
     await keywordRepository.DeleteByProjectIdAsync(project.Id, CancellationToken.None);
     AssertEqual(0, (await keywordRepository.GetAllAsync(CancellationToken.None)).Count, "Deleting a project keyword set should remove all its keywords.");
+}
+
+static async Task TestNativeWeChatKeyDerivationAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", "native-reader", Guid.NewGuid().ToString("N"));
+    var databaseRoot = Path.Combine(root, "db_storage");
+    var snapshotRoot = Path.Combine(root, "snapshots");
+    var masterKey = Enumerable.Range(1, WeChatDatabaseKeyLease.KeyLength).Select(value => (byte)value).ToArray();
+    try
+    {
+        await CreateEncryptedWeChatFixtureAsync(databaseRoot, masterKey);
+        var contactPath = Path.Combine(databaseRoot, "contact", "contact.db");
+        await using var walConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = contactPath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false
+        }.ToString());
+        await walConnection.OpenAsync();
+        AssertEqual(
+            SQLitePCL.raw.SQLITE_OK,
+            SQLitePCL.raw.sqlite3_key(walConnection.Handle, masterKey),
+            "SQLCipher should accept the key before creating WAL content.");
+        ExecuteSql(walConnection, "PRAGMA journal_mode=WAL;");
+        ExecuteSql(walConnection, "PRAGMA wal_autocheckpoint=0;");
+        ExecuteSql(walConnection, "INSERT INTO contact VALUES ('wxid_wal', 'WAL联系人', '');");
+        AssertTrue(File.Exists(contactPath + "-wal"), "Fixture should retain an uncheckpointed encrypted WAL file.");
+
+        var discovery = new WeChatDatabaseDiscovery();
+        var databases = discovery.Discover(databaseRoot);
+        AssertTrue(databases.Any(item => item.RelativePath == "session/session.db"), "Session database should be discovered.");
+        AssertTrue(databases.Any(item => item.RelativePath == "contact/contact.db"), "Contact database should be discovered.");
+        AssertTrue(databases.Any(item => item.RelativePath == "message/message_0.db"), "Message shard should be discovered.");
+
+        var sourceMetadata = databases.ToDictionary(
+            item => item.FullPath,
+            item => (item.Length, File.GetLastWriteTimeUtc(item.FullPath)));
+        var snapshot = await new WeChatDatabaseSnapshotService(snapshotRoot)
+            .CreateAsync(databases, CancellationToken.None);
+        AssertEqual(3, snapshot.Databases.Count, "Snapshot should contain the three required encrypted databases.");
+        AssertTrue(
+            File.Exists(Path.Combine(snapshot.RootPath, "contact", "contact.db-wal")),
+            "Snapshot should copy the encrypted WAL with its database.");
+        foreach (var source in sourceMetadata)
+        {
+            AssertEqual(source.Value.Length, new FileInfo(source.Key).Length, "Snapshot must not change source length.");
+            AssertEqual(source.Value.Item2, File.GetLastWriteTimeUtc(source.Key), "Snapshot must not change source timestamp.");
+        }
+
+        using var lease = new WeChatDatabaseKeyLease(masterKey);
+        using (var snapshotConnection = new SqlCipherDatabaseAccessor().OpenReadOnly(
+                   Path.Combine(snapshot.RootPath, "contact", "contact.db"),
+                   lease))
+        using (var walCommand = snapshotConnection.CreateCommand())
+        {
+            walCommand.CommandText = "SELECT COUNT(*) FROM contact WHERE username = 'wxid_wal';";
+            AssertEqual(1L, (long)walCommand.ExecuteScalar()!, "Read-only SQLCipher access should see rows copied from WAL.");
+        }
+        using var keys = await new WeChatDatabaseKeyDeriver().DeriveAsync(
+            lease,
+            snapshot.Databases,
+            CancellationToken.None);
+        AssertEqual(3, keys.RelativePaths.Count, "All required database keys should validate.");
+        var derivedFixtureKey = Enumerable.Range(65, WeChatDatabaseKeyDeriver.KeySize)
+            .Select(value => (byte)value)
+            .ToArray();
+        var reserve64Page = CreateV4PageFixture(derivedFixtureKey, reserveSize: 64);
+        var reserve80Page = CreateV4PageFixture(derivedFixtureKey, reserveSize: 80);
+        AssertTrue(WeChatDatabaseKeyDeriver.VerifyPage(derivedFixtureKey, reserve64Page), "Reserve-64 V4 pages should validate.");
+        AssertTrue(WeChatDatabaseKeyDeriver.VerifyPage(derivedFixtureKey, reserve80Page), "Reserve-80 V4 pages should validate.");
+        reserve80Page[128] ^= 0x5A;
+        AssertFalse(WeChatDatabaseKeyDeriver.VerifyPage(derivedFixtureKey, reserve80Page), "Modified encrypted pages must fail HMAC validation.");
+        CryptographicOperations.ZeroMemory(derivedFixtureKey);
+        CryptographicOperations.ZeroMemory(reserve64Page);
+        CryptographicOperations.ZeroMemory(reserve80Page);
+
+        var invalidKey = masterKey.Select(value => (byte)(value ^ 0x5A)).ToArray();
+        using var invalidLease = new WeChatDatabaseKeyLease(invalidKey);
+        var rejected = false;
+        try
+        {
+            using var ignored = await new WeChatDatabaseKeyDeriver().DeriveAsync(
+                invalidLease,
+                snapshot.Databases,
+                CancellationToken.None);
+        }
+        catch (WeChatReaderException exception)
+        {
+            rejected = exception.Stage == WeChatReaderStage.KeyValidation &&
+                       exception.ErrorCode == WeChatReaderErrorCode.KeyInvalid;
+        }
+
+        AssertTrue(rejected, "An invalid master key should fail at key validation.");
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(masterKey);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task TestNativeWeChatReaderAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", "native-reader", Guid.NewGuid().ToString("N"));
+    var databaseRoot = Path.Combine(root, "db_storage");
+    var snapshotRoot = Path.Combine(root, "snapshots");
+    var statePath = Path.Combine(root, "state.json");
+    var masterKey = Enumerable.Range(33, WeChatDatabaseKeyLease.KeyLength).Select(value => (byte)value).ToArray();
+    try
+    {
+        await CreateEncryptedWeChatFixtureAsync(databaseRoot, masterKey);
+        var provider = new FakeWeChatDatabaseKeyProvider(masterKey);
+        await using var nativeReader = new NativeWeChatLocalDatabaseReader(
+            provider,
+            snapshotService: new WeChatDatabaseSnapshotService(snapshotRoot),
+            stateStore: new WeChatReaderStateStore(statePath));
+        var initialized = await nativeReader.InitializeAsync(
+            new WeChatInitializationRequest(databaseRoot, 1234, TimeSpan.FromSeconds(5)),
+            CancellationToken.None);
+        AssertTrue(initialized.Succeeded, "Native reader should initialize against encrypted fixtures.");
+        AssertTrue(nativeReader.IsInitialized, "Native reader should retain an in-memory key lease after initialization.");
+        AssertFalse(Directory.EnumerateDirectories(snapshotRoot).Any(), "Initialization snapshots should be deleted after validation.");
+        AssertEqual(1234, provider.LastRequest?.ProcessId ?? 0, "Native reader should pass the requested process id to KeyProbe provider.");
+
+        var start = DateTimeOffset.FromUnixTimeSeconds(1_780_000_000);
+        var end = DateTimeOffset.FromUnixTimeSeconds(1_780_001_000);
+        var page = await nativeReader.ReadAsync(
+            new WeChatReadRequest(start, end, 0, 2),
+            CancellationToken.None);
+        AssertEqual(3, page.TotalCount, "Native reader should count all matching shard messages before paging.");
+        AssertEqual(2, page.Messages.Count, "Native reader should apply page size after stable sorting.");
+        AssertTrue(page.Messages[0].SentAt >= page.Messages[1].SentAt, "Native messages should be newest first.");
+
+        var all = await nativeReader.ReadAsync(
+            new WeChatReadRequest(start, end, 0, 200),
+            CancellationToken.None);
+        AssertTrue(all.Messages.Any(message => message.Content == "[图片]"), "Image XML should use the established summary.");
+        AssertTrue(all.Messages.Any(message => message.Content == "压缩消息"), "Zstd message content should be decoded in C#.");
+        AssertFalse(Directory.EnumerateDirectories(snapshotRoot).Any(), "Read snapshots should be deleted after the query.");
+        var contentDecoder = new WeChatMessageContentDecoder();
+        var dtdPayload = "<!DOCTYPE msg [<!ENTITY xxe SYSTEM 'file:///not-allowed'>]><msg>&xxe;</msg>";
+        AssertEqual("[图片]", contentDecoder.Summarize(dtdPayload, 3), "DTD content must be rejected without returning the raw payload.");
+        AssertEqual("[图片]", contentDecoder.Summarize("<msg><img>", 3), "Malformed XML should degrade to a safe type summary.");
+        AssertEqual("", contentDecoder.DecodeContent(new byte[] { 0x28, 0xB5, 0x2F, 0xFD, 0x00 }, 1), "Corrupt zstd should fail closed.");
+        var mention = all.Messages.Single(message => message.Content.Contains("@张三", StringComparison.Ordinal));
+        AssertEqual("Alice", mention.SenderName, "Name2Id and contact display names should resolve the group sender.");
+        AssertTrue(mention.SourceMessageKey.StartsWith("WeChat:local:room@chatroom:message_0.db:", StringComparison.Ordinal), "Source key should remain stable and compatible.");
+
+        var adapter = new WeChatLocalDatabaseCaptureAdapter(nativeReader);
+        var batch = await adapter.CaptureAsync(
+            new CaptureContext(new Dictionary<string, string> { [adapter.Name] = "0" }),
+            CancellationToken.None);
+        AssertEqual(3, batch.Messages.Count, "Native adapter should capture all fixture messages from offset zero.");
+        AssertTrue(long.Parse(batch.NextOffset, CultureInfo.InvariantCulture) >= 1_780_000_300, "Native adapter should return a high-water timestamp.");
+
+        var stateText = await File.ReadAllTextAsync(statePath);
+        AssertFalse(stateText.Contains(Convert.ToHexString(masterKey), StringComparison.OrdinalIgnoreCase), "Reader state must not contain the database key.");
+        AssertFalse(stateText.Contains("all_keys", StringComparison.OrdinalIgnoreCase), "Reader state must not reference legacy plaintext key storage.");
+
+        await using var failingReader = new NativeWeChatLocalDatabaseReader(
+            new ThrowingWeChatDatabaseKeyProvider(
+                new TimeoutException("probe timed out " + new string('a', 64))),
+            snapshotService: new WeChatDatabaseSnapshotService(snapshotRoot),
+            stateStore: new WeChatReaderStateStore(Path.Combine(root, "failed-state.json")));
+        var failedInitialization = await failingReader.InitializeAsync(
+            new WeChatInitializationRequest(databaseRoot, 1234, TimeSpan.FromSeconds(1)),
+            CancellationToken.None);
+        var failedStage = failedInitialization.Stages.Last();
+        AssertFalse(failedInitialization.Succeeded, "A KeyProbe timeout must fail initialization.");
+        AssertEqual(WeChatReaderStage.KeyProbe, failedStage.Stage, "Timeout should retain the KeyProbe stage.");
+        AssertEqual(WeChatReaderErrorCode.KeyTimeout, failedStage.ErrorCode, "Timeout should use the stable KeyTimeout code.");
+        AssertFalse(failedStage.SanitizedMessage.Contains(new string('a', 64), StringComparison.Ordinal), "Diagnostics must redact key-shaped text.");
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(masterKey);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static async Task TestNativeWeChatReaderMatchesPythonOracleAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", "native-oracle", Guid.NewGuid().ToString("N"));
+    var encryptedRoot = Path.Combine(root, "encrypted", "db_storage");
+    var plainRoot = Path.Combine(root, "plain");
+    var snapshotRoot = Path.Combine(root, "snapshots");
+    var masterKey = Enumerable.Range(97, WeChatDatabaseKeyLease.KeyLength).Select(value => (byte)value).ToArray();
+    try
+    {
+        await CreateEncryptedWeChatFixtureAsync(encryptedRoot, masterKey);
+        await CreatePlainWeChatFixtureAsync(plainRoot);
+        await using var nativeReader = new NativeWeChatLocalDatabaseReader(
+            new FakeWeChatDatabaseKeyProvider(masterKey),
+            snapshotService: new WeChatDatabaseSnapshotService(snapshotRoot),
+            stateStore: new WeChatReaderStateStore(Path.Combine(root, "state.json")));
+        var initialized = await nativeReader.InitializeAsync(
+            new WeChatInitializationRequest(encryptedRoot, 1234, TimeSpan.FromSeconds(1)),
+            CancellationToken.None);
+        AssertTrue(initialized.Succeeded, "Native oracle reader should initialize.");
+
+        const long startTimestamp = 1_780_000_000;
+        const long endTimestamp = 1_780_001_000;
+        var native = await nativeReader.ReadAsync(
+            new WeChatReadRequest(
+                DateTimeOffset.FromUnixTimeSeconds(startTimestamp),
+                DateTimeOffset.FromUnixTimeSeconds(endTimestamp),
+                0,
+                200),
+            CancellationToken.None);
+
+        var toolDirectory = Path.Combine(ProjectToolPaths.ProjectRoot, "tools", "wechat-local-reader");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "python",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add(
+            "import json,sys;sys.path.insert(0,sys.argv[1]);import wechat_local_reader as r;" +
+            "m,o,d=r.read_messages(sys.argv[2],int(sys.argv[3]),int(sys.argv[4]));" +
+            "print(json.dumps({'messages':m,'offset':o,'diagnostics':d},ensure_ascii=False))");
+        startInfo.ArgumentList.Add(toolDirectory);
+        startInfo.ArgumentList.Add(plainRoot);
+        startInfo.ArgumentList.Add(startTimestamp.ToString(CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add(endTimestamp.ToString(CultureInfo.InvariantCulture));
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Unable to start the migration Python oracle.");
+        var standardOutput = await process.StandardOutput.ReadToEndAsync();
+        var standardError = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        AssertEqual(0, process.ExitCode, "Python oracle should complete: " + standardError.Trim());
+
+        using var oracleDocument = JsonDocument.Parse(standardOutput);
+        var oracleRoot = oracleDocument.RootElement;
+        var oracleRows = oracleRoot.GetProperty("messages").EnumerateArray().ToArray();
+        AssertEqual(oracleRows.Length, native.Messages.Count, "C# and Python should return the same message count.");
+        AssertEqual(
+            oracleRoot.GetProperty("offset").GetInt64().ToString(CultureInfo.InvariantCulture),
+            native.ProposedNextOffset,
+            "C# and Python should propose the same next offset.");
+        for (var index = 0; index < oracleRows.Length; index++)
+        {
+            var oracle = oracleRows[index];
+            var actual = native.Messages[index];
+            AssertEqual(oracle.GetProperty("id").GetString(), actual.SourceMessageKey["WeChat:local:".Length..], "Source message id should match the oracle.");
+            AssertEqual(oracle.GetProperty("chatId").GetString(), actual.ChatId, "Chat id should match the oracle.");
+            AssertEqual(oracle.GetProperty("chatName").GetString(), actual.ChatName, "Chat name should match the oracle.");
+            AssertEqual(oracle.GetProperty("senderName").GetString(), actual.SenderName, "Sender should match the oracle.");
+            AssertEqual(oracle.GetProperty("content").GetString(), actual.Content, "Content summary should match the oracle.");
+            AssertEqual(oracle.GetProperty("sentAt").GetInt64(), actual.SentAt.ToUnixTimeSeconds(), "Timestamp should match the oracle.");
+            AssertEqual(oracle.GetProperty("messageType").GetString(), actual.MessageType.ToString(), "Message type should match the oracle.");
+        }
+
+        var nativeCounts = native.Stages.Single(stage => stage.Stage == WeChatReaderStage.Query).Counts!;
+        var oracleDiagnostics = oracleRoot.GetProperty("diagnostics");
+        foreach (var name in new[] { "sessions", "matched_tables", "shards_scanned", "rows_read", "query_errors" })
+        {
+            AssertEqual(
+                oracleDiagnostics.GetProperty(name).GetInt64(),
+                nativeCounts[name],
+                $"Diagnostic count '{name}' should match the oracle.");
+        }
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(masterKey);
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static Task CreateEncryptedWeChatFixtureAsync(string databaseRoot, byte[] masterKey) =>
+    CreateWeChatFixtureAsync(databaseRoot, masterKey);
+
+static Task CreatePlainWeChatFixtureAsync(string databaseRoot) =>
+    CreateWeChatFixtureAsync(databaseRoot, masterKey: null);
+
+static async Task CreateWeChatFixtureAsync(string databaseRoot, byte[]? masterKey)
+{
+    Directory.CreateDirectory(databaseRoot);
+    await CreateFixtureDatabaseAsync(
+        Path.Combine(databaseRoot, "contact", "contact.db"),
+        masterKey,
+        connection =>
+        {
+            ExecuteSql(connection, "CREATE TABLE contact(username TEXT PRIMARY KEY, remark TEXT, nick_name TEXT);");
+            ExecuteSql(connection, "INSERT INTO contact VALUES ('room@chatroom', '项目群', '');");
+            ExecuteSql(connection, "INSERT INTO contact VALUES ('wxid_alice', 'Alice', '');");
+        });
+    await CreateFixtureDatabaseAsync(
+        Path.Combine(databaseRoot, "session", "session.db"),
+        masterKey,
+        connection =>
+        {
+            ExecuteSql(connection, "CREATE TABLE SessionTable(username TEXT, last_timestamp INTEGER, display_name TEXT);");
+            ExecuteSql(connection, "INSERT INTO SessionTable VALUES ('room@chatroom', 1780000300, '项目群');");
+        });
+    await CreateFixtureDatabaseAsync(
+        Path.Combine(databaseRoot, "message", "message_0.db"),
+        masterKey,
+        connection =>
+        {
+            ExecuteSql(connection, "CREATE TABLE Name2Id(id INTEGER, user_name TEXT);");
+            ExecuteSql(connection, "INSERT INTO Name2Id VALUES (1, 'wxid_alice');");
+            var tableName = "Msg_" + Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes("room@chatroom")));
+            ExecuteSql(connection, $"CREATE TABLE \"{tableName}\"(local_id INTEGER, server_id INTEGER, local_type INTEGER, real_sender_id INTEGER, create_time INTEGER, message_content BLOB, compress_content BLOB);");
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = $"INSERT INTO \"{tableName}\" VALUES (1, 101, 1, 1, 1780000100, $content, NULL)";
+                command.Parameters.AddWithValue("$content", "wxid_alice:\n@张三 请处理");
+                command.ExecuteNonQuery();
+            }
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = $"INSERT INTO \"{tableName}\" VALUES (2, 102, 3, 1, 1780000200, $content, NULL)";
+                command.Parameters.AddWithValue("$content", "<msg><img /></msg>");
+                command.ExecuteNonQuery();
+            }
+            using (var compressor = new Compressor())
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = $"INSERT INTO \"{tableName}\" VALUES (3, 103, 1, 1, 1780000300, '', $compressed)";
+                command.Parameters.AddWithValue("$compressed", compressor.Wrap(Encoding.UTF8.GetBytes("压缩消息")).ToArray());
+                command.ExecuteNonQuery();
+            }
+        });
+}
+
+static async Task CreateFixtureDatabaseAsync(
+    string path,
+    byte[]? masterKey,
+    Action<SqliteConnection> seed)
+{
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    SQLitePCL.Batteries_V2.Init();
+    var connectionString = new SqliteConnectionStringBuilder
+    {
+        DataSource = path,
+        Mode = SqliteOpenMode.ReadWriteCreate,
+        Pooling = false
+    }.ToString();
+    await using var connection = new SqliteConnection(connectionString);
+    await connection.OpenAsync();
+    if (masterKey is not null)
+    {
+        var result = SQLitePCL.raw.sqlite3_key(connection.Handle, masterKey);
+        AssertEqual(SQLitePCL.raw.SQLITE_OK, result, "SQLCipher should accept the fixture master key.");
+    }
+    seed(connection);
+}
+
+static void ExecuteSql(SqliteConnection connection, string sql)
+{
+    using var command = connection.CreateCommand();
+    command.CommandText = sql;
+    command.ExecuteNonQuery();
+}
+
+static byte[] CreateV4PageFixture(byte[] databaseKey, int reserveSize)
+{
+    var page = new byte[WeChatDatabaseKeyDeriver.PageSize];
+    RandomNumberGenerator.Fill(page);
+    var salt = page.AsSpan(0, WeChatDatabaseKeyDeriver.SaltSize).ToArray();
+    var macSalt = salt.Select(value => (byte)(value ^ 0x3A)).ToArray();
+    var macKey = Rfc2898DeriveBytes.Pbkdf2(
+        databaseKey,
+        macSalt,
+        2,
+        HashAlgorithmName.SHA512,
+        WeChatDatabaseKeyDeriver.KeySize);
+    try
+    {
+        using var hmac = new HMACSHA512(macKey);
+        var pageNumber = new byte[] { 1, 0, 0, 0 };
+        hmac.TransformBlock(salt, 0, salt.Length, null, 0);
+        hmac.TransformBlock(pageNumber, 0, pageNumber.Length, null, 0);
+        var contentLength = WeChatDatabaseKeyDeriver.PageSize - reserveSize - WeChatDatabaseKeyDeriver.SaltSize;
+        var content = page.AsSpan(WeChatDatabaseKeyDeriver.SaltSize, contentLength).ToArray();
+        try
+        {
+            hmac.TransformFinalBlock(content, 0, content.Length);
+            hmac.Hash!.CopyTo(page, page.Length - hmac.Hash.Length);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(content);
+        }
+
+        return page;
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(salt);
+        CryptographicOperations.ZeroMemory(macSalt);
+        CryptographicOperations.ZeroMemory(macKey);
+    }
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)
@@ -2387,44 +2783,6 @@ public sealed class FakeScreenOcrReader : IScreenOcrReader
     }
 }
 
-public sealed class FakeExternalCommandRunner : IExternalCommandRunner
-{
-    private readonly ExternalCommandResult _result;
-    private readonly Action<string, IReadOnlyList<string>, string?, IReadOnlyDictionary<string, string>>? _onRun;
-
-    public FakeExternalCommandRunner(
-        ExternalCommandResult result,
-        Action<string, IReadOnlyList<string>, string?, IReadOnlyDictionary<string, string>>? onRun = null)
-    {
-        _result = result;
-        _onRun = onRun;
-    }
-
-    public string? LastExecutablePath { get; private set; }
-
-    public IReadOnlyList<string>? LastArguments { get; private set; }
-
-    public string? LastWorkingDirectory { get; private set; }
-
-    public IReadOnlyDictionary<string, string> LastEnvironment { get; private set; } =
-        new Dictionary<string, string>();
-
-    public Task<ExternalCommandResult> RunAsync(
-        string executablePath,
-        IReadOnlyList<string> arguments,
-        string? workingDirectory,
-        IReadOnlyDictionary<string, string> environment,
-        CancellationToken cancellationToken)
-    {
-        LastExecutablePath = executablePath;
-        LastArguments = arguments.ToArray();
-        LastWorkingDirectory = workingDirectory;
-        LastEnvironment = environment;
-        _onRun?.Invoke(executablePath, LastArguments, workingDirectory, environment);
-        return Task.FromResult(_result);
-    }
-}
-
 public sealed class FakeWeChatDatabaseKeyProvider : IWeChatDatabaseKeyProvider
 {
     private readonly byte[] _keyBytes;
@@ -2444,6 +2802,88 @@ public sealed class FakeWeChatDatabaseKeyProvider : IWeChatDatabaseKeyProvider
     {
         LastRequest = request;
         return Task.FromResult(new WeChatDatabaseKeyLease(_keyBytes));
+    }
+}
+
+public sealed class ThrowingWeChatDatabaseKeyProvider : IWeChatDatabaseKeyProvider
+{
+    private readonly Exception _exception;
+
+    public ThrowingWeChatDatabaseKeyProvider(Exception exception)
+    {
+        _exception = exception;
+    }
+
+    public string Name => "throwing-fixture";
+
+    public Task<WeChatDatabaseKeyLease> AcquireAsync(
+        WeChatDatabaseKeyRequest request,
+        CancellationToken cancellationToken) => Task.FromException<WeChatDatabaseKeyLease>(_exception);
+}
+
+public sealed class FakeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
+{
+    private readonly IReadOnlyList<CapturedMessage> _messages;
+    private readonly int _totalCount;
+    private bool _disposed;
+
+    public FakeWeChatLocalDatabaseReader(
+        IReadOnlyList<CapturedMessage>? messages = null,
+        int? totalCount = null)
+    {
+        _messages = messages ?? Array.Empty<CapturedMessage>();
+        _totalCount = totalCount ?? _messages.Count;
+    }
+
+    public bool IsAvailable => !_disposed;
+
+    public bool IsInitialized { get; private set; }
+
+    public IReadOnlyList<WeChatReaderStageResult> Diagnostics { get; private set; } =
+        Array.Empty<WeChatReaderStageResult>();
+
+    public WeChatInitializationRequest? LastInitializationRequest { get; private set; }
+
+    public WeChatReadRequest? LastReadRequest { get; private set; }
+
+    public Task<WeChatInitializationResult> InitializeAsync(
+        WeChatInitializationRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        LastInitializationRequest = request;
+        IsInitialized = true;
+        Diagnostics = new[]
+        {
+            new WeChatReaderStageResult(
+                WeChatReaderStage.KeyValidation,
+                true,
+                WeChatReaderErrorCode.None,
+                "ok",
+                DateTimeOffset.UtcNow,
+                TimeSpan.Zero)
+        };
+        return Task.FromResult(new WeChatInitializationResult(true, Diagnostics));
+    }
+
+    public Task<WeChatReadResult> ReadAsync(
+        WeChatReadRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        LastReadRequest = request;
+        return Task.FromResult(new WeChatReadResult(
+            _messages,
+            _totalCount,
+            "0",
+            Diagnostics));
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        IsInitialized = false;
+        _disposed = true;
+        return ValueTask.CompletedTask;
     }
 }
 

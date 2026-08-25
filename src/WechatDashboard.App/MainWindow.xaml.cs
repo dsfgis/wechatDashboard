@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
+using Forms = System.Windows.Forms;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Mentions;
@@ -63,6 +64,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private CancellationTokenSource? _liveCaptureCts;
     // 实时监听后台任务
     private Task? _liveCaptureTask;
+    // 系统托盘图标及其右键菜单
+    private readonly Forms.NotifyIcon _trayIcon;
+    private readonly Forms.ContextMenuStrip _trayMenu;
+    // 从托盘恢复时保留最小化前的窗口状态
+    private WindowState _windowStateBeforeMinimize = WindowState.Normal;
+    // 关闭前异步清理只执行一次
+    private bool _isClosingAfterCleanup;
 
     // 顶部摘要文本
     private string _summaryText = "加载中";
@@ -119,6 +127,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         CaptureInboxPath = _captureInboxPath;
         // 设置数据上下文为本窗口，使 XAML 绑定生效
         DataContext = this;
+
+        var showMenuItem = new Forms.ToolStripMenuItem("显示");
+        showMenuItem.Click += (_, _) => ShowMainWindowFromTray();
+        var exitMenuItem = new Forms.ToolStripMenuItem("退出");
+        exitMenuItem.Click += (_, _) => ExitFromTray();
+
+        _trayMenu = new Forms.ContextMenuStrip();
+        _trayMenu.Items.Add(showMenuItem);
+        _trayMenu.Items.Add(exitMenuItem);
+        _trayIcon = new Forms.NotifyIcon
+        {
+            Text = Title,
+            Icon = System.Drawing.SystemIcons.Application,
+            ContextMenuStrip = _trayMenu,
+            Visible = true
+        };
+        _trayIcon.DoubleClick += (_, _) => ShowMainWindowFromTray();
     }
 
     /// <summary>Switches the content page from the selected sidebar item.</summary>
@@ -404,16 +429,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            if (result.KeyPath is not null)
-            {
-                ExternalKeyFileTextBox.Text = result.KeyPath;
-                SummaryText = $"DB Key 提取成功（微信 PID {result.TargetProcessId}），已生成兼容 Key 文件。点击\"初始化本地库\"继续。";
-            }
-            else
-            {
-                ExternalKeyFileTextBox.Text = "";
-                SummaryText = $"DB Key 提取成功（微信 PID {result.TargetProcessId}），密钥已通过受保护通道送达。点击\"初始化本地库\"继续。";
-            }
+            SummaryText = $"原生读取器初始化成功（微信 PID {result.TargetProcessId}），密钥仅保留在当前进程内存中。";
         }
         finally
         {
@@ -465,13 +481,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _readerService.BootstrapRange = tag;
         }
 
-        var manuallyImportedKey = ImportedDatabaseKeyBox?.Password;
-        if (!string.IsNullOrWhiteSpace(manuallyImportedKey))
-        {
-            _readerService.ImportedDatabaseKey = manuallyImportedKey;
-        }
-        _readerService.ExternalKeyCommand = ExternalKeyCommandTextBox?.Text;
-        _readerService.ExternalKeyFile = ExternalKeyFileTextBox?.Text;
     }
 
     /// <summary>启动微信实时监听循环。</summary>
@@ -511,11 +520,69 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"扫描到 {rows.Count} 个微信可见窗口快照";
     }
 
-    /// <summary>窗口关闭时停止监听，避免后台任务泄漏。</summary>
+    /// <summary>最小化主窗口时隐藏任务栏窗口，继续在系统托盘运行。</summary>
+    private void MainWindow_StateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState == WindowState.Minimized)
+        {
+            Hide();
+            return;
+        }
+
+        _windowStateBeforeMinimize = WindowState;
+    }
+
+    /// <summary>从托盘恢复并激活主窗口。</summary>
+    private void ShowMainWindowFromTray()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(ShowMainWindowFromTray);
+            return;
+        }
+
+        Show();
+        WindowState = _windowStateBeforeMinimize;
+        Activate();
+    }
+
+    /// <summary>通过托盘菜单退出应用。</summary>
+    private void ExitFromTray()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(ExitFromTray);
+            return;
+        }
+
+        Close();
+    }
+
+    /// <summary>窗口关闭时停止监听并释放托盘资源，避免后台任务泄漏。</summary>
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
-        await TodoFeature.StopAsync();
-        await StopLiveCaptureAsync();
+        if (_isClosingAfterCleanup)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        _isClosingAfterCleanup = true;
+        _trayIcon.Visible = false;
+
+        try
+        {
+            await TodoFeature.StopAsync();
+            await StopLiveCaptureAsync();
+            await _readerService.DisposeAsync();
+        }
+        finally
+        {
+            _trayIcon.Dispose();
+            _trayMenu.Dispose();
+            Closing -= MainWindow_Closing;
+            Close();
+        }
     }
 
     /// <summary>初始化数据库并刷新；seedIfEmpty 控制首次空库时是否播种示例。</summary>
@@ -1027,6 +1094,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task LoadCaptureSourceSettingsAsync()
     {
+        await _settingsRepository.MigrateKindAsync(
+            source: "WeChat",
+            oldKind: "WeChatLocalCommand",
+            newKind: CaptureSourceKind.WeChatLocalDatabase.ToString(),
+            newDisplayName: "微信本地数据库",
+            newLocation: "原生 C#（只读本地数据库）",
+            CancellationToken.None);
         var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
         _readerService.ResetInitializationState();
         var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
@@ -1322,7 +1396,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }).ToArray();
 
         return new MessageCapturePipeline(
-            adapters: CaptureAdapterFactory.CreateAdapters(effectiveSources),
+            adapters: CaptureAdapterFactory.CreateAdapters(
+                effectiveSources,
+                windowTextSnapshotProvider: null,
+                weChatLocalDatabaseReader: _readerService.NativeReader),
             new SqliteMessageProcessingUnitOfWork(_databasePath),
             _offsetRepository,
             new MentionDetector(_currentAliases),
@@ -1462,7 +1539,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ChatId: "visible-window",
             ChatName: "微信可见窗口")
         {
-            IgnoreWindowTitleContains = new[] { "微信项目消息看板", "WeChat Dashboard" }
+            IgnoreWindowTitleContains = new[] { "IM消息看板", "微信项目消息看板", "WeChat Dashboard" }
         };
     }
 

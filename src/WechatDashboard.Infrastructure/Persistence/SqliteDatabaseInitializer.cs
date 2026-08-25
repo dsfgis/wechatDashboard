@@ -49,6 +49,13 @@ public sealed class SqliteDatabaseInitializer
             checksum: "todo-groups-v1",
             sql: TodoGroupsMigrationSql,
             cancellationToken);
+        await ApplyMigrationAsync(
+            connection,
+            version: 4,
+            name: "todo-group-colors",
+            checksum: "todo-group-colors-v1",
+            sql: TodoGroupColorsMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -148,6 +155,11 @@ public sealed class SqliteDatabaseInitializer
             ADD COLUMN group_id INTEGER NULL REFERENCES todo_groups(id);
 
         CREATE INDEX idx_todo_items_group_id ON todo_items(group_id);
+        """;
+
+    private const string TodoGroupColorsMigrationSql = """
+        ALTER TABLE todo_groups
+            ADD COLUMN color TEXT NOT NULL DEFAULT '#4B5563';
         """;
 
     /// <summary>

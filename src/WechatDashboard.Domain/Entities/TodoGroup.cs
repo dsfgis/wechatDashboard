@@ -5,4 +5,5 @@ public sealed record TodoGroup(
     long Id,
     string Name,
     string NormalizedName,
+    string Color,
     DateTimeOffset CreatedAt);

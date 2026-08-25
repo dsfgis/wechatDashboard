@@ -17,10 +17,17 @@ public sealed class TodoGroupApplicationService
     public Task<IReadOnlyList<TodoGroup>> GetAllAsync(CancellationToken cancellationToken) =>
         _groups.GetAllAsync(cancellationToken);
 
-    public Task<CreateTodoGroupResult> CreateAsync(string name, CancellationToken cancellationToken)
+    public Task<CreateTodoGroupResult> CreateAsync(string name, CancellationToken cancellationToken) =>
+        CreateAsync(name, TodoGroupColorPolicy.DefaultColor, cancellationToken);
+
+    public Task<CreateTodoGroupResult> CreateAsync(
+        string name,
+        string color,
+        CancellationToken cancellationToken)
     {
         var displayName = TodoGroupNamePolicy.NormalizeDisplayName(name);
         var normalizedName = TodoGroupNamePolicy.NormalizeKey(displayName);
-        return _groups.CreateAsync(displayName, normalizedName, _clock.Now, cancellationToken);
+        var normalizedColor = TodoGroupColorPolicy.Normalize(color);
+        return _groups.CreateAsync(displayName, normalizedName, normalizedColor, _clock.Now, cancellationToken);
     }
 }

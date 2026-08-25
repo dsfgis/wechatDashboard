@@ -26,6 +26,11 @@ public interface ITodoRepository
     /// <summary>按原消息获取第一个关联待办，用于消息转待办幂等。</summary>
     Task<TodoItem?> GetBySourceMessageIdAsync(long sourceMessageId, CancellationToken cancellationToken);
 
+    /// <summary>批量获取原消息已关联的第一个待办，用于消息列表展示真实转换状态。</summary>
+    Task<IReadOnlyDictionary<long, TodoItem>> GetBySourceMessageIdsAsync(
+        IReadOnlyCollection<long> sourceMessageIds,
+        CancellationToken cancellationToken);
+
     /// <summary>将指定待办标记为已办理，并记录完成时间。</summary>
     Task<bool> MarkCompletedAsync(long id, DateTimeOffset completedAt, CancellationToken cancellationToken);
 

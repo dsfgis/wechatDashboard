@@ -263,7 +263,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private async Task<IReadOnlyList<TodoListItemViewModel>> CreateRowsAsync(IEnumerable<TodoItem> source)
     {
         var todos = source.ToArray();
-        var groupLookup = (await _groupService.GetAllAsync(CancellationToken.None)).ToDictionary(item => item.Id, item => item.Name);
+        var groupLookup = (await _groupService.GetAllAsync(CancellationToken.None)).ToDictionary(item => item.Id);
         var messageIds = todos.Where(item => item.SourceMessageId.HasValue).Select(item => item.SourceMessageId!.Value).Distinct().ToArray();
         var messageLookup = (await _messages.GetByIdsAsync(messageIds, CancellationToken.None)).ToDictionary(item => item.Id);
         var rows = new List<TodoListItemViewModel>(todos.Length);
@@ -272,15 +272,16 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             var reminders = await _reminders.GetForTodoAsync(todo.Id, CancellationToken.None);
             var currentReminder = reminders.LastOrDefault(item => item.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching or ReminderStatus.Delivered);
             messageLookup.TryGetValue(todo.SourceMessageId ?? 0, out var message);
-            var groupName = todo.GroupId is { } groupId && groupLookup.TryGetValue(groupId, out var name)
-                ? name
-                : "未分组";
+            var group = todo.GroupId is { } groupId && groupLookup.TryGetValue(groupId, out var resolvedGroup)
+                ? resolvedGroup
+                : null;
             rows.Add(new TodoListItemViewModel(
                 todo,
                 message,
                 currentReminder,
                 _bucketPolicy.Classify(todo.DueAt, _clock.Now),
-                groupName,
+                group?.Name ?? "未分组",
+                group?.Color ?? TodoGroupColorPolicy.DefaultColor,
                 UpdateSelectionState));
         }
 
@@ -320,6 +321,7 @@ public sealed class TodoListItemViewModel : ObservableObject
         TodoReminder? reminder,
         TodoDueBucket bucket,
         string groupName,
+        string groupColor,
         Action selectionChanged)
     {
         Todo = todo;
@@ -327,6 +329,7 @@ public sealed class TodoListItemViewModel : ObservableObject
         Reminder = reminder;
         Bucket = bucket;
         GroupName = groupName;
+        GroupColor = groupColor;
         _selectionChanged = selectionChanged;
     }
 
@@ -335,6 +338,7 @@ public sealed class TodoListItemViewModel : ObservableObject
     public TodoReminder? Reminder { get; }
     public TodoDueBucket Bucket { get; }
     public string GroupName { get; }
+    public string GroupColor { get; }
     public long Id => Todo.Id;
     public bool IsPinned => Todo.IsPinned;
     public string PinButtonText => IsPinned ? "取消置顶" : "置顶";

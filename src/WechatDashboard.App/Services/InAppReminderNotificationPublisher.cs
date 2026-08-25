@@ -1,4 +1,5 @@
-using System.Windows;
+using WechatDashboard.App.Views.Reminders;
+using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 
@@ -8,24 +9,34 @@ namespace WechatDashboard.App.Services;
 public sealed class InAppReminderNotificationPublisher : IUserNotificationPublisher
 {
     private readonly ReminderApplicationService _reminders;
+    private readonly ITodoRepository _todos;
     private readonly IClock _clock;
     private readonly Func<Task> _refresh;
 
-    public InAppReminderNotificationPublisher(ReminderApplicationService reminders, IClock clock, Func<Task> refresh)
+    public InAppReminderNotificationPublisher(
+        ReminderApplicationService reminders,
+        ITodoRepository todos,
+        IClock clock,
+        Func<Task> refresh)
     {
         _reminders = reminders;
+        _todos = todos;
         _clock = clock;
         _refresh = refresh;
     }
 
     public async Task PublishAsync(ReminderDispatchItem item, CancellationToken cancellationToken)
     {
-        var result = await System.Windows.Application.Current.Dispatcher.InvokeAsync(() => MessageBox.Show(
-            $"{item.TodoTitle}\n\n是否延后 10 分钟？选择“否”表示本次提醒已知晓。",
-            "待办提醒",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Information));
-        if (result == MessageBoxResult.Yes)
+        var action = await System.Windows.Application.Current.Dispatcher.InvokeAsync(
+            () => ReminderNotificationWindow.Show(item.TodoTitle, item.TodoDescription));
+        if (action == ReminderNotificationAction.Complete)
+        {
+            await _todos.MarkSelectedCompletedAsync(
+                new[] { item.Reminder.TodoId },
+                _clock.Now,
+                cancellationToken);
+        }
+        else if (action == ReminderNotificationAction.SnoozeTenMinutes)
         {
             await _reminders.SnoozeAsync(item.Reminder.Id, _clock.Now.AddMinutes(10), cancellationToken);
         }

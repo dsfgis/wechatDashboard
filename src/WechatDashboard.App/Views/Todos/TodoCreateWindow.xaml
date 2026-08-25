@@ -20,15 +20,35 @@
                 </StackPanel>
                 <StackPanel Grid.Column="1" Margin="8,0,0,0">
                     <TextBlock Text="分组" Foreground="#6B7280" />
-                    <ComboBox ItemsSource="{Binding GroupOptions}" DisplayMemberPath="Name"
-                              SelectedItem="{Binding SelectedGroup}" Margin="0,4,0,0" />
+                    <ComboBox ItemsSource="{Binding GroupOptions}" SelectedItem="{Binding SelectedGroup}" Margin="0,4,0,0">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,6,0" />
+                                    <TextBlock Text="{Binding Name}" Foreground="{Binding Color}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
                 </StackPanel>
             </Grid>
-            <TextBlock Text="新增分组" Foreground="#6B7280" />
-            <DockPanel Margin="0,4,0,12">
+            <TextBlock Text="新增分组名称" Foreground="#6B7280" />
+            <DockPanel Margin="0,4,0,8">
                 <Button DockPanel.Dock="Right" Content="新增并选中" Command="{Binding AddGroupCommand}" Padding="14,6" Margin="8,0,0,0" />
                 <TextBox Text="{Binding NewGroupName, UpdateSourceTrigger=PropertyChanged}" Padding="8" ToolTip="输入自定义待办分组名称" />
             </DockPanel>
+            <TextBlock Text="分组颜色" Foreground="#6B7280" />
+            <ComboBox ItemsSource="{Binding NewGroupColors}" SelectedItem="{Binding SelectedNewGroupColor}"
+                      Width="160" HorizontalAlignment="Left" Margin="0,4,0,12" Padding="6,4">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <Border Width="12" Height="12" CornerRadius="6" Background="{Binding Color}" Margin="0,0,6,0" />
+                                <TextBlock Text="{Binding Name}" Foreground="{Binding Color}" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+            </ComboBox>
             <TextBlock Text="截止时间（yyyy-MM-dd HH:mm，留空表示无截止时间）" Foreground="#6B7280" />
             <TextBox Text="{Binding DueAtText, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8" />
             <CheckBox Content="创建后设置首次提醒" IsChecked="{Binding HasReminder}" Margin="0,0,0,8" />

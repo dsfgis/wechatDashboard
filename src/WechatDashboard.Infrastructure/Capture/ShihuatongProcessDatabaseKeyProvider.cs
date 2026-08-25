@@ -20,6 +20,14 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
     private const uint ProcessVmRead = 0x0010;
     private const int ExpectedKeyLength = 32;
     private const int MaximumDataRootLength = 1024;
+    private const int MetadataFieldLength = 16;
+    private const int MemoryScanChunkLength = 1024 * 1024;
+    private const long Maximum32BitAddress = 0x80000000L;
+    private const uint MemCommit = 0x1000;
+    private const uint PageNoAccess = 0x01;
+    private const uint PageGuard = 0x100;
+    private int? _cachedProcessId;
+    private long? _cachedMetadataAddress;
 
     public bool IsProcessRunning
     {
@@ -49,45 +57,171 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
             throw new Win32Exception(Marshal.GetLastWin32Error(), "无法以只读权限访问石化通进程。");
         }
 
+        try
+        {
+            if (_cachedProcessId == process.Id && _cachedMetadataAddress is { } cachedAddress &&
+                TryCreateSecret(processHandle, cachedAddress, out var cachedSecret))
+            {
+                return cachedSecret;
+            }
+
+            var managerPointerAddress = checked(module.BaseAddress.ToInt64() + DatabaseManagerPointerOffset);
+            var managerPointer = ReadUInt32(processHandle, managerPointerAddress);
+            if (managerPointer != 0 && TryCreateSecret(processHandle, managerPointer, out var fixedOffsetSecret))
+            {
+                CacheMetadataAddress(process.Id, managerPointer);
+                return fixedOffsetSecret;
+            }
+
+            if (TryFindSecret(processHandle, out var discoveredAddress, out var discoveredSecret))
+            {
+                CacheMetadataAddress(process.Id, discoveredAddress);
+                return discoveredSecret;
+            }
+
+            throw new InvalidOperationException("当前石化通数据库元数据格式不受支持。");
+        }
+        finally
+        {
+            CloseHandle(processHandle);
+        }
+    }
+
+    private void CacheMetadataAddress(int processId, long metadataAddress)
+    {
+        _cachedProcessId = processId;
+        _cachedMetadataAddress = metadataAddress;
+    }
+
+    private static bool TryFindSecret(
+        IntPtr processHandle,
+        out long metadataAddress,
+        out ShihuatongDatabaseSecret secret)
+    {
+        metadataAddress = 0;
+        secret = null!;
+        var address = 0L;
+        var informationLength = Marshal.SizeOf<MemoryBasicInformation>();
+        while (address < Maximum32BitAddress &&
+               VirtualQueryEx(
+                   processHandle,
+                   new IntPtr(address),
+                   out var information,
+                   informationLength) != 0)
+        {
+            var regionStart = information.BaseAddress.ToInt64();
+            var regionLength = checked((long)information.RegionSize.ToUInt64());
+            if (regionLength <= 0)
+            {
+                break;
+            }
+
+            if (information.State == MemCommit &&
+                (information.Protect & (PageNoAccess | PageGuard)) == 0)
+            {
+                var regionEnd = Math.Min(Maximum32BitAddress, regionStart + regionLength);
+                for (var chunkStart = regionStart;
+                     chunkStart < regionEnd;
+                     chunkStart += MemoryScanChunkLength - MetadataFieldLength)
+                {
+                    var requestedLength = checked((int)Math.Min(MemoryScanChunkLength, regionEnd - chunkStart));
+                    if (requestedLength < MetadataFieldLength)
+                    {
+                        break;
+                    }
+
+                    var buffer = new byte[requestedLength];
+                    if (!ReadProcessMemory(
+                            processHandle,
+                            new IntPtr(chunkStart),
+                            buffer,
+                            requestedLength,
+                            out var bytesRead) ||
+                        bytesRead.ToInt64() < MetadataFieldLength)
+                    {
+                        continue;
+                    }
+
+                    var usableLength = checked((int)bytesRead.ToInt64());
+                    for (var offset = 0; offset <= usableLength - MetadataFieldLength; offset += sizeof(uint))
+                    {
+                        if (!LooksLikeMetadataHeader(buffer, offset))
+                        {
+                            continue;
+                        }
+
+                        var candidateAddress = chunkStart + offset;
+                        if (TryCreateSecret(processHandle, candidateAddress, out secret))
+                        {
+                            metadataAddress = candidateAddress;
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            address = checked(regionStart + regionLength);
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeMetadataHeader(byte[] buffer, int offset)
+    {
+        var dataRootPointer = BitConverter.ToUInt32(buffer, offset);
+        var dataRootLength = BitConverter.ToUInt32(buffer, offset + sizeof(uint));
+        var keyPointer = BitConverter.ToUInt32(buffer, offset + sizeof(uint) * 2);
+        var keyLength = BitConverter.ToUInt32(buffer, offset + sizeof(uint) * 3);
+        return dataRootPointer >= 0x10000 && dataRootPointer < Maximum32BitAddress &&
+               dataRootLength is >= 10 and <= MaximumDataRootLength &&
+               keyPointer >= 0x10000 && keyPointer < Maximum32BitAddress &&
+               keyLength == ExpectedKeyLength;
+    }
+
+    private static bool TryCreateSecret(
+        IntPtr processHandle,
+        long metadataAddress,
+        out ShihuatongDatabaseSecret secret)
+    {
+        secret = null!;
         byte[]? keyBytes = null;
         try
         {
-            var managerPointerAddress = checked(module.BaseAddress.ToInt64() + DatabaseManagerPointerOffset);
-            var managerPointer = ReadUInt32(processHandle, managerPointerAddress);
-            if (managerPointer == 0)
+            var fields = ReadBytes(processHandle, metadataAddress, MetadataFieldLength);
+            if (!LooksLikeMetadataHeader(fields, 0))
             {
-                throw new InvalidOperationException("石化通数据库尚未初始化，请登录后重试。");
+                return false;
             }
 
-            var fields = ReadBytes(processHandle, managerPointer, 16);
             var dataRootPointer = BitConverter.ToUInt32(fields, 0);
-            var dataRootLength = checked((int)BitConverter.ToUInt32(fields, 4));
-            var keyPointer = BitConverter.ToUInt32(fields, 8);
-            var keyLength = checked((int)BitConverter.ToUInt32(fields, 12));
-
-            if (dataRootPointer == 0 || dataRootLength is < 10 or > MaximumDataRootLength ||
-                keyPointer == 0 || keyLength != ExpectedKeyLength)
-            {
-                throw new InvalidOperationException("当前石化通数据库元数据格式不受支持。");
-            }
-
-            var dataRoot = Encoding.UTF8.GetString(ReadBytes(processHandle, dataRootPointer, dataRootLength));
+            var dataRootLength = checked((int)BitConverter.ToUInt32(fields, sizeof(uint)));
+            var keyPointer = BitConverter.ToUInt32(fields, sizeof(uint) * 2);
+            var dataRoot = new UTF8Encoding(false, true).GetString(
+                ReadBytes(processHandle, dataRootPointer, dataRootLength));
             if (!Directory.Exists(dataRoot))
             {
-                throw new InvalidOperationException("未找到石化通本地数据目录。");
+                return false;
             }
 
-            keyBytes = ReadBytes(processHandle, keyPointer, keyLength);
+            var accountDirectory = ShihuatongDataDirectoryLocator.FindActiveAccountDirectory(dataRoot);
+            if (accountDirectory is null)
+            {
+                return false;
+            }
+
+            keyBytes = ReadBytes(processHandle, keyPointer, ExpectedKeyLength);
             if (!IsValidKey(keyBytes))
             {
-                throw new InvalidOperationException("石化通数据库密钥格式校验失败，未尝试解密。");
+                return false;
             }
 
-            var accountDirectory = ShihuatongDataDirectoryLocator.FindActiveAccountDirectory(dataRoot)
-                ?? throw new InvalidOperationException("未找到当前石化通账户的消息数据库。");
-            var secret = new ShihuatongDatabaseSecret(accountDirectory, keyBytes);
+            secret = new ShihuatongDatabaseSecret(accountDirectory, keyBytes);
             keyBytes = null;
-            return secret;
+            return true;
+        }
+        catch (Exception exception) when (exception is Win32Exception or DecoderFallbackException or IOException)
+        {
+            return false;
         }
         finally
         {
@@ -95,7 +229,6 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
             {
                 Array.Clear(keyBytes, 0, keyBytes.Length);
             }
-            CloseHandle(processHandle);
         }
     }
 
@@ -157,9 +290,28 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
         int size,
         out IntPtr bytesRead);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualQueryEx(
+        IntPtr process,
+        IntPtr address,
+        out MemoryBasicInformation information,
+        int informationLength);
+
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryBasicInformation
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public UIntPtr RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
 }
 
 internal static partial class ShihuatongDataDirectoryLocator

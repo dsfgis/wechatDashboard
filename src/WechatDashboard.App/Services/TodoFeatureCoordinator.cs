@@ -52,12 +52,17 @@ public sealed class TodoFeatureCoordinator : IDisposable
             onTodoCreated);
         MessageFeed = new MessageFeedViewModel(
             messageRepository,
+            todoRepository,
             todoService,
             aliases,
             followedChats,
             filterMode,
             ShowTodoAsync);
-        var publisher = new InAppReminderNotificationPublisher(reminderService, clock, Workbench.RefreshAsync);
+        var publisher = new InAppReminderNotificationPublisher(
+            reminderService,
+            todoRepository,
+            clock,
+            Workbench.RefreshAsync);
         _reminderWorker = new ReminderWorker(reminderRepository, publisher, clock);
         _dueRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         _dueRefreshTimer.Tick += async (_, _) => await Workbench.RefreshAsync();

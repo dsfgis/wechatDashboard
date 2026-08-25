@@ -33,7 +33,27 @@ public sealed class ShihuatongLocalDatabaseCaptureAdapter : IMessageCaptureAdapt
     public Task<CaptureBatch> CaptureAsync(CaptureContext context, CancellationToken cancellationToken)
     {
         var currentOffset = context.GetOffset(Name);
-        return Task.Run(() => _reader.Capture(currentOffset, cancellationToken), cancellationToken);
+        return Task.Run(
+            () =>
+            {
+                try
+                {
+                    return _reader.Capture(currentOffset, cancellationToken);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    // 石化通未登录、尚未初始化或当前客户端元数据布局不兼容，
+                    // 都属于“本轮不可采集”而不是应用故障。异常必须在后台任务内部消化，
+                    // 否则 Visual Studio 会在 Debug 启动后反复以用户代码异常中断。
+                    System.Diagnostics.Debug.WriteLine(
+                        $"Shihuatong local database capture skipped: {exception.Message}");
+                    return new CaptureBatch(
+                        Name,
+                        Array.Empty<CapturedMessage>(),
+                        ShihuatongCaptureOffset.Parse(currentOffset).ToString());
+                }
+            },
+            cancellationToken);
     }
 }
 

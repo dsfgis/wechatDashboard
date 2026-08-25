@@ -46,7 +46,7 @@ public static class CaptureAdapterFactory
     /// <summary>根据采集源定义集合创建启用的适配器实例。</summary>
     public static IReadOnlyList<IMessageCaptureAdapter> CreateAdapters(IEnumerable<CaptureSourceDefinition> sources)
     {
-        return CreateAdapters(sources, null);
+        return CreateAdapters(sources, null, null);
     }
 
     /// <summary>
@@ -57,12 +57,23 @@ public static class CaptureAdapterFactory
         IEnumerable<CaptureSourceDefinition> sources,
         IWindowTextSnapshotProvider? windowTextSnapshotProvider)
     {
+        return CreateAdapters(sources, windowTextSnapshotProvider, null);
+    }
+
+    /// <summary>
+    /// 根据采集源定义集合创建启用的适配器实例；原生微信数据库源必须使用已经初始化的共享 reader。
+    /// </summary>
+    public static IReadOnlyList<IMessageCaptureAdapter> CreateAdapters(
+        IEnumerable<CaptureSourceDefinition> sources,
+        IWindowTextSnapshotProvider? windowTextSnapshotProvider,
+        IWeChatLocalDatabaseReader? weChatLocalDatabaseReader)
+    {
         return sources
             // 仅保留启用项
             .Where(source => source.IsEnabled)
             // WindowText 必须有 provider 才能创建
             .Where(source => source.Kind != CaptureSourceKind.WindowText || windowTextSnapshotProvider is not null)
-            .Select(source => CreateAdapter(source, windowTextSnapshotProvider))
+            .Select(source => CreateAdapter(source, windowTextSnapshotProvider, weChatLocalDatabaseReader))
             .ToArray();
     }
 
@@ -100,9 +111,9 @@ public static class CaptureAdapterFactory
         return new CaptureSourceDefinition(
             Source: "WeChat",
             DisplayName: "微信本地数据库",
-            Kind: CaptureSourceKind.WeChatLocalCommand,
+            Kind: CaptureSourceKind.WeChatLocalDatabase,
             // 仅当读取器可用且已初始化时启用
-            Location: readerService.ReaderExecutablePath ?? "",
+            Location: "原生 C#（只读本地数据库）",
             IsEnabled: readerService.IsAvailable && readerService.IsInitialized);
     }
 
@@ -135,7 +146,10 @@ public static class CaptureAdapterFactory
     }
 
     /// <summary>按采集源类型创建对应适配器。</summary>
-    private static IMessageCaptureAdapter CreateAdapter(CaptureSourceDefinition source, IWindowTextSnapshotProvider? windowTextSnapshotProvider)
+    private static IMessageCaptureAdapter CreateAdapter(
+        CaptureSourceDefinition source,
+        IWindowTextSnapshotProvider? windowTextSnapshotProvider,
+        IWeChatLocalDatabaseReader? weChatLocalDatabaseReader)
     {
         return source.Kind switch
         {
@@ -144,80 +158,13 @@ public static class CaptureAdapterFactory
             {
                 Source = source.Source
             }),
-            CaptureSourceKind.WeChatLocalCommand => CreateLocalCommandAdapter(source),
+            CaptureSourceKind.WeChatLocalDatabase => weChatLocalDatabaseReader is null
+                ? throw new InvalidOperationException("The native WeChat database source requires the shared initialized reader.")
+                : new WeChatLocalDatabaseCaptureAdapter(weChatLocalDatabaseReader),
             CaptureSourceKind.WindowText => CreateWindowTextAdapter(source, windowTextSnapshotProvider),
             CaptureSourceKind.ShihuatongLocalDatabase => new ShihuatongLocalDatabaseCaptureAdapter(),
             _ => throw new NotSupportedException($"Capture source kind '{source.Kind}' is not implemented for source '{source.Source}'.")
         };
-    }
-
-    /// <summary>
-    /// 创建微信本地命令适配器：若可执行文件是 .py，则使用系统 Python 解释器运行。
-    /// </summary>
-    private static IMessageCaptureAdapter CreateLocalCommandAdapter(CaptureSourceDefinition source)
-    {
-        var configPath = GetWeChatLocalDatabaseConfigPath();
-        var executable = source.Location;
-        IReadOnlyList<string> arguments;
-
-        // .py 脚本需要用 Python 解释器执行
-        if (executable.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
-        {
-            arguments = new[]
-            {
-                executable, "capture", "--config", configPath, "--format", "json"
-            };
-            executable = FindSystemPython();
-        }
-        else
-        {
-            arguments = new[] { "capture", "--config", configPath, "--format", "json" };
-        }
-
-        return new WeChatLocalCommandCaptureAdapter(
-            new WeChatLocalCommandOptions(executable, arguments)
-            {
-                WorkingDirectory = Path.GetDirectoryName(source.Location),
-                TemporaryDirectory = Path.Combine(
-                    ProjectToolPaths.ResultDirectory,
-                    "temp",
-                    "wechat-local-reader")
-            },
-            new ProcessExternalCommandRunner());
-    }
-
-    /// <summary>查找系统可用的 Python 解释器（python/python3/py），找不到则回退到 python。</summary>
-    private static string FindSystemPython()
-    {
-        foreach (var name in new[] { "python", "python3", "py" })
-        {
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = name,
-                    Arguments = "--version",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true
-                };
-                using var process = System.Diagnostics.Process.Start(psi);
-                if (process is not null)
-                {
-                    process.WaitForExit(3000);
-                    if (process.ExitCode == 0)
-                    {
-                        return name;
-                    }
-                }
-            }
-            catch
-            {
-                // 忽略，尝试下一个候选
-            }
-        }
-
-        return "python";
     }
 
     /// <summary>创建微信可见窗口文本采集适配器。</summary>
@@ -248,7 +195,7 @@ public static class CaptureAdapterFactory
     private static IReadOnlyList<string> CreateDefaultIgnoredWindowTitles(string source)
     {
         return string.Equals(source, "WeChat", StringComparison.OrdinalIgnoreCase)
-            ? new[] { "微信项目消息看板", "WeChat Dashboard" }
+            ? new[] { "IM消息看板", "微信项目消息看板", "WeChat Dashboard" }
             : Array.Empty<string>();
     }
 

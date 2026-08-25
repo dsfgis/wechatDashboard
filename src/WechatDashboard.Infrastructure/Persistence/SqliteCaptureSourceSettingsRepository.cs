@@ -64,6 +64,51 @@ public sealed class SqliteCaptureSourceSettingsRepository : ICaptureSourceSettin
         }
     }
 
+    /// <summary>
+    /// 幂等迁移单个采集源类型。若新类型已存在则只删除旧类型；否则保留旧开关和创建时间写入新类型。
+    /// </summary>
+    public async Task MigrateKindAsync(
+        string source,
+        string oldKind,
+        string newKind,
+        string newDisplayName,
+        string newLocation,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO capture_source_settings
+                    (source, display_name, kind, location, is_enabled, created_at, updated_at)
+                SELECT source, $displayName, $newKind, $location, is_enabled, created_at, $updatedAt
+                FROM capture_source_settings
+                WHERE source = $source AND kind = $oldKind
+                ON CONFLICT(source, kind) DO NOTHING;
+                """;
+            insert.Parameters.AddWithValue("$source", source);
+            insert.Parameters.AddWithValue("$oldKind", oldKind);
+            insert.Parameters.AddWithValue("$newKind", newKind);
+            insert.Parameters.AddWithValue("$displayName", newDisplayName);
+            insert.Parameters.AddWithValue("$location", newLocation);
+            insert.Parameters.AddWithValue("$updatedAt", DateTimeOffset.Now.ToString("O"));
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var delete = connection.CreateCommand())
+        {
+            delete.Transaction = (SqliteTransaction)transaction;
+            delete.CommandText = "DELETE FROM capture_source_settings WHERE source = $source AND kind = $oldKind;";
+            delete.Parameters.AddWithValue("$source", source);
+            delete.Parameters.AddWithValue("$oldKind", oldKind);
+            await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     /// <summary>清空所有采集源设置。</summary>
     public async Task DeleteAllAsync(CancellationToken cancellationToken)
     {

@@ -3,12 +3,15 @@ using WechatDashboard.App.Presentation;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Domain.Entities;
+using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.App.ViewModels.Messages;
 
 public sealed class MessageFeedViewModel : ObservableObject
 {
     private readonly IMessageRepository _messages;
+    private readonly ITodoRepository _todoRepository;
     private readonly TodoApplicationService _todos;
     private readonly Func<IReadOnlyList<string>> _aliases;
     private readonly Func<IReadOnlyList<string>> _followedChats;
@@ -25,6 +28,7 @@ public sealed class MessageFeedViewModel : ObservableObject
 
     public MessageFeedViewModel(
         IMessageRepository messages,
+        ITodoRepository todoRepository,
         TodoApplicationService todos,
         Func<IReadOnlyList<string>> aliases,
         Func<IReadOnlyList<string>> followedChats,
@@ -32,6 +36,7 @@ public sealed class MessageFeedViewModel : ObservableObject
         Func<CreateTodoResult, Task> showTodo)
     {
         _messages = messages;
+        _todoRepository = todoRepository;
         _todos = todos;
         _aliases = aliases;
         _followedChats = followedChats;
@@ -129,7 +134,7 @@ public sealed class MessageFeedViewModel : ObservableObject
         }
 
         IsContextMode = true;
-        ReplaceItems(context.Messages);
+        await ReplaceItemsAsync(context.Messages);
         SelectedMessage = Items.First(item => item.MessageId == messageId);
         StatusText = "正在查看原始消息上下文；当前关注群过滤已临时忽略。";
         OnPropertyChanged(nameof(PageText));
@@ -165,7 +170,7 @@ public sealed class MessageFeedViewModel : ObservableObject
         _pageNumber = page.PageNumber;
         PageNumberInput = _pageNumber.ToString();
         IsContextMode = false;
-        ReplaceItems(page.Messages);
+        await ReplaceItemsAsync(page.Messages);
         SelectedMessage = null;
         StatusText = page.Messages.Count == 0 ? "暂无符合当前关注群设置的消息。" : $"已加载本页 {page.Messages.Count} 条消息。";
         OnPropertyChanged(nameof(PageText));
@@ -191,6 +196,10 @@ public sealed class MessageFeedViewModel : ObservableObject
         };
         if (result.Todo is not null)
         {
+            if (result.Outcome == CreateTodoOutcome.Created)
+            {
+                await RefreshAsync();
+            }
             await _showTodo(result);
         }
     }
@@ -208,12 +217,18 @@ public sealed class MessageFeedViewModel : ObservableObject
 
     private int PageCount => Math.Max(1, (int)Math.Ceiling(_totalCount / (double)_pageSize));
 
-    private void ReplaceItems(IEnumerable<WechatDashboard.Domain.Entities.Message> messages)
+    private async Task ReplaceItemsAsync(IEnumerable<Message> messages)
     {
+        var messageList = messages.ToArray();
+        var todosByMessageId = await _todoRepository.GetBySourceMessageIdsAsync(
+            messageList.Select(message => message.Id).ToArray(),
+            CancellationToken.None);
         var detector = new MentionDetector(_aliases());
         Items.Clear();
-        foreach (var message in messages)
+        foreach (var message in messageList)
         {
+            todosByMessageId.TryGetValue(message.Id, out var todo);
+            var todoAction = FormatTodoAction(todo);
             Items.Add(new MessageListItemViewModel(
                 message.Id,
                 message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
@@ -222,8 +237,27 @@ public sealed class MessageFeedViewModel : ObservableObject
                 message.SenderName,
                 message.IsMentionMe ? "是" : "否",
                 message.Content,
-                MessageHighlighter.HighlightMentions(message.Content, detector.ExtractMentionedAliases(message.Content))));
+                MessageHighlighter.HighlightMentions(message.Content, detector.ExtractMentionedAliases(message.Content)),
+                todoAction.Text,
+                todoAction.ToolTip));
         }
+    }
+
+    private static (string Text, string ToolTip) FormatTodoAction(TodoItem? todo)
+    {
+        if (todo is null)
+        {
+            return ("转为待办", "该消息尚未关联待办");
+        }
+
+        if (todo.Status is TodoStatus.Done or TodoStatus.Ignored)
+        {
+            return ("已办理", "该消息的待办已结束；点击查看详情");
+        }
+
+        return todo.IsAutoCreated
+            ? ("已自动加入", "系统已根据 @我 自动创建待办；点击查看详情")
+            : ("已加入待办", "该消息已手动转为待办；点击查看详情");
     }
 
     private void RaisePagingCanExecuteChanged()
@@ -255,4 +289,6 @@ public sealed record MessageListItemViewModel(
     string SenderName,
     string IsMentionMe,
     string RawContent,
-    IEnumerable<MessageHighlighter.TextSegment> ContentSegments);
+    IEnumerable<MessageHighlighter.TextSegment> ContentSegments,
+    string TodoActionText,
+    string TodoActionToolTip);

@@ -204,6 +204,43 @@ public sealed class SqliteTodoRepository : ITodoRepository
         return await reader.ReadAsync(cancellationToken) ? ReadTodo(reader) : null;
     }
 
+    public async Task<IReadOnlyDictionary<long, TodoItem>> GetBySourceMessageIdsAsync(
+        IReadOnlyCollection<long> sourceMessageIds,
+        CancellationToken cancellationToken)
+    {
+        var ids = sourceMessageIds.Where(id => id > 0).Distinct().ToArray();
+        var todosByMessageId = new Dictionary<long, TodoItem>(ids.Length);
+        if (ids.Length == 0)
+        {
+            return todosByMessageId;
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        foreach (var batch in ids.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = AddIdParameters(command, batch);
+            command.CommandText = $"""
+                SELECT id, source_message_id, project_id, title, description, status,
+                       priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned, group_id
+                FROM todo_items
+                WHERE source_message_id IN ({placeholders})
+                ORDER BY source_message_id, created_at, id;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var todo = ReadTodo(reader);
+                if (todo.SourceMessageId is { } sourceMessageId)
+                {
+                    todosByMessageId.TryAdd(sourceMessageId, todo);
+                }
+            }
+        }
+
+        return todosByMessageId;
+    }
+
     /// <summary>查询所有已办理的待办，按完成时间倒序排列。</summary>
     public async Task<IReadOnlyList<TodoItem>> GetCompletedAsync(CancellationToken cancellationToken)
     {

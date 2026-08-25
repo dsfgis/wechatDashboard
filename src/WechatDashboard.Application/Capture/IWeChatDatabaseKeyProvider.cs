@@ -33,10 +33,19 @@ public sealed class WeChatDatabaseKeyLease : IDisposable
 
     public bool IsDisposed => _keyBytes is null;
 
-    public string ToHexString()
+    /// <summary>
+    /// 将密钥复制到调用方提供的固定长度缓冲区。
+    /// 调用方必须在使用后通过 CryptographicOperations.ZeroMemory 清理目标缓冲区。
+    /// </summary>
+    public void CopyTo(Span<byte> destination)
     {
         var keyBytes = _keyBytes ?? throw new ObjectDisposedException(nameof(WeChatDatabaseKeyLease));
-        return Convert.ToHexStringLower(keyBytes);
+        if (destination.Length != KeyLength)
+        {
+            throw new ArgumentException($"Destination must contain exactly {KeyLength} bytes.", nameof(destination));
+        }
+
+        keyBytes.CopyTo(destination);
     }
 
     public void Dispose()
