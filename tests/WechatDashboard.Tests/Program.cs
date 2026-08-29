@@ -186,6 +186,8 @@ static Task TestUrgencyRankerAsync()
 
 static Task TestTodoCreationAsync()
 {
+    var now = new DateTimeOffset(2026, 8, 9, 14, 0, 0, TimeSpan.FromHours(8));
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
     var message = CreateMessage(
         id: 30,
         chatName: "支付项目群",
@@ -194,7 +196,7 @@ static Task TestTodoCreationAsync()
     var classification = new ClassificationResult(30, 2, "支付平台", MessageCategory.Question, 0.85, "keyword rule", "Rules");
     var urgency = new UrgencyScore(30, 72, PriorityLevel.P1, "@我; 今天");
 
-    var todo = TodoService.CreateFromMention(message, classification, urgency);
+    var todo = TodoService.CreateFromMention(message, classification, urgency, now, timeZone);
 
     AssertEqual(TodoStatus.Pending, todo.Status, "Mention-created todo should start as pending.");
     AssertEqual(PriorityLevel.P1, todo.Priority, "Todo priority should follow urgency.");
@@ -202,6 +204,14 @@ static Task TestTodoCreationAsync()
     AssertEqual(2L, todo.ProjectId, "Todo should carry project classification.");
     AssertTrue(todo.IsAutoCreated, "Mention-created todo should be marked as automatic.");
     AssertTrue(todo.Title.Length <= 80, "Generated title should fit list display.");
+    AssertEqual(
+        new DateTimeOffset(2026, 8, 10, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
+        todo.DueAt,
+        "Automatically recognized Todo should expire at the end of the current local day.");
+    AssertEqual(
+        TodoDueBucket.DueToday,
+        new TodoDueBucketPolicy(timeZone).Classify(todo.DueAt, now),
+        "Automatically recognized Todo should appear in the due-today bucket.");
 
     return Task.CompletedTask;
 }

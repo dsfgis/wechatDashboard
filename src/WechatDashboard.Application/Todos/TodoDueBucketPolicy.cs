@@ -32,4 +32,12 @@ public sealed class TodoDueBucketPolicy
             ? TodoDueBucket.DueToday
             : TodoDueBucket.Upcoming;
     }
+
+    /// <summary>返回用户时区中当天的最后一个时刻，用作自动识别待办的默认截止时间。</summary>
+    public DateTimeOffset EndOfToday(DateTimeOffset now)
+    {
+        var localNow = TimeZoneInfo.ConvertTime(now, _timeZone);
+        var localEndOfDay = localNow.Date.AddDays(1).AddTicks(-1);
+        return new DateTimeOffset(localEndOfDay, _timeZone.GetUtcOffset(localEndOfDay));
+    }
 }

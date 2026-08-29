@@ -18,11 +18,24 @@ public static class TodoService
     /// <returns>新建的待办实体（尚未持久化，Id=0）。</returns>
     public static TodoItem CreateFromMention(Message message, ClassificationResult classification, UrgencyScore urgency)
     {
+        return CreateFromMention(message, classification, urgency, DateTimeOffset.Now, TimeZoneInfo.Local);
+    }
+
+    /// <summary>使用指定时钟和时区创建自动识别待办，便于稳定计算“今日到期”。</summary>
+    public static TodoItem CreateFromMention(
+        Message message,
+        ClassificationResult classification,
+        UrgencyScore urgency,
+        DateTimeOffset now,
+        TimeZoneInfo timeZone)
+    {
+        var dueAt = new TodoDueBucketPolicy(timeZone).EndOfToday(now);
         return TodoFactory.CreateFromMessage(
             message,
             classification.ProjectId,
             urgency.Priority,
-            DateTimeOffset.Now,
+            now,
+            dueAt: dueAt,
             isAutoCreated: true);
     }
 }
