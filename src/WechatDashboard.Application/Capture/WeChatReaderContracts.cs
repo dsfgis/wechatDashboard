@@ -4,6 +4,7 @@ namespace WechatDashboard.Application.Capture;
 public enum WeChatReaderStage
 {
     PathDiscovery,
+    ProtectedKey,
     KeyProbe,
     KeyValidation,
     Snapshot,
@@ -22,6 +23,8 @@ public enum WeChatReaderErrorCode
     WeixinProcessMissing,
     DatabaseDirectoryMissing,
     RequiredDatabaseMissing,
+    ProtectedKeyUnavailable,
+    ProtectedKeyInvalid,
     DllMissing,
     ExportMissing,
     KeyTimeout,
@@ -52,6 +55,11 @@ public sealed record WeChatInitializationRequest(
     TimeSpan KeyTimeout,
     string BootstrapRange = "30d");
 
+/// <summary>使用受保护的本机缓存恢复 reader 的请求，不需要微信进程或 KeyProbe。</summary>
+public sealed record WeChatProtectedKeyRestoreRequest(
+    string DatabaseRoot,
+    string BootstrapRange = "30d");
+
 /// <summary>原生 reader 初始化结果。</summary>
 public sealed record WeChatInitializationResult(
     bool Succeeded,
@@ -64,14 +72,16 @@ public sealed record WeChatReadRequest(
     int Offset,
     int Limit,
     string? CommittedHighWatermark = null,
-    TimeSpan? IncrementalLookback = null);
+    TimeSpan? IncrementalLookback = null,
+    string? CommittedSourceFingerprint = null);
 
 /// <summary>统一的分页或增量读取结果。</summary>
 public sealed record WeChatReadResult(
     IReadOnlyList<CapturedMessage> Messages,
     int TotalCount,
     string ProposedNextOffset,
-    IReadOnlyList<WeChatReaderStageResult> Stages);
+    IReadOnlyList<WeChatReaderStageResult> Stages,
+    string? SourceFingerprint = null);
 
 /// <summary>带稳定阶段和错误码的原生 reader 异常。</summary>
 public sealed class WeChatReaderException : Exception
@@ -104,6 +114,12 @@ public interface IWeChatLocalDatabaseReader : IAsyncDisposable
     Task<WeChatInitializationResult> InitializeAsync(
         WeChatInitializationRequest request,
         CancellationToken cancellationToken);
+
+    Task<WeChatInitializationResult> RestoreProtectedKeyAsync(
+        WeChatProtectedKeyRestoreRequest request,
+        CancellationToken cancellationToken);
+
+    Task ClearProtectedKeyAsync(CancellationToken cancellationToken);
 
     Task<WeChatReadResult> ReadAsync(
         WeChatReadRequest request,

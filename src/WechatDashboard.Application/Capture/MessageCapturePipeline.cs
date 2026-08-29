@@ -49,35 +49,62 @@ public sealed class MessageCapturePipeline
         var persisted = 0;
         var duplicates = 0;
         var createdTodos = 0;
+        var sourceResults = new List<CaptureSourceRunResult>(_adapters.Count);
 
         // 依次执行每个适配器
         foreach (var adapter in _adapters)
         {
-            CaptureBatch batch;
+            var currentStage = "Capture";
+            var sourceCaptured = 0;
+            CaptureRunResult? batchResult = null;
             try
             {
-                batch = await adapter.CaptureAsync(context, cancellationToken);
+                var batch = await adapter.CaptureAsync(context, cancellationToken);
+                sourceCaptured = batch.Messages.Count;
+                captured += batch.Messages.Count;
+
+                // 复用统一的"去重 -> 持久化 -> 分类 -> 评分 -> 建待办"流程
+                currentStage = WeChatReaderStage.PipelineCommit.ToString();
+                batchResult = await ProcessAsync(batch.Messages, cancellationToken);
+                persisted += batchResult.PersistedCount;
+                duplicates += batchResult.DuplicateCount;
+                createdTodos += batchResult.CreatedTodoCount;
+
+                // 只有采集、处理和偏移提交全部成功后才推进本来源偏移量。
+                currentStage = "OffsetCommit";
+                await _offsetRepository.SaveAsync(adapter.Name, batch.NextOffset, cancellationToken);
+                sourceResults.Add(new CaptureSourceRunResult(
+                    adapter.Name,
+                    batch.Messages.Count == 0 ? CaptureSourceRunStatus.Empty : CaptureSourceRunStatus.Succeeded,
+                    batch.Messages.Count,
+                    batchResult.PersistedCount,
+                    batchResult.DuplicateCount,
+                    batchResult.CreatedTodoCount,
+                    Stage: null,
+                    ErrorCode: null,
+                    SanitizedError: null,
+                    DateTimeOffset.Now));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // 单个适配器失败不影响其它适配器，仅记录调试信息
-                System.Diagnostics.Debug.WriteLine($"Capture adapter '{adapter.Name}' failed: {ex.Message}");
-                continue;
+                var readerException = ex as WeChatReaderException;
+                var sanitizedError = CaptureErrorSanitizer.Sanitize(ex.Message);
+                sourceResults.Add(new CaptureSourceRunResult(
+                    adapter.Name,
+                    CaptureSourceRunStatus.Failed,
+                    sourceCaptured,
+                    batchResult?.PersistedCount ?? 0,
+                    batchResult?.DuplicateCount ?? 0,
+                    batchResult?.CreatedTodoCount ?? 0,
+                    readerException?.Stage.ToString() ?? currentStage,
+                    readerException?.ErrorCode.ToString() ?? WeChatReaderErrorCode.Unknown.ToString(),
+                    sanitizedError,
+                    DateTimeOffset.Now));
+                System.Diagnostics.Debug.WriteLine($"Capture adapter '{adapter.Name}' failed: {sanitizedError}");
             }
-
-            captured += batch.Messages.Count;
-
-            // 复用统一的"去重 -> 持久化 -> 分类 -> 评分 -> 建待办"流程
-            var batchResult = await ProcessAsync(batch.Messages, cancellationToken);
-            persisted += batchResult.PersistedCount;
-            duplicates += batchResult.DuplicateCount;
-            createdTodos += batchResult.CreatedTodoCount;
-
-            // 保存本适配器最新偏移量，支持增量采集
-            await _offsetRepository.SaveAsync(adapter.Name, batch.NextOffset, cancellationToken);
         }
 
-        return new CaptureRunResult(captured, persisted, duplicates, createdTodos);
+        return new CaptureRunResult(captured, persisted, duplicates, createdTodos, sourceResults);
     }
 
     /// <summary>

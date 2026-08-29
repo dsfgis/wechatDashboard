@@ -19,6 +19,11 @@ public static class ProjectToolPaths
     /// <summary>原生微信读取器的无密钥状态目录。</summary>
     public static string WeChatNativeReaderDirectory => Path.Combine(UserDataRoot, "Reader");
 
+    /// <summary>当前 Windows 用户可解密的微信 Key 密文文件。</summary>
+    public static string WeChatProtectedKeyPath => Path.Combine(
+        WeChatNativeReaderDirectory,
+        "protected-wechat-key.bin");
+
     /// <summary>原生微信读取器的稳定快照目录。</summary>
     public static string WeChatNativeSnapshotDirectory => Path.Combine(
         WeChatNativeReaderDirectory,

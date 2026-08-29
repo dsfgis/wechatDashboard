@@ -55,8 +55,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly WeChatLocalReaderService _readerService;
     // 采集并发控制信号量，避免实时循环与手动采集重叠
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
-    // 实时采集间隔
-    private readonly TimeSpan _liveCaptureInterval = TimeSpan.FromSeconds(5);
+    // 监听空闲时自动降频；托盘后台只做低频增量检查，恢复窗口时立即唤醒。
+    private static readonly TimeSpan ForegroundActiveCaptureInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ForegroundIdleCaptureInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan BackgroundActiveCaptureInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan BackgroundIdleCaptureInterval = TimeSpan.FromMinutes(2);
+    private readonly SemaphoreSlim _liveCaptureWakeSignal = new(0, 1);
     private const int DefaultWeChatMessagePageSize = 50;
     private const int DashboardMessageSampleLimit = 5000;
 
@@ -64,13 +68,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private CancellationTokenSource? _liveCaptureCts;
     // 实时监听后台任务
     private Task? _liveCaptureTask;
+    private volatile bool _isBackgroundMode;
+    private int _capturePipelineVersion;
     // 系统托盘图标及其右键菜单
     private readonly Forms.NotifyIcon _trayIcon;
     private readonly Forms.ContextMenuStrip _trayMenu;
+    private readonly System.Drawing.Icon? _ownedTrayIcon;
     // 从托盘恢复时保留最小化前的窗口状态
     private WindowState _windowStateBeforeMinimize = WindowState.Normal;
     // 关闭前异步清理只执行一次
     private bool _isClosingAfterCleanup;
+    private IReadOnlyDictionary<string, CaptureSourceRunResult> _latestCaptureSourceResults =
+        new Dictionary<string, CaptureSourceRunResult>(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> _captureSourceLastSuccessAt =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _captureSourceBaseDetails =
+        new(StringComparer.Ordinal);
 
     // 顶部摘要文本
     private string _summaryText = "加载中";
@@ -136,10 +149,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _trayMenu = new Forms.ContextMenuStrip();
         _trayMenu.Items.Add(showMenuItem);
         _trayMenu.Items.Add(exitMenuItem);
+        _ownedTrayIcon = LoadApplicationIcon();
         _trayIcon = new Forms.NotifyIcon
         {
             Text = Title,
-            Icon = System.Drawing.SystemIcons.Application,
+            Icon = _ownedTrayIcon ?? System.Drawing.SystemIcons.Application,
             ContextMenuStrip = _trayMenu,
             Visible = true
         };
@@ -265,13 +279,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         await InitializeAndRefreshAsync(seedIfEmpty: true);
         await TodoFeature.StartAsync();
+        ApplyBootstrapRange();
+        await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
         await LoadCaptureSourceSettingsAsync();
         if (_readerService.IsInitialized)
         {
             await LoadTodayWeChatMessagesAsync(1, ensureInitialized: false);
         }
 
-        StartWeChatListenerButton_Click(this, new RoutedEventArgs());
+        await StartLiveListenerAsync();
     }
 
     /// <summary>点击"刷新"按钮：重新初始化并刷新（不播种示例数据）。</summary>
@@ -387,12 +403,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>手动采集：必要时先初始化读取器，再执行一次采集并刷新。</summary>
     private async void CaptureButton_Click(object sender, RoutedEventArgs e)
     {
-        // 读取器未初始化但可用时，先尝试初始化
+        // 自动路径只尝试 DPAPI 缓存，不自动启动 KeyProbe/Hook。
         if (!_readerService.IsInitialized && _readerService.IsAvailable)
         {
             ApplyBootstrapRange();
-            SummaryText = "正在初始化微信本地数据库读取器...";
-            var initSuccess = await _readerService.InitializeAsync(CancellationToken.None);
+            SummaryText = "正在从受保护缓存恢复微信 DB Key...";
+            var initSuccess = await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
             if (initSuccess)
             {
                 SummaryText = "本地数据库初始化成功，重新加载采集源...";
@@ -400,13 +416,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
             else
             {
-                SummaryText = $"本地数据库初始化失败：{_readerService.LastError ?? "未知错误"}，将使用可见窗口采集";
-                SummaryText = $"\u672C\u5730\u6570\u636E\u5E93\u521D\u59CB\u5316\u5931\u8D25\uFF1A{_readerService.LastError ?? "\u672A\u77E5\u9519\u8BEF"}\uFF0C\u5DF2\u505C\u7528 OCR \u7A97\u53E3\u91C7\u96C6\uFF1B\u8BF7\u91CD\u65B0\u521D\u59CB\u5316\u672C\u5730\u5E93\u3002";
+                SummaryText = $"部分失败：微信未初始化（{_readerService.LastError ?? "请点击“自动提取 Key”"}），其他采集源将继续运行。";
             }
         }
 
         var result = await RunCaptureOnceAsync(CancellationToken.None);
-        SummaryText = $"本次采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
+        UpdateCaptureSourceResults(result.Sources);
+        SummaryText = FormatCaptureSummary("本次采集", result);
         await RefreshAsync();
         if (_readerService.IsInitialized)
         {
@@ -429,7 +445,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            SummaryText = $"原生读取器初始化成功（微信 PID {result.TargetProcessId}），密钥仅保留在当前进程内存中。";
+            SummaryText = $"原生读取器初始化成功（微信 PID {result.TargetProcessId}），Key 已用 Windows 当前用户凭据加密保存。";
         }
         finally
         {
@@ -484,7 +500,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>启动微信实时监听循环。</summary>
-    private void StartWeChatListenerButton_Click(object sender, RoutedEventArgs e)
+    private async void StartWeChatListenerButton_Click(object sender, RoutedEventArgs e)
+    {
+        await StartLiveListenerAsync();
+    }
+
+    private async Task StartLiveListenerAsync()
     {
         if (_liveCaptureTask is { IsCompleted: false })
         {
@@ -492,9 +513,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        ApplyBootstrapRange();
+        if (_readerService.IsAvailable && !_readerService.IsInitialized)
+        {
+            await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
+        }
+
         _liveCaptureCts = new CancellationTokenSource();
         _liveCaptureTask = RunLiveCaptureLoopAsync(_liveCaptureCts.Token);
-        ListenerStatusText = $"微信监听运行中，间隔 {_liveCaptureInterval.TotalSeconds:0} 秒";
+        ListenerStatusText = _readerService.IsInitialized
+            ? "监听已启动：前台空闲 15 秒检查一次，托盘后台空闲 2 分钟检查一次"
+            : $"监听已启动（部分失败）：微信未初始化；{_readerService.LastError ?? "请点击“自动提取 Key”"}。其他采集源继续运行。";
     }
 
     /// <summary>停止微信实时监听。</summary>
@@ -525,10 +554,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (WindowState == WindowState.Minimized)
         {
+            _isBackgroundMode = true;
             Hide();
             return;
         }
 
+        _isBackgroundMode = false;
         _windowStateBeforeMinimize = WindowState;
     }
 
@@ -542,8 +573,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         Show();
+        _isBackgroundMode = false;
         WindowState = _windowStateBeforeMinimize;
         Activate();
+        WakeLiveCaptureLoop();
     }
 
     /// <summary>通过托盘菜单退出应用。</summary>
@@ -580,8 +613,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             _trayIcon.Dispose();
             _trayMenu.Dispose();
+            _ownedTrayIcon?.Dispose();
             Closing -= MainWindow_Closing;
             Close();
+        }
+    }
+
+    private static System.Drawing.Icon? LoadApplicationIcon()
+    {
+        var executablePath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            return System.Drawing.Icon.ExtractAssociatedIcon(executablePath);
+        }
+        catch (ArgumentException)
+        {
+            return null;
         }
     }
 
@@ -622,10 +674,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 微信数据目录（db_storage），用于初始化本地数据库采集源
         var dataDir = WeChatDataDirectoryLocator.Locate();
         // 计算本地数据库采集源的状态文案
-        var localDbStatus = localDatabaseSource.IsEnabled ? "已就绪"
+        var localDbStatus = _readerService.IsInitialized ? "已就绪"
             : _readerService.IsAvailable ? (_readerService.LastError ?? "等待初始化")
             : "未安装";
-        var localDbDetail = localDatabaseSource.IsEnabled
+        var localDbDetail = _readerService.IsInitialized
             ? $"配置: {localDatabaseConfigPath} | 历史范围: {_readerService.BootstrapRange}"
             : dataDir is not null
                 ? $"数据目录已检测: {dataDir} | 历史范围: {_readerService.BootstrapRange}，点击\"初始化本地库\"按钮完成设置"
@@ -643,7 +695,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 采集诊断列表：展示各采集源的可用性与状态
         var shihuatongLocalDatabaseReady = ShihuatongLocalDatabaseCaptureAdapter.IsProcessRunning;
-        Replace(Diagnostics, new[]
+        var diagnosticRows = new[]
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
             new DiagnosticRow("WeChat.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "WeChat")),
@@ -663,7 +715,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new DiagnosticRow("DingTalk.JsonlDirectory", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), Path.Combine(_captureInboxPath, "DingTalk")),
             new DiagnosticRow("WeChat.WindowText", "已启用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "UIA+OCR 读取可见微信窗口，实时采集，窗口最小化后不可用"),
             new DiagnosticRow("WindowsNotificationAdapter", "未启用", "-", "待接入 Windows 通知监听")
-        });
+        };
+        foreach (var row in diagnosticRows)
+        {
+            _captureSourceBaseDetails[row.Adapter] = row.Detail;
+        }
+        Replace(Diagnostics, diagnosticRows.Select(ApplyLatestCaptureSourceResult));
         Diagnostics.Remove(Diagnostics.First(row => row.Adapter == "WeChat.WindowText"));
 
         // 顶部摘要统计：今日消息数、@我数、待办理数、高优先级待办数
@@ -859,8 +916,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>
     /// 加载当天微信消息分页。
-    /// ensureInitialized=true 时若读取器未初始化则自动尝试初始化（耗时操作），
-    /// ensureInitialized=false 时仅提示用户先初始化，不发起耗时操作。
+    /// ensureInitialized=true 时若读取器未初始化则仅尝试恢复 DPAPI 密文缓存，
+    /// 不会自动启动 KeyProbe；缓存不可用时明确提示用户重新提取 Key。
     /// </summary>
     private async Task LoadTodayWeChatMessagesAsync(int pageNumber, bool ensureInitialized)
     {
@@ -880,13 +937,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            SummaryText = "正在初始化微信本地数据库读取器...";
-            var initialized = await _readerService.InitializeAsync(CancellationToken.None);
+            SummaryText = "正在从受保护缓存恢复微信 DB Key...";
+            var initialized = await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
             if (!initialized)
             {
                 var error = _readerService.LastError ?? "未知错误";
-                WeChatMessageStatusText = $"初始化失败：{error}";
-                SummaryText = $"初始化失败：{error}";
+                WeChatMessageStatusText = $"微信未初始化：{error}";
+                SummaryText = $"微信未初始化：{error}";
                 return;
             }
 
@@ -1102,7 +1159,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             newLocation: "原生 C#（只读本地数据库）",
             CancellationToken.None);
         var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
-        _readerService.ResetInitializationState();
         var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
 
         var rows = new List<CaptureSourceSettingRow>();
@@ -1344,6 +1400,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         await _settingsRepository.DeleteAllAsync(CancellationToken.None);
         await _settingsRepository.SaveAllAsync(settings, CancellationToken.None);
+        Interlocked.Increment(ref _capturePipelineVersion);
+        WakeLiveCaptureLoop();
         SummaryText = $"采集源设置已保存，共 {settings.Count} 个源";
     }
 
@@ -1386,7 +1444,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private MessageCapturePipeline CreateCapturePipeline()
     {
-        _readerService.ResetInitializationState();
         var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
         var effectiveSources = defaultSources.Select(source =>
         {
@@ -1416,12 +1473,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task<CaptureRunResult> RunCaptureOnceAsync(CancellationToken cancellationToken)
     {
+        await _databaseInitializer.InitializeAsync(cancellationToken);
+        Directory.CreateDirectory(_captureInboxPath);
+        return await RunCaptureOnceAsync(CreateCapturePipeline(), cancellationToken);
+    }
+
+    private async Task<CaptureRunResult> RunCaptureOnceAsync(
+        MessageCapturePipeline pipeline,
+        CancellationToken cancellationToken)
+    {
         await _captureSemaphore.WaitAsync(cancellationToken);
         try
         {
-            await _databaseInitializer.InitializeAsync(cancellationToken);
-            Directory.CreateDirectory(_captureInboxPath);
-            var pipeline = CreateCapturePipeline();
             return await pipeline.RunOnceAsync(cancellationToken);
         }
         finally
@@ -1431,26 +1494,45 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 实时采集后台循环：周期性执行采集，刷新 UI 状态文本与摘要。
-    /// 捕获异常后继续循环，仅取消令牌触发时退出，循环间隔由 _liveCaptureInterval 控制。
+    /// 实时采集后台循环：复用采集管线，并根据前台/托盘状态及本轮是否有消息自动调节频率。
+    /// 捕获异常后继续循环；恢复窗口或保存采集源设置时可立即唤醒下一轮。
     /// </summary>
     private async Task RunLiveCaptureLoopAsync(CancellationToken cancellationToken)
     {
+        await _databaseInitializer.InitializeAsync(cancellationToken);
+        Directory.CreateDirectory(_captureInboxPath);
+        while (_liveCaptureWakeSignal.Wait(0)) { }
+        var pipelineVersion = Volatile.Read(ref _capturePipelineVersion);
+        var pipeline = CreateCapturePipeline();
+
         while (!cancellationToken.IsCancellationRequested)
         {
+            var nextDelay = _isBackgroundMode
+                ? BackgroundIdleCaptureInterval
+                : ForegroundIdleCaptureInterval;
             try
             {
-                var result = await RunCaptureOnceAsync(cancellationToken);
+                var currentPipelineVersion = Volatile.Read(ref _capturePipelineVersion);
+                if (currentPipelineVersion != pipelineVersion)
+                {
+                    pipeline = CreateCapturePipeline();
+                    pipelineVersion = currentPipelineVersion;
+                }
+
+                var result = await RunCaptureOnceAsync(pipeline, cancellationToken);
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    ListenerStatusText = $"微信监听运行中，最近采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，待办 {result.CreatedTodoCount} 条";
-                    SummaryText = $"监听采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
+                    UpdateCaptureSourceResults(result.Sources);
+                    ListenerStatusText = FormatListenerStatus(result);
+                    SummaryText = FormatCaptureSummary("监听采集", result);
                 });
 
                 if (result.PersistedCount > 0 || result.CreatedTodoCount > 0)
                 {
                     await RefreshOnUiThreadAsync();
                 }
+
+                nextDelay = ResolveLiveCaptureDelay(result);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -1467,14 +1549,126 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             try
             {
-                await Task.Delay(_liveCaptureInterval, cancellationToken);
+                await _liveCaptureWakeSignal.WaitAsync(nextDelay, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 break;
             }
+
         }
     }
+
+    private void UpdateCaptureSourceResults(IReadOnlyList<CaptureSourceRunResult> sourceResults)
+    {
+        _latestCaptureSourceResults = sourceResults.ToDictionary(result => result.AdapterName, StringComparer.Ordinal);
+        foreach (var source in sourceResults.Where(source =>
+                     source.Status == CaptureSourceRunStatus.Succeeded ||
+                     (source.Status == CaptureSourceRunStatus.Empty &&
+                      !_captureSourceLastSuccessAt.ContainsKey(source.AdapterName))))
+        {
+            _captureSourceLastSuccessAt[source.AdapterName] = source.CompletedAt;
+        }
+
+        for (var index = 0; index < Diagnostics.Count; index++)
+        {
+            var updated = ApplyLatestCaptureSourceResult(Diagnostics[index]);
+            if (!Equals(updated, Diagnostics[index]))
+            {
+                Diagnostics[index] = updated;
+            }
+        }
+    }
+
+    private TimeSpan ResolveLiveCaptureDelay(CaptureRunResult result)
+    {
+        var hasActivity = result.CapturedCount > 0 || result.PersistedCount > 0 || result.CreatedTodoCount > 0;
+        if (_isBackgroundMode)
+        {
+            return hasActivity ? BackgroundActiveCaptureInterval : BackgroundIdleCaptureInterval;
+        }
+
+        return hasActivity ? ForegroundActiveCaptureInterval : ForegroundIdleCaptureInterval;
+    }
+
+    private void WakeLiveCaptureLoop()
+    {
+        if (_liveCaptureTask is not { IsCompleted: false } || _liveCaptureWakeSignal.CurrentCount > 0)
+        {
+            return;
+        }
+
+        try { _liveCaptureWakeSignal.Release(); } catch (SemaphoreFullException) { }
+    }
+
+    private DiagnosticRow ApplyLatestCaptureSourceResult(DiagnosticRow row)
+    {
+        if (!_latestCaptureSourceResults.TryGetValue(row.Adapter, out var result))
+        {
+            return row;
+        }
+
+        var lastSuccess = _captureSourceLastSuccessAt.TryGetValue(row.Adapter, out var succeededAt)
+            ? succeededAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")
+            : "-";
+        var baseDetail = _captureSourceBaseDetails.TryGetValue(row.Adapter, out var detail)
+            ? detail
+            : row.Detail;
+        return result.Status switch
+        {
+            CaptureSourceRunStatus.Failed => row with
+            {
+                Status = "异常",
+                LastSuccessAt = lastSuccess,
+                Detail = $"{result.Stage}/{result.ErrorCode}：{result.SanitizedError}"
+            },
+            CaptureSourceRunStatus.Skipped => row with
+            {
+                Status = "已跳过",
+                LastSuccessAt = lastSuccess,
+                Detail = result.SanitizedError ?? baseDetail
+            },
+            CaptureSourceRunStatus.Empty => row with
+            {
+                Status = "正常（无新消息）",
+                LastSuccessAt = lastSuccess,
+                Detail = $"本轮采集 0 条；{baseDetail}"
+            },
+            _ => row with
+            {
+                Status = "正常",
+                LastSuccessAt = lastSuccess,
+                Detail = $"本轮采集 {result.CapturedCount} 条、入库 {result.PersistedCount} 条；{baseDetail}"
+            }
+        };
+    }
+
+    private static string FormatListenerStatus(CaptureRunResult result)
+    {
+        var failed = result.Sources.Where(source => source.Status == CaptureSourceRunStatus.Failed).ToArray();
+        if (result.AllSourcesFailed)
+        {
+            return $"监听失败：所有启用采集源均异常；{FormatSourceFailures(failed)}";
+        }
+
+        if (failed.Length > 0)
+        {
+            return $"监听部分失败：{FormatSourceFailures(failed)}；其他采集源继续运行";
+        }
+
+        return $"监听运行中，最近采集 {result.CapturedCount} 条，入库 {result.PersistedCount} 条，待办 {result.CreatedTodoCount} 条";
+    }
+
+    private static string FormatCaptureSummary(string prefix, CaptureRunResult result)
+    {
+        var failed = result.Sources.Where(source => source.Status == CaptureSourceRunStatus.Failed).ToArray();
+        var counts = $"{prefix} {result.CapturedCount} 条，入库 {result.PersistedCount} 条，创建待办 {result.CreatedTodoCount} 条";
+        return failed.Length == 0 ? counts : $"{counts}；部分失败：{FormatSourceFailures(failed)}";
+    }
+
+    private static string FormatSourceFailures(IReadOnlyList<CaptureSourceRunResult> failed) =>
+        string.Join("；", failed.Select(source =>
+            $"{source.AdapterName} {source.Stage}/{source.ErrorCode}：{source.SanitizedError}"));
 
     /// <summary>
     /// 停止实时监听：取消循环令牌，等待后台任务结束，释放资源并更新状态文本。

@@ -146,7 +146,7 @@
 - 交付物：真实机 Hook、初始化、已知测试消息、分页、最小化微信、增量采集、去重、Todo 和诊断证据；只记录允许的聚合数据。
 - 需求/设计引用：REQ-001 至 REQ-008、REQ-010；D-001、D-004 至 D-010，设计第 7 至 9 节。
 - 覆盖验收：AC-001 至 AC-004、AC-006 至 AC-020、AC-024、AC-025。
-- 依赖：TASK-013；每次 Hook 与真实数据验证前取得用户显式授权。
+- 依赖：TASK-013、TASK-018 至 TASK-020；每次 Hook 与真实数据验证前取得用户显式授权。
 - 验证方法：按 design\wechat-local-database-system-test.md 的更新版步骤执行；用测试群发送一条已知 @我 消息；最小化微信后轮询；人为制造 KeyProbe 超时/DLL 不匹配；检查日志和应用数据库不含密钥。
 - 预期结果：获准聚合项与 Python oracle 一致；已知测试消息进入管线且只生成一个 Todo；最小化不影响读取；故障不导致 WPF 崩溃或泄密。
 - 并行：否，真实机串行执行。
@@ -173,12 +173,42 @@
 
 ### TASK-017：清理生产兼容路径并更新文档
 
-- 交付物：从生产代码和 Release 配置移除 WeChatLocalCommand/Python 查找、PowerShell probe、all_keys.json 和 plaintext Key 路径；更新 README、Agent.md、系统测试文档和发布说明，明确 Python 仅为源码测试 oracle，并写明安装前置条件、微信/石化通兼容边界、数据目录、诊断、升级/卸载和回滚步骤。
-- 需求/设计引用：REQ-006、REQ-008 至 REQ-013；D-002、D-009、D-012 至 D-014。
-- 覆盖验收：AC-014、AC-019 至 AC-035。
+- 交付物：从生产代码和 Release 配置移除 WeChatLocalCommand/Python 查找、PowerShell probe、all_keys.json 和 plaintext Key 路径；保留且仅允许 DPAPI CurrentUser 密文缓存；更新 README、Agent.md、系统测试文档和发布说明，明确 Python 仅为源码测试 oracle，并写明安装前置条件、微信/石化通兼容边界、受保护 Key 缓存残余风险、数据目录、诊断、升级/卸载和回滚步骤。
+- 需求/设计引用：REQ-006、REQ-008 至 REQ-015；D-002、D-009、D-012 至 D-016。
+- 覆盖验收：AC-014、AC-019 至 AC-045。
 - 依赖：TASK-016。
-- 验证方法：rg -n -i 扫描生产源码和 staging 中的 python、wechat_local_reader.py、WECHAT_DASHBOARD_DB_KEY、all_keys.json、run-wx-key-probe.ps1；重新运行 TASK-013 的全量回归和 staging 扫描。
-- 预期结果：生产与 Release 路径不存在 Python/明文 Key 兼容调用；文档与实际代码一致；测试 oracle 不会被打包。
+- 验证方法：rg -n -i 扫描生产源码和 staging 中的 python、wechat_local_reader.py、WECHAT_DASHBOARD_DB_KEY、all_keys.json、run-wx-key-probe.ps1、明文 Key 文件模式；确认仅受保护缓存路径获准；重新运行 TASK-013 和 TASK-020 的全量回归与 staging 扫描。
+- 预期结果：生产与 Release 路径不存在 Python/明文 Key 兼容调用；唯一持久 Key 载体是 DPAPI CurrentUser 密文；文档与实际代码一致；测试 oracle 不会被打包。
+- 并行：否。
+
+### TASK-018：实现 DPAPI CurrentUser Key 缓存和启动恢复
+
+- 交付物：新增 `IWeChatDatabaseKeyStore`、可替换的数据保护边界和 `ProtectedWeChatDatabaseKeyStore`；实现版本化二进制格式、大小限制、DPAPI CurrentUser 保护/解密、原子保存、升级保留、显式重置/卸载清理；把缓存恢复接入 `WeChatLocalReaderService`，成功验证的 KeyProbe 初始化才更新缓存。
+- 需求/设计引用：REQ-008、REQ-011、REQ-014；D-003、D-011、D-015，设计第 6、7、9、10 节。
+- 覆盖验收：AC-019、AC-020、AC-026、AC-027、AC-032、AC-036 至 AC-040。
+- 依赖：本轮四份文档已确认；TASK-003、TASK-004、TASK-006、TASK-011 已具备实现基础。
+- 验证方法：使用可注入 protector 测试有效、损坏、错误版本、超大文件、保护/解密失败、验证失败、取消和原子替换；运行同一 Windows 用户真实 DPAPI 保存/进程重启/恢复 smoke test；扫描安装目录、应用 SQLite、state.json、日志、临时目录和测试输出；检查所有明文缓冲区清零。
+- 预期结果：同用户重启无需 KeyProbe 即 Ready；无效缓存安全失败并提示重新提取；失败提取不覆盖有效缓存；除 DPAPI 密文外无 Key 落盘或输出。
+- 并行：否，先建立新的密钥生命周期边界。
+
+### TASK-019：实现逐采集源结果和监听健康状态
+
+- 交付物：新增 `CaptureSourceRunStatus`、`CaptureSourceRunResult` 并扩展 `CaptureRunResult`；让管线记录每个适配器的成功、合法空结果、跳过和脱敏失败；WPF 将结果写入采集诊断并显示正常/部分失败/全部失败；开始监听前触发一次受保护缓存恢复，微信未初始化时给出“请提取 Key”动作提示，同时允许健康来源继续。
+- 需求/设计引用：REQ-007、REQ-015；D-010、D-016，设计第 7.3、8、9.1 节。
+- 覆盖验收：AC-017、AC-018、AC-041 至 AC-045。
+- 依赖：TASK-002、TASK-012、TASK-018。
+- 验证方法：用 fake adapters 覆盖全成功零消息、微信失败/石化通成功、微信恢复、全部失败、持久化失败、取消和错误中含敏感串；验证各来源 offset、汇总计数、UI 状态文案、诊断行和错误脱敏。
+- 预期结果：单来源失败可见但不阻断健康来源；失败来源不推进 offset；合法 0 条与失败不再混淆；微信恢复后后续轮询自动转为成功。
+- 并行：否，与 TASK-018 串行完成启动状态衔接。
+
+### TASK-020：验证重启复用、失效回退和发布生命周期
+
+- 交付物：DPAPI/监听状态专项回归证据、真实 Debug 运行重启验收记录、升级/卸载缓存生命周期记录、敏感文件与输出扫描结果，以及更新后的系统测试说明。
+- 需求/设计引用：REQ-008、REQ-010、REQ-011、REQ-013 至 REQ-015；D-003、D-010 至 D-016。
+- 覆盖验收：AC-019、AC-020、AC-025 至 AC-027、AC-032、AC-033、AC-035 至 AC-045。
+- 依赖：TASK-018、TASK-019。
+- 验证方法：按仓库标准串行 Release 构建和自定义 .NET runner；运行 `git diff --check` 与敏感串扫描；在当前 Windows 用户完成一次显式提取后关闭/重启实际 Debug 应用，验证不启动 KeyProbe仍能读取；用损坏副本或 fake protector 验证失效提示；验证升级保留、显式重置和卸载删除缓存。
+- 预期结果：构建和回归全绿；真实应用重启自动恢复；失效只影响微信并显示部分失败；无明文 Key；缓存生命周期与设计一致。
 - 并行：否。
 
 ## 3. 增量执行顺序
@@ -200,6 +230,12 @@ TASK-001 -> TASK-002 -> +-> TASK-003 -+
                                                        TASK-012
                                                           v
                                                        TASK-013
+                                                          v
+                                                       TASK-018
+                                                          v
+                                                       TASK-019
+                                                          v
+                                                       TASK-020
                                                           v
                                                        TASK-014
                                                           v
@@ -227,6 +263,8 @@ TASK-001 -> TASK-002 -> +-> TASK-003 -+
 | REQ-011 | TASK-004、TASK-005、TASK-012、TASK-015、TASK-016 |
 | REQ-012 | TASK-009、TASK-015、TASK-016 |
 | REQ-013 | TASK-004、TASK-014 至 TASK-017 |
+| REQ-014 | TASK-003、TASK-004、TASK-006、TASK-011、TASK-014、TASK-017、TASK-018、TASK-020 |
+| REQ-015 | TASK-002、TASK-012、TASK-014、TASK-017、TASK-019、TASK-020 |
 
 ### 4.1 验收标准到任务的逐项映射
 
@@ -267,5 +305,15 @@ TASK-001 -> TASK-002 -> +-> TASK-003 -+
 | AC-033 | TASK-014、TASK-016 |
 | AC-034 | TASK-016 |
 | AC-035 | TASK-015 至 TASK-017 |
+| AC-036 | TASK-018、TASK-020 |
+| AC-037 | TASK-018、TASK-020 |
+| AC-038 | TASK-018 至 TASK-020 |
+| AC-039 | TASK-018、TASK-020 |
+| AC-040 | TASK-017、TASK-018、TASK-020 |
+| AC-041 | TASK-019、TASK-020 |
+| AC-042 | TASK-019、TASK-020 |
+| AC-043 | TASK-019、TASK-020 |
+| AC-044 | TASK-019、TASK-020 |
+| AC-045 | TASK-017、TASK-019、TASK-020 |
 
-所有 REQ-001 至 REQ-013 和 AC-001 至 AC-035 均由至少一个任务覆盖。实际完成状态以 check_list.md 中的证据为准。
+所有 REQ-001 至 REQ-015 和 AC-001 至 AC-045 均由至少一个任务覆盖。实际完成状态以 check_list.md 中的证据为准。

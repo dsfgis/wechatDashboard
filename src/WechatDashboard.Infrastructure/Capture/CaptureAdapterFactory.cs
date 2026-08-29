@@ -25,7 +25,11 @@ public static class CaptureAdapterFactory
     public static IReadOnlyList<CaptureSourceDefinition> CreateDefaultLiveSources(string captureRootPath)
     {
         var readerService = new WeChatLocalReaderService();
-        return CreateDefaultLiveSources(captureRootPath, readerService);
+        return CreateDefaultLiveSources(captureRootPath, readerService)
+            .Select(source => source.Kind == CaptureSourceKind.WeChatLocalDatabase
+                ? source with { IsEnabled = false }
+                : source)
+            .ToArray();
     }
 
     /// <summary>创建默认的实时采集源（带自定义读取服务，便于注入测试）。</summary>
@@ -112,9 +116,9 @@ public static class CaptureAdapterFactory
             Source: "WeChat",
             DisplayName: "微信本地数据库",
             Kind: CaptureSourceKind.WeChatLocalDatabase,
-            // 仅当读取器可用且已初始化时启用
+            // 读取器可用即保留该来源；未初始化由适配器返回独立失败，避免被静默跳过。
             Location: "原生 C#（只读本地数据库）",
-            IsEnabled: readerService.IsAvailable && readerService.IsInitialized);
+            IsEnabled: readerService.IsAvailable);
     }
 
     /// <summary>创建石化通本地数据库采集源；读取时不依赖可见窗口。</summary>

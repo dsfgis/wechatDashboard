@@ -92,8 +92,16 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         var active = await _todos.GetActiveAsync(CancellationToken.None);
         var completed = await _todos.GetCompletedAsync(CancellationToken.None);
         var rows = await CreateRowsAsync(active.Concat(completed));
+        // Refreshes rebuild the row view models. Preserve the current UI selection by
+        // stable Todo id so timer/reminder refreshes do not look like a scroll reset.
+        var selectedIds = ActiveRows().Where(row => row.IsSelected).Select(row => row.Id).ToHashSet();
         var activeIds = active.Select(item => item.Id).ToHashSet();
         var activeRows = rows.Where(row => activeIds.Contains(row.Todo.Id)).ToArray();
+        foreach (var row in activeRows.Where(row => selectedIds.Contains(row.Id)))
+        {
+            row.IsSelected = true;
+        }
+
         Replace(Pinned, activeRows.Where(row => row.IsPinned).OrderByDescending(row => row.Todo.UpdatedAt));
         Replace(Overdue, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.Overdue));
         Replace(DueToday, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.DueToday));

@@ -24,10 +24,13 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
     private const int MemoryScanChunkLength = 1024 * 1024;
     private const long Maximum32BitAddress = 0x80000000L;
     private const uint MemCommit = 0x1000;
+    private const uint MemPrivate = 0x20000;
     private const uint PageNoAccess = 0x01;
     private const uint PageGuard = 0x100;
-    private int? _cachedProcessId;
-    private long? _cachedMetadataAddress;
+    private static readonly byte[] KeyLengthPattern = BitConverter.GetBytes((uint)ExpectedKeyLength);
+    private static readonly object MetadataCacheGate = new();
+    private static int? _cachedProcessId;
+    private static long? _cachedMetadataAddress;
 
     public bool IsProcessRunning
     {
@@ -59,8 +62,13 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
 
         try
         {
-            if (_cachedProcessId == process.Id && _cachedMetadataAddress is { } cachedAddress &&
-                TryCreateSecret(processHandle, cachedAddress, out var cachedSecret))
+            long? cachedAddress;
+            lock (MetadataCacheGate)
+            {
+                cachedAddress = _cachedProcessId == process.Id ? _cachedMetadataAddress : null;
+            }
+            if (cachedAddress is { } address &&
+                TryCreateSecret(processHandle, address, out var cachedSecret))
             {
                 return cachedSecret;
             }
@@ -87,10 +95,13 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
         }
     }
 
-    private void CacheMetadataAddress(int processId, long metadataAddress)
+    private static void CacheMetadataAddress(int processId, long metadataAddress)
     {
-        _cachedProcessId = processId;
-        _cachedMetadataAddress = metadataAddress;
+        lock (MetadataCacheGate)
+        {
+            _cachedProcessId = processId;
+            _cachedMetadataAddress = metadataAddress;
+        }
     }
 
     private static bool TryFindSecret(
@@ -116,7 +127,9 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
                 break;
             }
 
+            // 数据库元数据由石化通堆分配，只扫描私有内存，避免读取 DLL/映射文件。
             if (information.State == MemCommit &&
+                information.Type == MemPrivate &&
                 (information.Protect & (PageNoAccess | PageGuard)) == 0)
             {
                 var regionEnd = Math.Min(Maximum32BitAddress, regionStart + regionLength);
@@ -143,19 +156,31 @@ internal sealed class ShihuatongProcessDatabaseKeyProvider
                     }
 
                     var usableLength = checked((int)bytesRead.ToInt64());
-                    for (var offset = 0; offset <= usableLength - MetadataFieldLength; offset += sizeof(uint))
+                    var bufferSpan = buffer.AsSpan(0, usableLength);
+                    var searchOffset = sizeof(uint) * 3;
+                    while (searchOffset <= usableLength - sizeof(uint))
                     {
-                        if (!LooksLikeMetadataHeader(buffer, offset))
+                        // 先用向量化字节搜索定位少见的 keyLength=32，再验证前面的三个字段；
+                        // 避免对整块进程内存每 4 字节执行四次 BitConverter。
+                        var relativeOffset = bufferSpan[searchOffset..].IndexOf(KeyLengthPattern);
+                        if (relativeOffset < 0)
                         {
-                            continue;
+                            break;
                         }
 
-                        var candidateAddress = chunkStart + offset;
-                        if (TryCreateSecret(processHandle, candidateAddress, out secret))
+                        var keyLengthOffset = searchOffset + relativeOffset;
+                        var metadataOffset = keyLengthOffset - sizeof(uint) * 3;
+                        var candidateAddress = chunkStart + metadataOffset;
+                        if (metadataOffset >= 0 &&
+                            (candidateAddress & (sizeof(uint) - 1)) == 0 &&
+                            LooksLikeMetadataHeader(buffer, metadataOffset) &&
+                            TryCreateSecret(processHandle, candidateAddress, out secret))
                         {
                             metadataAddress = candidateAddress;
                             return true;
                         }
+
+                        searchOffset = keyLengthOffset + 1;
                     }
                 }
             }

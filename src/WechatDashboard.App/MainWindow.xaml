@@ -1,10 +1,12 @@
 <Window x:Class="WechatDashboard.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=System.Runtime"
         xmlns:local="clr-namespace:WechatDashboard.App"
         xmlns:todoViews="clr-namespace:WechatDashboard.App.Views.Todos"
         xmlns:messageViews="clr-namespace:WechatDashboard.App.Views.Messages"
         Title="IM消息看板"
+        Icon="Assets/AppIcon.png"
         Height="760"
         Width="1180"
         MinHeight="640"
@@ -153,11 +155,26 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <DockPanel Grid.Row="0" Margin="0,0,0,16">
-                <StackPanel DockPanel.Dock="Left">
-                    <TextBlock Text="{Binding SelectedItem.Content, ElementName=SidebarNavigation}" FontSize="22" FontWeight="SemiBold" Foreground="#111827" />
-                    <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
-                    <TextBlock Text="{Binding SummaryText}" Margin="0,4,0,0" Foreground="#4B5563">
+            <Grid Grid.Row="0" Margin="0,0,0,16">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                        <TextBlock Text="{Binding SelectedItem.Content, ElementName=SidebarNavigation}" FontSize="22" FontWeight="SemiBold" Foreground="#111827" />
+                        <TextBlock Text="{Binding ListenerStatusText}"
+                                   Margin="0,4,0,0"
+                                   Foreground="#2563EB"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding SummaryText}"
+                                   Margin="0,4,0,0"
+                                   Foreground="#4B5563"
+                                   TextWrapping="Wrap">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
                                 <Setter Property="Visibility" Value="Collapsed" />
@@ -168,17 +185,34 @@
                                 </Style.Triggers>
                             </Style>
                         </TextBlock.Style>
-                    </TextBlock>
-                </StackPanel>
-                <StackPanel Visibility="Collapsed" DockPanel.Dock="Left">
-                    <TextBlock Text="IM消息看板" FontSize="24" FontWeight="SemiBold" Foreground="#111827" />
-                    <TextBlock Text="{Binding SummaryText}" Margin="0,6,0,0" Foreground="#4B5563" />
-                    <TextBlock Text="{Binding ListenerStatusText}" Margin="0,4,0,0" Foreground="#2563EB" />
-                </StackPanel>
-                <Button DockPanel.Dock="Right" Content="&#x5237;&#x65B0;" Click="RefreshButton_Click" VerticalAlignment="Top" Margin="8,0,0,0" />
-                <Button DockPanel.Dock="Right" Content="&#x505C;&#x6B62;&#x76D1;&#x542C;" Click="StopWeChatListenerButton_Click" VerticalAlignment="Top" Margin="8,0,0,0" />
-                <Button DockPanel.Dock="Right" Content="&#x5F00;&#x59CB;&#x76D1;&#x542C;" Click="StartWeChatListenerButton_Click" VerticalAlignment="Top" Margin="8,0,0,0" />
-                <Border DockPanel.Dock="Right" Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="12" MaxWidth="760">
+                        </TextBlock>
+                    </StackPanel>
+                    <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Top">
+                        <WrapPanel.Style>
+                            <Style TargetType="WrapPanel">
+                                <Setter Property="Visibility" Value="Visible" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SelectedIndex, ElementName=MainContentTabs}" Value="6">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding SelectedIndex, ElementName=MainContentTabs}" Value="7">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </WrapPanel.Style>
+                        <Button Content="&#x5F00;&#x59CB;&#x76D1;&#x542C;" Click="StartWeChatListenerButton_Click" />
+                        <Button Content="&#x505C;&#x6B62;&#x76D1;&#x542C;" Click="StopWeChatListenerButton_Click" />
+                        <Button Content="&#x5237;&#x65B0;" Click="RefreshButton_Click" Margin="0,0,0,8" />
+                    </WrapPanel>
+                </Grid>
+                <Border Grid.Row="1"
+                        Margin="0,10,0,0"
+                        Background="White"
+                        BorderBrush="#E5E7EB"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        Padding="12">
                     <Border.Style>
                         <Style TargetType="Border">
                             <Setter Property="Visibility" Value="Collapsed" />
@@ -192,29 +226,25 @@
                             </Style.Triggers>
                         </Style>
                     </Border.Style>
-                    <StackPanel>
-                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <StackPanel Width="104" Margin="0,0,10,8">
-                                <TextBlock Text="历史范围" Style="{StaticResource FieldLabelTextStyle}" />
-                                <ComboBox x:Name="BootstrapRangeComboBox" SelectedIndex="1">
-                                    <ComboBoxItem Content="7天" Tag="7d" />
-                                    <ComboBoxItem Content="30天" Tag="30d" />
-                                    <ComboBoxItem Content="全部" Tag="all" />
-                                </ComboBox>
-                            </StackPanel>
-                        </WrapPanel>
-                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
-                            <Button x:Name="ExtractDatabaseKeyButton" Content="自动提取 Key" Click="ExtractDatabaseKeyButton_Click" />
-                            <Button x:Name="InitLocalDatabaseButton" Content="初始化本地库" Click="InitLocalDatabaseButton_Click" />
-                            <Button Content="刷新" Click="RefreshButton_Click" />
-                            <Button Content="采集一次" Click="CaptureButton_Click" />
-                            <Button Content="开始监听" Click="StartWeChatListenerButton_Click" />
-                            <Button Content="停止监听" Click="StopWeChatListenerButton_Click" />
-                            <Button Content="示例消息" Click="SeedButton_Click" />
-                        </WrapPanel>
-                    </StackPanel>
+                    <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                        <StackPanel Width="104" Margin="0,0,12,8">
+                            <TextBlock Text="历史范围" Style="{StaticResource FieldLabelTextStyle}" />
+                            <ComboBox x:Name="BootstrapRangeComboBox" SelectedIndex="1">
+                                <ComboBoxItem Content="7天" Tag="7d" />
+                                <ComboBoxItem Content="30天" Tag="30d" />
+                                <ComboBoxItem Content="全部" Tag="all" />
+                            </ComboBox>
+                        </StackPanel>
+                        <Button x:Name="ExtractDatabaseKeyButton" Content="自动提取 Key" Click="ExtractDatabaseKeyButton_Click" VerticalAlignment="Bottom" />
+                        <Button x:Name="InitLocalDatabaseButton" Content="初始化本地库" Click="InitLocalDatabaseButton_Click" VerticalAlignment="Bottom" />
+                        <Button Content="刷新" Click="RefreshButton_Click" VerticalAlignment="Bottom" />
+                        <Button Content="采集一次" Click="CaptureButton_Click" VerticalAlignment="Bottom" />
+                        <Button Content="开始监听" Click="StartWeChatListenerButton_Click" VerticalAlignment="Bottom" />
+                        <Button Content="停止监听" Click="StopWeChatListenerButton_Click" VerticalAlignment="Bottom" />
+                        <Button Content="示例消息" Click="SeedButton_Click" VerticalAlignment="Bottom" />
+                    </WrapPanel>
                 </Border>
-            </DockPanel>
+            </Grid>
 
             <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,16">
                 <UniformGrid.Style>
@@ -452,12 +482,26 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="3*" />
                             </Grid.RowDefinitions>
-                            <DataGrid Grid.Row="1" ItemsSource="{Binding Diagnostics}">
+                            <DataGrid Grid.Row="1"
+                                      ItemsSource="{Binding Diagnostics}"
+                                      RowHeight="{x:Static sys:Double.NaN}"
+                                      MinRowHeight="34"
+                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="适配器" Binding="{Binding Adapter}" Width="180" />
                                     <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="120" />
                                     <DataGridTextColumn Header="最近成功" Binding="{Binding LastSuccessAt}" Width="180" />
-                                    <DataGridTextColumn Header="摘要" Binding="{Binding Detail}" Width="*" />
+                                    <DataGridTemplateColumn Header="摘要" Width="*">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Detail}"
+                                                           Margin="4,6"
+                                                           TextWrapping="Wrap"
+                                                           VerticalAlignment="Center"
+                                                           ToolTip="{Binding Detail}" />
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <DockPanel Grid.Row="2" Margin="0,14,0,8">

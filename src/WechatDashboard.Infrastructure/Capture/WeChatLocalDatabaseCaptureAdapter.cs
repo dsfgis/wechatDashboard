@@ -1,4 +1,5 @@
 using WechatDashboard.Application.Capture;
+using System.Text.Json;
 
 namespace WechatDashboard.Infrastructure.Capture;
 
@@ -24,22 +25,52 @@ public sealed class WeChatLocalDatabaseCaptureAdapter : IMessageCaptureAdapter
         if (!_reader.IsInitialized)
         {
             throw new WeChatReaderException(
-                WeChatReaderStage.KeyValidation,
-                WeChatReaderErrorCode.KeyInvalid,
-                "The native WeChat reader has not been initialized.");
+                WeChatReaderStage.ProtectedKey,
+                WeChatReaderErrorCode.ProtectedKeyUnavailable,
+                "微信本地数据库尚未初始化，请在“采集诊断”中点击“自动提取 Key”。");
         }
 
-        var committedOffset = context.GetOffset(Name);
+        var committedOffset = WeChatCaptureOffset.Parse(context.GetOffset(Name));
         var result = await _reader.ReadAsync(
             new WeChatReadRequest(
                 Start: null,
                 End: null,
                 Offset: 0,
                 Limit: 0,
-                CommittedHighWatermark: committedOffset,
-                IncrementalLookback: TimeSpan.FromSeconds(10)),
+                CommittedHighWatermark: committedOffset.HighWatermark,
+                IncrementalLookback: TimeSpan.FromSeconds(10),
+                CommittedSourceFingerprint: committedOffset.SourceFingerprint),
             cancellationToken);
         LastStages = result.Stages;
-        return new CaptureBatch(Name, result.Messages, result.ProposedNextOffset);
+        return new CaptureBatch(
+            Name,
+            result.Messages,
+            new WeChatCaptureOffset(result.ProposedNextOffset, result.SourceFingerprint).ToString());
     }
+}
+
+internal sealed record WeChatCaptureOffset(string HighWatermark, string? SourceFingerprint)
+{
+    public static WeChatCaptureOffset Parse(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return new WeChatCaptureOffset("", null);
+        }
+
+        if (value[0] == '{')
+        {
+            try
+            {
+                return JsonSerializer.Deserialize<WeChatCaptureOffset>(value) ?? new WeChatCaptureOffset("", null);
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return new WeChatCaptureOffset(value, null);
+    }
+
+    public override string ToString() => JsonSerializer.Serialize(this);
 }

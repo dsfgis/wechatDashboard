@@ -78,13 +78,22 @@ internal sealed class ShihuatongLocalDatabaseReader
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        var changedFiles = databaseFiles
-            .Select(path => new SourceDatabase(path, ShihuatongDatabaseSnapshot.GetSourceStamp(path)))
-            .Where(source => !offset.Files.TryGetValue(source.Name, out var cursor) ||
-                            !string.Equals(cursor.SourceStamp, source.Stamp, StringComparison.Ordinal))
-            .ToArray();
+        var changedFiles = new List<SourceDatabase>();
+        foreach (var source in databaseFiles.Select(path =>
+                     new SourceDatabase(path, ShihuatongDatabaseSnapshot.GetSourceStamp(path))))
+        {
+            if (offset.Files.TryGetValue(source.Name, out var cursor) &&
+                ShihuatongDatabaseSnapshot.HasSameDurableContent(cursor.SourceStamp, source.Stamp))
+            {
+                // 旧版本的 stamp 还包含频繁变化的 -shm 时间；无消息变更时直接迁移成稳定格式。
+                cursor.SourceStamp = source.Stamp;
+                continue;
+            }
 
-        if (changedFiles.Length == 0)
+            changedFiles.Add(source);
+        }
+
+        if (changedFiles.Count == 0)
         {
             return new CaptureBatch("Shihuatong.LocalDatabase", Array.Empty<CapturedMessage>(), offset.ToString());
         }
@@ -449,13 +458,25 @@ internal sealed class ShihuatongDatabaseSnapshot : IDisposable
 
     public static string GetSourceStamp(string sourcePath)
     {
-        return string.Join("|", new[] { "", "-wal", "-shm" }.Select(suffix =>
+        // -shm 是易变的共享内存索引/锁文件，不代表持久消息内容发生变化。
+        // 把它纳入轮询指纹会让空闲客户端也反复执行昂贵的 SQLCipher 打开与派生。
+        return string.Join("|", new[] { "", "-wal" }.Select(suffix =>
         {
             var path = sourcePath + suffix;
             if (!File.Exists(path)) return "missing";
             var info = new FileInfo(path);
             return $"{info.Length}:{info.LastWriteTimeUtc.Ticks}";
         }));
+    }
+
+    internal static bool HasSameDurableContent(string previousStamp, string currentStamp)
+    {
+        var previousParts = previousStamp.Split('|');
+        var currentParts = currentStamp.Split('|');
+        return previousParts.Length >= 2 &&
+               currentParts.Length >= 2 &&
+               string.Equals(previousParts[0], currentParts[0], StringComparison.Ordinal) &&
+               string.Equals(previousParts[1], currentParts[1], StringComparison.Ordinal);
     }
 
     private static void CopyOne(string sourcePath, string targetPath)

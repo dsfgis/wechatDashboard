@@ -7,9 +7,11 @@
 - G-001：保持 wx_key.dll 位于独立 x64 C# KeyProbe 进程内，避免第三方 Hook/DLL 故障污染 WPF 主进程。（REQ-001、REQ-007）
 - G-002：以可测试的 C# 组件替代 Python 的数据库发现、密钥验证、快照、数据库访问、schema 读取和内容解析。（REQ-002 至 REQ-005）
 - G-003：让微信消息页和 MessageCapturePipeline 共用同一个 C# 读取核心。（REQ-006）
-- G-004：使主密钥和派生密钥不落盘、不进入文本接口，并在所有生命周期出口清零。（REQ-008）
+- G-004：使主密钥不以明文落盘、不进入文本接口；允许使用 Windows DPAPI 当前用户密文缓存，并在所有明文生命周期出口清零。（REQ-008、REQ-014）
 - G-005：通过 fixture、Python oracle、真实机脱敏对照和干净机安装验收后，从 Release 删除 Python。（REQ-009、REQ-010、REQ-011）
 - G-006：为每个读取阶段提供稳定、脱敏、可回归的诊断。（REQ-007）
+- G-007：有效 Key 缓存存在时，应用重启可自动恢复并验证微信 reader；缓存失效时安全回退到显式重新提取。（REQ-014）
+- G-008：让每个采集源的成功、空结果、跳过和失败成为可观察结果，使多来源监听准确显示整体健康状态。（REQ-015）
 
 ### 1.2 非目标
 
@@ -18,6 +20,8 @@
 - 不把 UIA/OCR 改成主要读取链路。
 - 不承诺兼容尚未验证的未来微信 schema。
 - 不把 Python 打包成隐藏的生产回退。
+- 不保存明文、硬编码或使用自定义可逆算法保护微信 DB Key。
+- 不让受保护 Key 缓存跨 Windows 用户、机器或云端同步。
 
 ## 2. 当前系统上下文
 
@@ -26,11 +30,11 @@
 1. 用户在 WPF 中触发“自动提取 Key”。
 2. NativeHookKeyProvider 启动 WechatDashboard.KeyProbe.exe。
 3. KeyProbe 使用 C# NativeLibrary 加载 wx_key.dll，并通过命名管道返回 32 字节主密钥。
-4. WeChatLocalReaderService 把密钥转成十六进制字符串并通过环境变量交给 Python init。
-5. Python 写入 config.json 和 all_keys.json，解密数据库并执行 V4 schema/内容读取。
-6. WPF 解析 Python JSON；监听路径由 WeChatLocalCommandCaptureAdapter 启动外部命令并接入 MessageCapturePipeline。
+4. NativeWeChatLocalDatabaseReader 在 WPF 进程内持有二进制密钥租约，执行数据库发现、快照、验证和 V4 消息查询；Python 只保留为测试 oracle。
+5. `state.json` 只保存非敏感 reader 状态，不能恢复 Key；WPF 进程退出后租约丢失，下一次启动回到未初始化。
+6. WeChatLocalDatabaseCaptureAdapter 接入 MessageCapturePipeline；当前管线捕获单适配器异常后只写 Debug，`CaptureRunResult` 没有逐来源错误，UI 可能在微信失败、石化通成功时误报整体监听正常。
 
-步骤 1 至 3 已是 C#；本设计替换步骤 4 至 6，并消除明文密钥字符串、all_keys.json 和 Python 进程。
+本轮设计在现有原生 C# reader 上增加 D-015 的 DPAPI 当前用户密文缓存和 D-016 的逐来源结果；不恢复 Python、明文 Key 或 WPF 直接加载 wx_key.dll 的路径。
 
 ### 2.2 目标架构
 
@@ -39,6 +43,7 @@ WPF / MessageCapturePipeline
         |
         v
 WeChatLocalReaderService  ----  WeChatReaderStateStore
+        |                 ----  ProtectedWeChatDatabaseKeyStore (DPAPI CurrentUser)
         |
         +---- explicit key action ----> NativeHookKeyProvider
         |                                  |
@@ -77,11 +82,11 @@ WeChatLocalReaderService 保留 UI 已依赖的初始化、可用性、最近错
 
 服务同时为消息页和采集适配器提供统一的 InitializeAsync、ReadPageAsync 与 CaptureAsync 核心，避免两条读取路径漂移。
 
-### D-003：密钥使用二进制租约，不转换为字符串
+### D-003：明文密钥使用二进制租约，不转换为字符串
 
 扩展 WeChatDatabaseKeyLease，使受控组件能在不复制为字符串的情况下访问只读字节视图。主密钥租约由 reader session 持有，重初始化、账户切换、取消、应用退出或 Dispose 时清零。每个数据库的派生密钥使用独立短生命周期缓冲区，并在数据库连接建立或解密完成后清零。（REQ-002、REQ-008）
 
-不再使用 ImportedDatabaseKey 字符串、WECHAT_DASHBOARD_DB_KEY 环境变量或 all_keys.json。受控的手动导入恢复入口若保留，也必须直接创建内存租约，不能写普通文件。
+不再使用 ImportedDatabaseKey 字符串、WECHAT_DASHBOARD_DB_KEY 环境变量或 all_keys.json。受控的手动导入恢复入口若保留，也必须直接创建内存租约，不能写普通文件。唯一允许的持久化由 D-015 定义，存储内容是 DPAPI 密文而不是可复用明文。
 
 ### D-004：源数据库只读，所有读取针对稳定快照
 
@@ -191,6 +196,27 @@ state.json 只保存数据库根目录、bootstrap 范围、schema/reader 版本
 - 两个来源都必须在标准用户下先测；只有目标客户端以提升权限运行而确有需要时，才测试匹配权限，并记录原因。版本/架构/权限/EDR 不兼容必须映射为明确诊断，不能折叠成合法零消息。
 - 验收证据只保存版本、文件哈希、计数、时间范围、已知测试消息 ID 和脱敏状态，不保存密钥或真实正文。
 
+### D-015：以 DPAPI CurrentUser 保存版本化 Key 密文缓存
+
+新增 `IWeChatDatabaseKeyStore` 边界及 Windows 实现 `ProtectedWeChatDatabaseKeyStore`。存储文件固定为 `%LocalAppData%\WechatDashboard\Reader\protected-wechat-key.bin`，使用二进制格式 `magic + formatVersion + protectedPayload`；`protectedPayload` 由 `ProtectedData.Protect(..., DataProtectionScope.CurrentUser)` 生成，附加应用级固定 entropy 只用于域隔离，不作为秘密。（REQ-008、REQ-014）
+
+保存流程必须先把租约复制到临时 32 字节缓冲区，调用 DPAPI 后立即清零明文缓冲区；密文写入同目录随机临时文件，刷新后用原子替换更新正式文件。KeyProbe、数据库验证或缓存写入任一步失败，都不得覆盖上一次已成功缓存。文件继承用户目录 ACL，并在 Windows 支持时收紧为当前用户；安全性不能只依赖 ACL。（AC-036、AC-039）
+
+加载流程每个进程最多自动尝试一次：读取受限大小的二进制文件，验证 magic/version，DPAPI 解密为临时字节，立即构造 `WeChatDatabaseKeyLease` 并清零临时缓冲区；随后必须执行与 KeyProbe 相同的必需数据库验证。DPAPI 解密成功不等于 Key 有效。缺失、格式损坏、跨用户复制、账户/数据库变化或验证失败均返回稳定的 `ProtectedKeyUnavailable`/`ProtectedKeyInvalid` 诊断，不自动启动 Hook。（AC-037、AC-038）
+
+成功的显式 KeyProbe 初始化在数据库验证通过后更新缓存；显式 reader 重置和任何卸载删除该缓存，升级保留兼容版本。缓存不进入普通备份、导出、诊断包或应用 SQLite。受保护缓存抵御离线文件读取，但不能抵御已经以同一 Windows 用户执行并能调用 DPAPI 的恶意代码，此残余风险必须保留在发布说明中。（AC-040）
+
+### D-016：采集管线返回逐来源结果并聚合健康状态
+
+`MessageCapturePipeline.RunOnceAsync` 不再把适配器异常仅写入 Debug 后丢弃。每个启用适配器生成一个 `CaptureSourceRunResult`，字段至少包括 `AdapterName`、`Status`（Succeeded/Empty/Skipped/Failed）、Captured/Persisted/Duplicate/CreatedTodo 数量、脱敏 `Stage`/`ErrorCode`/`ErrorMessage` 与 `CompletedAt`。`CaptureRunResult` 保留现有汇总计数并新增 `Sources`；汇总只累加成功或合法空结果来源。（REQ-007、REQ-015）
+
+适配器失败时不推进该适配器 offset，其他来源继续处理并独立推进。错误先经过统一 sanitizer，再进入结果、Debug 或 UI；原始异常只在当前调用栈内使用。WPF 将逐来源最新结果合并进采集诊断表，并按以下优先级生成监听状态：（AC-041、AC-043 至 AC-045）
+
+1. 所有启用来源成功/合法空结果：`监听正常`。
+2. 至少一个来源成功且至少一个失败/跳过：`部分运行/部分失败`，附首个可操作错误和失败来源数量。
+3. 所有启用来源失败：`监听失败`，保留逐来源错误。
+4. 微信未初始化且受保护缓存无法恢复：立即生成 `WeChat.LocalDatabase` 的 KeyValidation 失败结果和“请提取 Key”动作提示；健康来源仍可运行，不再显示无条件的“微信监听运行中”。
+
 ## 4. 组件职责
 
 | 组件 | 层 | 职责 | 需求 |
@@ -208,6 +234,8 @@ state.json 只保存数据库根目录、bootstrap 范围、schema/reader 版本
 | WeChatLocalReaderService | Infrastructure facade | 初始化、分页、采集和诊断编排 | REQ-006、REQ-007 |
 | WeChatLocalDatabaseCaptureAdapter | Infrastructure adapter | 将 C# 读取结果送入现有采集管线 | REQ-006 |
 | WeChatReaderStateStore | Infrastructure | 保存无密钥状态和 reader 版本 | REQ-008、REQ-011 |
+| IWeChatDatabaseKeyStore / ProtectedWeChatDatabaseKeyStore | Infrastructure | DPAPI 当前用户密文缓存、原子保存、加载、清理和错误分类 | REQ-008、REQ-014 |
+| CaptureSourceRunResult / CaptureRunResult | Application | 表达逐来源运行结果并保留兼容汇总 | REQ-007、REQ-015 |
 | Release staging builder / installer | 发布层 | 生成 self-contained win-x64 载荷、安装包、清单、哈希和签名输入 | REQ-009、REQ-011 至 REQ-013 |
 | Clean-machine acceptance harness | 验收层 | 在同一安装包上分别验证微信、石化通、安装生命周期和脱敏证据 | REQ-010、REQ-013 |
 
@@ -244,6 +272,25 @@ public sealed record WeChatReadResult(
     int TotalCount,
     string ProposedNextOffset,
     IReadOnlyList<WeChatReaderStageResult> Stages);
+
+public interface IWeChatDatabaseKeyStore
+{
+    Task<WeChatDatabaseKeyLease?> LoadAsync(CancellationToken cancellationToken);
+    Task SaveAsync(WeChatDatabaseKeyLease keyLease, CancellationToken cancellationToken);
+    Task ClearAsync(CancellationToken cancellationToken);
+}
+
+public sealed record CaptureSourceRunResult(
+    string AdapterName,
+    CaptureSourceRunStatus Status,
+    int CapturedCount,
+    int PersistedCount,
+    int DuplicateCount,
+    int CreatedTodoCount,
+    string? Stage,
+    string? ErrorCode,
+    string? SanitizedError,
+    DateTimeOffset CompletedAt);
 ~~~
 
 IWeChatDatabaseKeyProvider 继续返回 WeChatDatabaseKeyLease，但租约新增受限的 ReadOnlySpan<byte> 使用方式；禁止 ToHexString 用于生产初始化链路。（REQ-008）
@@ -266,31 +313,39 @@ state.json 建议字段：
 | lastValidatedAt | datetime | 最近密钥/数据库验证时间 |
 | shardHighWatermarks | map | 每分片非敏感时间/ID 高水位 |
 
-禁止字段：主密钥、派生密钥、密钥 salt+key 组合、真实消息正文、用户聊天列表。
+禁止字段：明文主密钥、派生密钥、DPAPI 密文正文、密钥 salt+key 组合、真实消息正文、用户聊天列表。`state.json` 只允许保存 `protectedKeyState`（Absent/Valid/Invalid/Unreadable）和最近缓存验证时间，不保存缓存内容。
+
+受保护 Key 文件独立于 `state.json`：
+
+| 文件 | 内容 | 生命周期 |
+|---|---|---|
+| `Reader\protected-wechat-key.bin` | 版本化 DPAPI CurrentUser 密文 | 成功验证后原子创建/替换；升级保留；显式重置或卸载删除 |
 
 ### 6.2 Reader 生命周期
 
 1. Uninitialized：没有有效内存租约。
-2. AcquiringKey：用户显式触发 KeyProbe。
-3. Validating：发现数据库并派生/校验各库密钥。
-4. Ready：主密钥租约存活，可按需为当前快照派生短期数据库密钥。
-5. Reading：快照、打开、schema 和查询。
-6. Faulted：保留脱敏诊断，不保留无效密钥。
-7. Disposed：所有租约、连接和临时文件已释放。
+2. RestoringProtectedKey：每个进程一次地尝试 DPAPI 恢复。
+3. AcquiringKey：用户显式触发 KeyProbe。
+4. Validating：发现数据库并派生/校验各库密钥。
+5. Ready：主密钥租约存活，可按需为当前快照派生短期数据库密钥。
+6. Reading：快照、打开、schema 和查询。
+7. Faulted：保留脱敏诊断，不保留无效明文密钥。
+8. Disposed：所有租约、连接和临时文件已释放。
 
-账户切换、数据库 salt 变化、schemaFingerprint 变化、显式重新初始化或 KeyInvalid 都会从 Ready 回到 Uninitialized，并清零旧密钥。
+账户切换、数据库 salt 变化、schemaFingerprint 变化、显式重新初始化或 KeyInvalid 都会从 Ready 回到 Uninitialized，并清零旧内存租约。失效的受保护缓存不会在后台重复解密或触发 Hook；下一次成功显式提取后原子替换。
 
 ## 7. 控制流与数据流
 
 ### 7.1 初始化
 
-1. 用户显式点击提取/初始化。
+1. 应用启动或首次需要微信 reader 时，先尝试从 DPAPI 缓存恢复租约；缓存缺失/失效时等待用户显式提取，不自动 Hook。
 2. reader 定位 Weixin.exe 和 db_storage，记录 PathDiscovery 数量信息。
-3. NativeHookKeyProvider 启动 KeyProbe，通过命名管道取得主密钥租约。
+3. 有缓存租约则直接进入验证；无缓存时用户点击提取/初始化，由 NativeHookKeyProvider 启动 KeyProbe 并通过命名管道取得租约。
 4. Discovery 枚举数据库；SnapshotService 创建一致性快照。
 5. KeyDeriver/Validator 对必需数据库逐一验证。
 6. accessor 打开 fixture/快照并执行最小 schema 探测。
-7. 成功后写入无密钥 state.json，session 进入 Ready；失败则清零并返回稳定阶段错误。
+7. KeyProbe 路径成功验证后原子保存 DPAPI 密文；缓存恢复路径不重复写入。随后写入无密钥 state.json，session 进入 Ready。
+8. 任一步失败都清零临时明文并返回稳定阶段错误；失败的显式提取不得覆盖上次成功缓存。
 
 ### 7.2 分页读取
 
@@ -306,7 +361,8 @@ state.json 建议字段：
 1. adapter 从 CaptureContext 读取已提交 offset。
 2. reader 以 offset-lookback 为窗口读取并返回 ProposedNextOffset。
 3. MessageCapturePipeline 完成全部持久化和 Todo 操作。
-4. 只有提交成功后，外层保存 ProposedNextOffset；失败保持旧 offset 以便重放。
+4. 只有该来源提交成功后，外层保存 ProposedNextOffset；失败保持该来源旧 offset 以便重放。
+5. 管线为每个来源生成 `CaptureSourceRunResult`，再聚合为整体正常、部分失败或全部失败状态。
 
 ## 8. 错误、恢复与用户可见行为
 
@@ -315,12 +371,14 @@ state.json 建议字段：
 | PathDiscovery | 未找到 Weixin/db_storage | 登录微信后重试或手动选择目录 | 显示路径阶段失败 |
 | KeyProbe | DLL 缺失、导出缺失、超时、权限不匹配 | 修复安装、重启微信、以匹配权限重试 | WPF 不崩溃，显示脱敏错误 |
 | KeyValidation | Key 与当前账户数据库不匹配 | 清零旧 Key，重新提取 | 不进入已初始化状态 |
+| ProtectedKey | 缓存缺失、损坏、跨用户或验证失败 | 保持未初始化，提示显式重新提取；成功后原子替换 | 显示缓存失效原因，不自动 Hook |
 | Snapshot | 文件变化、复制失败、空间不足 | 清理未完成快照后重试 | 保留旧状态但不误报新数据 |
 | DatabaseOpen | cipher 参数不支持、损坏 | 报兼容性错误；fixture 门控决定 accessor | 不返回 0 条伪成功 |
 | Schema | 必需表/列缺失 | 标记客户端版本不兼容 | 显示 schema 阶段失败 |
 | ContentDecode | 单条损坏/zstd/XML 异常 | 对可隔离行产生安全占位摘要并计数；结构性失败中止 | 不显示密钥或原始损坏 blob |
 | Query | 分片失败、取消 | 可安全重试，不推进 offset | 保留旧消息与旧 offset |
 | PipelineCommit | SQLite/Todo 事务失败 | 整批重放 | 不推进 offset |
+| SourceAdapter | 单来源未初始化或运行异常 | 其他来源继续；失败来源后续轮询可恢复 | 显示部分失败和逐来源脱敏错误 |
 
 ## 9. 安全、隐私、性能与兼容性
 
@@ -328,6 +386,8 @@ state.json 建议字段：
 
 - KeyProbe 参数白名单和长度边界保持不变；管道名不可预测且 CurrentUserOnly。
 - 所有 byte[] 密钥使用 CryptographicOperations.ZeroMemory 清理。
+- 持久化主密钥只能由 `ProtectedData` 使用 `DataProtectionScope.CurrentUser` 保护；不自研加密、不把密文 Base64 化写入 JSON、不记录密文内容。
+- DPAPI 密文文件限制大小、使用版本头和原子替换；普通备份、导出、诊断包和日志明确排除该文件。
 - 诊断统一经过敏感串过滤，不允许组件自行拼接原始异常到 UI。
 - XML 使用安全解析设置；zstd 限制最大输出；SQLite 标识符必须白名单验证并正确引用。
 - 真实机对照默认只处理计数、时间范围、schema 名和已知测试消息 ID。
@@ -360,23 +420,26 @@ state.json 建议字段：
 7. 生成无 Python self-contained win-x64 staging，显式包含 KeyProbe、`wx_key.dll` 和全部运行依赖。
 8. 从固定 staging 生成签名安装包，归档载荷/哈希清单。
 9. 在同一干净机安装包上完成微信和石化通独立端到端验收，以及升级、卸载和回滚验收。
-10. 删除 Release Python、PowerShell 和明文 Key 产物；开发 oracle 可留在源码树但不得复制到 staging。
+10. 增加 DPAPI Key 缓存迁移、失效回退、单来源结果与监听健康状态；完成重启恢复和逐来源故障验收。
+11. 删除 Release Python、PowerShell 和明文 Key 产物；开发 oracle 可留在源码树但不得复制到 staging。
 
 ### 10.2 发布门槛
 
-- AC-001 至 AC-035 全部有证据。
+- AC-001 至 AC-045 全部有证据。
 - 实际 wx_key.dll 哈希与授权/来源/安全/签名记录一致。
 - staging 扫描和干净机测试证明无 Python。
 - 主程序、KeyProbe、DLL/依赖和安装包完成签名与安全软件检查。
 - 标准用户从只读安装目录启动，所有可变数据只写入 LocalAppData。
 - 同一安装包哈希已分别通过真实微信和真实石化通端到端验收；任一来源未通过时，不得宣称安装包支持双来源读取。
+- 同一 Windows 用户重启应用后，受保护缓存恢复、失效回退和逐来源状态均有证据；任何明文 Key 落盘或误报整体正常都阻止发布。
 
 ### 10.3 回滚
 
-- 应用升级前保留 state.json 备份，但不备份密钥。
+- 应用升级前保留 state.json 和兼容的 DPAPI 密文缓存；普通备份/导出不得包含密文缓存。
 - reader 缓存和快照可删除重建；消息主数据库保持迁移兼容。
 - 新版失败时回滚到上一版已签名安装包，不在新 Release 中启用 Python 隐藏回退。
 - 若 schema 不兼容，禁用微信本地数据库采集并保留其他采集源，直到发布兼容更新。
+- 显式重置 reader 或卸载时删除受保护 Key 缓存；回滚版本若不理解该缓存必须忽略它，不得将其作为普通文件输出。
 
 ## 11. 备选方案与权衡
 
@@ -388,6 +451,10 @@ state.json 建议字段：
 | 独立 C# reader 进程 | 故障隔离更强 | 与 WPF 之间需再设计消息 IPC，复杂度高 | 当前不采用；数据库访问保持托管组件，DLL 仍由 KeyProbe 隔离 |
 | SQLCipher 直接访问 | 少写密码学代码，可直接查询 | 微信参数/WAL 兼容需 fixture 证明 | 首选 |
 | C# 托管页面解密 | 与 Python 算法可精确对照 | 密码学和文件格式维护成本高，产生临时明文快照 | fixture 证明必要时启用 |
+| 明文 Key 文件/JSON/SQLite | 实现最简单，可直接复用 | 任意文件读取即可解密微信数据库，违反最小暴露 | 拒绝 |
+| DPAPI LocalMachine | 同机服务可复用 | 扩大到机器范围，其他用户/服务可能解密 | 拒绝 |
+| Windows Credential Manager | 系统管理凭据、无自管文件格式 | 不满足用户要求的本地文件缓存，部署/测试复杂度更高 | 当前不采用 |
+| DPAPI CurrentUser 二进制文件 | 同用户重启可复用，离线复制不可解密，适合 Windows-only 应用 | 同用户恶意代码仍可解密；需版本、原子写和生命周期管理 | 采用 |
 
 ## 12. 需求到设计追踪
 
@@ -406,3 +473,5 @@ state.json 建议字段：
 | REQ-011 | D-004、D-011、9.3 |
 | REQ-012 | D-001、10.2 |
 | REQ-013 | D-011、D-013、D-014、9.3、10 |
+| REQ-014 | D-003、D-011、D-015、6、7.1、8、9.1、10 |
+| REQ-015 | D-010、D-016、7.3、8、9.1 |

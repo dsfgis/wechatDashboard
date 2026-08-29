@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using WechatDashboard.Application.Capture;
 
 namespace WechatDashboard.Infrastructure.Capture;
@@ -14,6 +16,7 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
     private readonly WeChatDatabaseKeyDeriver _keyDeriver;
     private readonly WeChatV4MessageQueryService _queryService;
     private readonly WeChatReaderStateStore _stateStore;
+    private readonly IWeChatDatabaseKeyStore? _keyStore;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private IReadOnlyList<WeChatReaderStageResult> _diagnostics = Array.Empty<WeChatReaderStageResult>();
     private WeChatDatabaseKeyLease? _masterKeyLease;
@@ -27,7 +30,8 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
         WeChatDatabaseSnapshotService? snapshotService = null,
         WeChatDatabaseKeyDeriver? keyDeriver = null,
         WeChatV4MessageQueryService? queryService = null,
-        WeChatReaderStateStore? stateStore = null)
+        WeChatReaderStateStore? stateStore = null,
+        IWeChatDatabaseKeyStore? keyStore = null)
     {
         _keyProvider = keyProvider ?? throw new ArgumentNullException(nameof(keyProvider));
         _discovery = discovery ?? new WeChatDatabaseDiscovery();
@@ -35,11 +39,12 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
         _keyDeriver = keyDeriver ?? new WeChatDatabaseKeyDeriver();
         _queryService = queryService ?? new WeChatV4MessageQueryService();
         _stateStore = stateStore ?? new WeChatReaderStateStore();
+        _keyStore = keyStore;
     }
 
     public bool IsAvailable => !_disposed;
 
-    public bool IsInitialized => !_disposed && _masterKeyLease is not null && _derivedKeys is not null;
+    public bool IsInitialized => !_disposed && _masterKeyLease is not null && !string.IsNullOrWhiteSpace(_databaseRoot);
 
     public IReadOnlyList<WeChatReaderStageResult> Diagnostics => _diagnostics;
 
@@ -47,8 +52,80 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
         WeChatInitializationRequest request,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
+        return await InitializeCoreAsync(
+            request.DatabaseRoot,
+            request.BootstrapRange,
+            WeChatReaderStage.KeyProbe,
+            token => _keyProvider.AcquireAsync(
+                new WeChatDatabaseKeyRequest(request.ProcessId, request.KeyTimeout),
+                token),
+            persistValidatedKey: _keyStore is not null,
+            performFullValidation: true,
+            cancellationToken: cancellationToken);
+    }
+
+    public async Task<WeChatInitializationResult> RestoreProtectedKeyAsync(
+        WeChatProtectedKeyRestoreRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var result = await InitializeCoreAsync(
+            request.DatabaseRoot,
+            request.BootstrapRange,
+            WeChatReaderStage.ProtectedKey,
+            async token =>
+            {
+                var lease = _keyStore is null ? null : await _keyStore.LoadAsync(token);
+                return lease ?? throw new WeChatReaderException(
+                    WeChatReaderStage.ProtectedKey,
+                    WeChatReaderErrorCode.ProtectedKeyUnavailable,
+                    "未找到已保存的微信 Key，请点击“自动提取 Key”。");
+            },
+            persistValidatedKey: false,
+            performFullValidation: false,
+            cancellationToken: cancellationToken);
+
+        if (!result.Succeeded && _keyStore is not null && result.Stages.Any(stage =>
+                !stage.Succeeded &&
+                (stage.ErrorCode == WeChatReaderErrorCode.ProtectedKeyInvalid ||
+                 stage.ErrorCode == WeChatReaderErrorCode.KeyInvalid)))
+        {
+            try { await _keyStore.ClearAsync(cancellationToken); } catch { }
+        }
+
+        return result;
+    }
+
+    public async Task ClearProtectedKeyAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            DisposeSession();
+            if (_keyStore is not null)
+            {
+                await _keyStore.ClearAsync(cancellationToken);
+            }
+            _diagnostics = Array.Empty<WeChatReaderStageResult>();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<WeChatInitializationResult> InitializeCoreAsync(
+        string databaseRoot,
+        string bootstrapRange,
+        WeChatReaderStage keyStage,
+        Func<CancellationToken, Task<WeChatDatabaseKeyLease>> acquireKey,
+        bool persistValidatedKey,
+        bool performFullValidation,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         await _gate.WaitAsync(cancellationToken);
         var stages = new List<WeChatReaderStageResult>();
         WeChatDatabaseKeyLease? newMasterLease = null;
@@ -60,7 +137,7 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
             var normalizedRoot = await RunStageAsync(
                 stages,
                 WeChatReaderStage.PathDiscovery,
-                () => Task.FromResult(WeChatDatabaseDiscovery.NormalizeRoot(request.DatabaseRoot)),
+                () => Task.FromResult(WeChatDatabaseDiscovery.NormalizeRoot(databaseRoot)),
                 cancellationToken);
             var databases = await RunStageAsync(
                 stages,
@@ -70,54 +147,103 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
                 result => new Dictionary<string, long> { ["databases"] = result.Count });
             newMasterLease = await RunStageAsync(
                 stages,
-                WeChatReaderStage.KeyProbe,
-                () => _keyProvider.AcquireAsync(
-                    new WeChatDatabaseKeyRequest(request.ProcessId, request.KeyTimeout),
-                    cancellationToken),
+                keyStage,
+                () => acquireKey(cancellationToken),
                 cancellationToken);
-            snapshot = await RunStageAsync(
-                stages,
-                WeChatReaderStage.Snapshot,
-                () => _snapshotService.CreateAsync(databases, cancellationToken),
-                cancellationToken,
-                result => new Dictionary<string, long> { ["databases"] = result.Databases.Count });
-            newDerivedKeys = await RunStageAsync(
-                stages,
-                WeChatReaderStage.KeyValidation,
-                () => _keyDeriver.DeriveAsync(newMasterLease, snapshot.Databases, cancellationToken),
-                cancellationToken,
-                result => new Dictionary<string, long> { ["validated_databases"] = result.RelativePaths.Count });
+            var validationProof = CreateValidationProof(newMasterLease, databases);
+            var existingState = performFullValidation
+                ? null
+                : await _stateStore.LoadAsync(cancellationToken);
+            var canReuseValidation = !performFullValidation &&
+                                     existingState is not null &&
+                                     string.Equals(existingState.ReaderVersion, ReaderVersion, StringComparison.Ordinal) &&
+                                     string.Equals(existingState.DatabaseRoot, normalizedRoot, StringComparison.OrdinalIgnoreCase) &&
+                                     ProofsMatch(existingState.SchemaFingerprint, validationProof);
+            var validationDatabases = performFullValidation
+                ? databases
+                : SelectProtectedKeyValidationDatabase(databases);
+            if (!canReuseValidation)
+            {
+                snapshot = await RunStageAsync(
+                    stages,
+                    WeChatReaderStage.Snapshot,
+                    () => _snapshotService.CreateAsync(validationDatabases, cancellationToken),
+                    cancellationToken,
+                    result => new Dictionary<string, long> { ["databases"] = result.Databases.Count });
+                newDerivedKeys = await RunStageAsync(
+                    stages,
+                    WeChatReaderStage.KeyValidation,
+                    () => _keyDeriver.DeriveAsync(
+                        newMasterLease,
+                        snapshot.Databases,
+                        cancellationToken,
+                        validateRequiredDatabaseSet: performFullValidation),
+                    cancellationToken,
+                    result => new Dictionary<string, long> { ["validated_databases"] = result.RelativePaths.Count });
+            }
 
-            var schemaProbeStart = DateTimeOffset.UtcNow;
+            if (performFullValidation)
+            {
+                var schemaProbeStart = DateTimeOffset.UtcNow;
+                await RunStageAsync(
+                    stages,
+                    WeChatReaderStage.Schema,
+                    () => Task.FromResult(_queryService.Read(
+                        snapshot!,
+                        newMasterLease,
+                        new WeChatReadRequest(schemaProbeStart, schemaProbeStart, 0, 1),
+                        cancellationToken)),
+                    cancellationToken,
+                    result => result.Counts);
+            }
+
             await RunStageAsync(
                 stages,
-                WeChatReaderStage.Schema,
-                () => Task.FromResult(_queryService.Read(
-                    snapshot,
-                    newMasterLease,
-                    new WeChatReadRequest(schemaProbeStart, schemaProbeStart, 0, 1),
-                    cancellationToken)),
-                cancellationToken,
-                result => result.Counts);
+                WeChatReaderStage.PipelineCommit,
+                async () =>
+                {
+                    await _stateStore.SaveAsync(
+                        new WeChatReaderState(
+                            ReaderVersion,
+                            normalizedRoot,
+                            NormalizeBootstrapRange(bootstrapRange),
+                            SchemaFingerprint: validationProof,
+                            LastValidatedAt: DateTimeOffset.UtcNow),
+                        cancellationToken);
+                    return true;
+                },
+                cancellationToken);
+
+            // 最后才替换正式 Key 缓存；此前任一阶段失败都不会覆盖旧缓存。
+            if (persistValidatedKey && _keyStore is not null)
+            {
+                await RunStageAsync(
+                    stages,
+                    WeChatReaderStage.ProtectedKey,
+                    async () =>
+                    {
+                        await _keyStore.SaveAsync(newMasterLease!, cancellationToken);
+                        return true;
+                    },
+                    cancellationToken);
+            }
 
             _masterKeyLease = newMasterLease;
             _derivedKeys = newDerivedKeys;
             _databaseRoot = normalizedRoot;
             newMasterLease = null;
             newDerivedKeys = null;
-            await _stateStore.SaveAsync(
-                new WeChatReaderState(
-                    ReaderVersion,
-                    normalizedRoot,
-                    NormalizeBootstrapRange(request.BootstrapRange),
-                    SchemaFingerprint: null,
-                    LastValidatedAt: DateTimeOffset.UtcNow),
-                cancellationToken);
             _diagnostics = stages;
             return new WeChatInitializationResult(true, stages);
         }
+        catch (OperationCanceledException)
+        {
+            DisposeSession();
+            throw;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            DisposeSession();
             stages.Add(CreateFailureStage(exception));
             _diagnostics = stages;
             return new WeChatInitializationResult(false, stages);
@@ -145,7 +271,7 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
         WeChatDatabaseSnapshot? snapshot = null;
         try
         {
-            if (_masterKeyLease is null || _derivedKeys is null || string.IsNullOrWhiteSpace(_databaseRoot))
+            if (_masterKeyLease is null || string.IsNullOrWhiteSpace(_databaseRoot))
             {
                 throw new WeChatReaderException(
                     WeChatReaderStage.KeyValidation,
@@ -159,18 +285,37 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
                 () => Task.FromResult(_discovery.Discover(_databaseRoot)),
                 cancellationToken,
                 result => new Dictionary<string, long> { ["databases"] = result.Count });
+            var sourceFingerprint = CreateMessageSourceFingerprint(databases);
+            if (!string.IsNullOrWhiteSpace(request.CommittedHighWatermark) &&
+                !string.IsNullOrWhiteSpace(request.CommittedSourceFingerprint) &&
+                string.Equals(
+                    request.CommittedSourceFingerprint,
+                    sourceFingerprint,
+                    StringComparison.Ordinal))
+            {
+                stages.Add(new WeChatReaderStageResult(
+                    WeChatReaderStage.Query,
+                    true,
+                    WeChatReaderErrorCode.None,
+                    "No durable WeChat message database changes were detected.",
+                    DateTimeOffset.UtcNow,
+                    TimeSpan.Zero,
+                    new Dictionary<string, long> { ["shards_scanned"] = 0, ["rows_read"] = 0 }));
+                _diagnostics = stages;
+                return new WeChatReadResult(
+                    Array.Empty<CapturedMessage>(),
+                    0,
+                    request.CommittedHighWatermark,
+                    stages,
+                    sourceFingerprint);
+            }
+
             snapshot = await RunStageAsync(
                 stages,
                 WeChatReaderStage.Snapshot,
                 () => _snapshotService.CreateAsync(databases, cancellationToken),
                 cancellationToken,
                 result => new Dictionary<string, long> { ["databases"] = result.Databases.Count });
-            using var currentKeys = await RunStageAsync(
-                stages,
-                WeChatReaderStage.KeyValidation,
-                () => _keyDeriver.DeriveAsync(_masterKeyLease, snapshot.Databases, cancellationToken),
-                cancellationToken,
-                result => new Dictionary<string, long> { ["validated_databases"] = result.RelativePaths.Count });
             var queryResult = await RunStageAsync(
                 stages,
                 WeChatReaderStage.Query,
@@ -182,7 +327,8 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
                 queryResult.Messages,
                 queryResult.TotalCount,
                 queryResult.ProposedNextOffset,
-                stages);
+                stages,
+                CreateMessageSourceFingerprint(databases));
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -203,6 +349,166 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
                 _snapshotService.Delete(snapshot);
             }
             _gate.Release();
+        }
+    }
+
+    internal static string CreateMessageSourceFingerprint(
+        IReadOnlyList<WeChatDatabaseDescriptor> databases)
+    {
+        var builder = new StringBuilder();
+        foreach (var database in databases
+                     .Where(item => WeChatDatabaseDiscovery.IsMessageDatabase(item.RelativePath))
+                     .OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase))
+        {
+            builder.Append(database.RelativePath).Append('|');
+            AppendDatabaseIdentityStamp(builder, database.FullPath);
+            AppendWalContentStamp(builder, database.FullPath + "-wal");
+        }
+
+        return Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    private static IReadOnlyList<WeChatDatabaseDescriptor> SelectProtectedKeyValidationDatabase(
+        IReadOnlyList<WeChatDatabaseDescriptor> databases)
+    {
+        var sessionDatabase = databases.FirstOrDefault(database =>
+            string.Equals(database.RelativePath, "session/session.db", StringComparison.OrdinalIgnoreCase));
+        return sessionDatabase is null
+            ? Array.Empty<WeChatDatabaseDescriptor>()
+            : new[] { sessionDatabase };
+    }
+
+    private static string CreateValidationProof(
+        WeChatDatabaseKeyLease keyLease,
+        IReadOnlyList<WeChatDatabaseDescriptor> databases)
+    {
+        var sessionDatabase = databases.FirstOrDefault(database =>
+            string.Equals(database.RelativePath, "session/session.db", StringComparison.OrdinalIgnoreCase))
+            ?? throw new WeChatReaderException(
+                WeChatReaderStage.PathDiscovery,
+                WeChatReaderErrorCode.RequiredDatabaseMissing,
+                "The required WeChat session database was not found.");
+        var salt = new byte[WeChatDatabaseKeyDeriver.SaltSize];
+        using (var input = new FileStream(
+                   sessionDatabase.FullPath,
+                   FileMode.Open,
+                   FileAccess.Read,
+                   FileShare.ReadWrite | FileShare.Delete))
+        {
+            input.ReadExactly(salt);
+        }
+        var prefix = Encoding.UTF8.GetBytes($"{ReaderVersion}|{sessionDatabase.RelativePath}|");
+        var material = new byte[prefix.Length + salt.Length];
+        prefix.CopyTo(material, 0);
+        salt.CopyTo(material, prefix.Length);
+        var key = new byte[WeChatDatabaseKeyLease.KeyLength];
+        try
+        {
+            keyLease.CopyTo(key);
+            return Convert.ToBase64String(HMACSHA256.HashData(key, material));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+            CryptographicOperations.ZeroMemory(prefix);
+            CryptographicOperations.ZeroMemory(salt);
+            CryptographicOperations.ZeroMemory(material);
+        }
+    }
+
+    private static bool ProofsMatch(string? storedProof, string currentProof)
+    {
+        if (string.IsNullOrWhiteSpace(storedProof))
+        {
+            return false;
+        }
+
+        try
+        {
+            var stored = Convert.FromBase64String(storedProof);
+            var current = Convert.FromBase64String(currentProof);
+            return CryptographicOperations.FixedTimeEquals(stored, current);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    private static void AppendDatabaseIdentityStamp(StringBuilder builder, string path)
+    {
+        if (!File.Exists(path))
+        {
+            builder.Append("missing|");
+            return;
+        }
+
+        const int identityLength = 64;
+        using var input = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var identity = new byte[Math.Min(identityLength, checked((int)Math.Min(input.Length, identityLength)))];
+        input.ReadExactly(identity);
+        try
+        {
+            builder.Append(input.Length)
+                .Append(':')
+                .Append(Convert.ToHexString(SHA256.HashData(identity)))
+                .Append('|');
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(identity);
+        }
+    }
+
+    private static void AppendWalContentStamp(StringBuilder builder, string path)
+    {
+        if (!File.Exists(path))
+        {
+            builder.Append("missing|");
+            return;
+        }
+
+        const int headerLength = 64;
+        const int tailLength = 64 * 1024;
+        using var input = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            tailLength,
+            FileOptions.SequentialScan);
+        var length = input.Length;
+        var header = new byte[Math.Min(headerLength, checked((int)Math.Min(length, headerLength)))];
+        input.ReadExactly(header);
+        var tailSize = checked((int)Math.Min(length, tailLength));
+        var tail = new byte[tailSize];
+        input.Position = Math.Max(0, length - tailSize);
+        input.ReadExactly(tail);
+        try
+        {
+            var combined = new byte[header.Length + tail.Length];
+            header.CopyTo(combined, 0);
+            tail.CopyTo(combined, header.Length);
+            try
+            {
+                builder.Append(length)
+                    .Append(':')
+                    .Append(Convert.ToHexString(SHA256.HashData(combined)))
+                    .Append('|');
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(combined);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(header);
+            CryptographicOperations.ZeroMemory(tail);
         }
     }
 
@@ -290,6 +596,7 @@ public sealed class NativeWeChatLocalDatabaseReader : IWeChatLocalDatabaseReader
             WeChatReaderStage.KeyProbe when exception.Message.Contains("export", StringComparison.OrdinalIgnoreCase) =>
                 WeChatReaderErrorCode.ExportMissing,
             WeChatReaderStage.KeyProbe => WeChatReaderErrorCode.Unknown,
+            WeChatReaderStage.ProtectedKey => WeChatReaderErrorCode.ProtectedKeyUnavailable,
             WeChatReaderStage.KeyValidation => WeChatReaderErrorCode.KeyInvalid,
             WeChatReaderStage.Snapshot => WeChatReaderErrorCode.SnapshotFailed,
             WeChatReaderStage.DatabaseOpen => WeChatReaderErrorCode.CipherUnsupported,

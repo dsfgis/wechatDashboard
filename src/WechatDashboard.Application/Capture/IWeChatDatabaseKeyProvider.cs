@@ -12,6 +12,16 @@ public interface IWeChatDatabaseKeyProvider
         CancellationToken cancellationToken);
 }
 
+/// <summary>持久化受操作系统保护的微信数据库密钥；实现不得落盘明文。</summary>
+public interface IWeChatDatabaseKeyStore
+{
+    Task<WeChatDatabaseKeyLease?> LoadAsync(CancellationToken cancellationToken);
+
+    Task SaveAsync(WeChatDatabaseKeyLease keyLease, CancellationToken cancellationToken);
+
+    Task ClearAsync(CancellationToken cancellationToken);
+}
+
 /// <summary>密钥获取请求。密钥提供器不得把密钥写入参数、日志或普通文件。</summary>
 public sealed record WeChatDatabaseKeyRequest(int ProcessId, TimeSpan Timeout);
 

@@ -99,7 +99,8 @@ public sealed class WeChatDatabaseKeyDeriver
     public async Task<WeChatDatabaseKeySet> DeriveAsync(
         WeChatDatabaseKeyLease masterKeyLease,
         IReadOnlyList<WeChatDatabaseDescriptor> databases,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool validateRequiredDatabaseSet = true)
     {
         ArgumentNullException.ThrowIfNull(masterKeyLease);
         ArgumentNullException.ThrowIfNull(databases);
@@ -135,7 +136,17 @@ public sealed class WeChatDatabaseKeyDeriver
                 }
             }
 
-            ValidateRequiredKeys(derived);
+            if (validateRequiredDatabaseSet)
+            {
+                ValidateRequiredKeys(derived);
+            }
+            else if (derived.Count == 0)
+            {
+                throw new WeChatReaderException(
+                    WeChatReaderStage.KeyValidation,
+                    WeChatReaderErrorCode.KeyInvalid,
+                    "The protected database key did not validate the required WeChat database.");
+            }
             return new WeChatDatabaseKeySet(derived);
         }
         catch
