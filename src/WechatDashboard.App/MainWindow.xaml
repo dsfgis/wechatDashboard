@@ -130,6 +130,16 @@
                     <ListBoxItem Content="&#x91C7;&#x96C6;&#x6E90;&#x8BBE;&#x7F6E;" Tag="6" />
                     <ListBoxItem Content="&#x91C7;&#x96C6;&#x8BCA;&#x65AD;" Tag="7" />
                 </ListBox>
+                <Button DockPanel.Dock="Top"
+                        Content="桌面日历"
+                        Click="DesktopCalendarButton_Click"
+                        Margin="0,10,0,0"
+                        Padding="12,9"
+                        HorizontalContentAlignment="Left"
+                        Foreground="#E5E7EB"
+                        Background="#2B3748"
+                        BorderBrush="#475569"
+                        ToolTip="显示半透明桌面待办日历" />
                 <StackPanel Visibility="Collapsed" DockPanel.Dock="Top">
                     <TextBlock Text="待办理" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />
                     <TextBlock Text="已办理" Foreground="#E5E7EB" FontSize="15" Margin="0,0,0,12" />

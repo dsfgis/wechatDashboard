@@ -8,14 +8,14 @@ public sealed class TodoDialogService : ITodoDialogService
 {
     public Task ShowAsync(TodoDetailViewModel viewModel)
     {
-        var window = new TodoDetailWindow(viewModel) { Owner = System.Windows.Application.Current.MainWindow };
+        var window = new TodoDetailWindow(viewModel) { Owner = ResolveOwner() };
         window.ShowDialog();
         return Task.CompletedTask;
     }
 
     public Task ShowCreateAsync(TodoCreateViewModel viewModel)
     {
-        var window = new TodoCreateWindow(viewModel) { Owner = System.Windows.Application.Current.MainWindow };
+        var window = new TodoCreateWindow(viewModel) { Owner = ResolveOwner() };
         window.ShowDialog();
         return Task.CompletedTask;
     }
@@ -29,4 +29,9 @@ public sealed class TodoDialogService : ITodoDialogService
     {
         MessageBox.Show(message, title, MessageBoxButton.OK, MessageBoxImage.Error);
     }
+
+    private static Window? ResolveOwner() => System.Windows.Application.Current.Windows
+        .OfType<Window>()
+        .FirstOrDefault(window => window.IsActive)
+        ?? System.Windows.Application.Current.MainWindow;
 }

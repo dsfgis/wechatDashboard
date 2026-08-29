@@ -44,6 +44,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Manual Todo create view model prevents duplicate submission", TestTodoCreateViewModelAsync),
     ("Todo rows show groups and truthful manual source", TestTodoRowPresentationAsync),
     ("Todo workbench preserves checked rows across background refresh", TestTodoWorkbenchSelectionRefreshAsync),
+    ("Desktop calendar groups scheduled Todos by local due date", TestDesktopCalendarViewModelAsync),
+    ("Desktop calendar window preferences round-trip", TestDesktopCalendarStateStoreAsync),
+    ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
+    ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
     ("Todo repository persists pinning and sorts pinned active todos first", TestTodoPinningAsync),
@@ -1563,6 +1567,174 @@ static async Task TestTodoWorkbenchSelectionRefreshAsync()
     await workbench.RefreshAsync();
     AssertEqual(1, workbench.SelectedCount, "A checked Todo that is no longer active should drop out of the selection.");
     AssertEqual(second.Id, workbench.NoDueDate.Single(row => row.IsSelected).Id, "The remaining active Todo should stay checked.");
+}
+
+static async Task TestDesktopCalendarViewModelAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 8, 29, 10, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var todayActive = (await service.CreateManualAsync(
+        new CreateManualTodoRequest("今天活动待办", null, PriorityLevel.P1, now.AddHours(5), null, null),
+        CancellationToken.None)).Todo!;
+    var todayCompleted = (await service.CreateManualAsync(
+        new CreateManualTodoRequest("今天已办理待办", null, PriorityLevel.P2, now.AddHours(7), null, null),
+        CancellationToken.None)).Todo!;
+    var tomorrow = (await service.CreateManualAsync(
+        new CreateManualTodoRequest("明天待办", null, PriorityLevel.P2, now.AddDays(1), null, null),
+        CancellationToken.None)).Todo!;
+    await service.CreateManualAsync(
+        new CreateManualTodoRequest("未设置日期", null, PriorityLevel.P3, null, null, null),
+        CancellationToken.None);
+    await repository.MarkCompletedAsync(todayCompleted.Id, now.AddHours(1), CancellationToken.None);
+    long openedTodoId = 0;
+    var viewModel = new DesktopCalendarViewModel(
+        repository,
+        clock,
+        timeZone,
+        id =>
+        {
+            openedTodoId = id;
+            return Task.CompletedTask;
+        });
+
+    await viewModel.RefreshAsync();
+
+    AssertEqual(42, viewModel.Days.Count, "A desktop calendar month should always render six complete weeks.");
+    AssertEqual(new DateTime(2026, 7, 27), viewModel.Days.First().Date, "The August 2026 grid should begin on the preceding Monday.");
+    AssertEqual(2, viewModel.SelectedTodos.Count, "The selected day should show active and completed scheduled Todos.");
+    AssertEqual(todayActive.Id, viewModel.SelectedTodos.First().Id, "Active Todo should sort before a completed Todo on the same day.");
+    AssertTrue(viewModel.SelectedTodos.Last().IsCompleted, "Completed daily Todo should remain visible with completed state.");
+    AssertTrue(viewModel.StatusText.Contains("另有 1 条未设置截止日期"), "Calendar status should report unscheduled Todos honestly.");
+
+    viewModel.SelectDate(new DateTime(2026, 8, 30));
+    AssertEqual(1, viewModel.SelectedTodos.Count, "Selecting another date should replace the daily Todo list.");
+    AssertEqual(tomorrow.Id, viewModel.SelectedTodos.Single().Id, "The selected date should show its scheduled Todo.");
+    await viewModel.OpenTodoAsync(tomorrow.Id);
+    AssertEqual(tomorrow.Id, openedTodoId, "Clicking a calendar Todo should delegate to the existing detail flow.");
+
+    viewModel.MoveMonth(1);
+    AssertEqual("2026年9月", viewModel.MonthTitle, "Month navigation should update the displayed month.");
+}
+
+static Task TestDesktopCalendarStateStoreAsync()
+{
+    var statePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}", "desktop-calendar.json");
+    var store = new DesktopCalendarStateStore(statePath);
+    var expected = new DesktopCalendarWindowState(
+        Left: 120,
+        Top: 80,
+        Width: 1100,
+        Height: 700,
+        Opacity: 0.78,
+        IsEdgeSnapEnabled: false,
+        DockEdge: DesktopCalendarDockEdge.Right);
+
+    store.Save(expected);
+    var actual = store.Load();
+
+    AssertEqual(expected, actual, "Desktop calendar position, opacity and dock preference should round-trip.");
+    return Task.CompletedTask;
+}
+
+static Task TestDesktopCalendarDockLayoutAsync()
+{
+    var area = new System.Windows.Rect(100, 50, 1920, 1040);
+    var size = new System.Windows.Size(980, 620);
+    var current = new System.Windows.Point(400, 200);
+
+    var leftDocked = DesktopCalendarDockLayout.GetDockedPosition(area, size, current, DesktopCalendarDockEdge.Left);
+    var leftRetracted = DesktopCalendarDockLayout.GetRetractedPosition(area, size, current, DesktopCalendarDockEdge.Left);
+    var topRetracted = DesktopCalendarDockLayout.GetRetractedPosition(area, size, current, DesktopCalendarDockEdge.Top);
+    var rightRetracted = DesktopCalendarDockLayout.GetRetractedPosition(area, size, current, DesktopCalendarDockEdge.Right);
+    var bottomRetracted = DesktopCalendarDockLayout.GetRetractedPosition(area, size, current, DesktopCalendarDockEdge.Bottom);
+
+    AssertEqual(area.Left, leftDocked.X, "Left docking should align the full calendar with the work area.");
+    AssertEqual(area.Left + DesktopCalendarDockLayout.RevealThickness, leftRetracted.X + size.Width, "Left retraction should leave only the reveal thickness on screen.");
+    AssertEqual(area.Top + DesktopCalendarDockLayout.RevealThickness, topRetracted.Y + size.Height, "Top retraction should leave only the reveal thickness on screen.");
+    AssertEqual(area.Right - DesktopCalendarDockLayout.RevealThickness, rightRetracted.X, "Right retraction should leave only the reveal thickness on screen.");
+    AssertEqual(area.Bottom - DesktopCalendarDockLayout.RevealThickness, bottomRetracted.Y, "Bottom retraction should leave only the reveal thickness on screen.");
+    AssertEqual(TimeSpan.FromSeconds(2), DesktopCalendarDockLayout.AutoHideDelay, "A docked calendar should wait two seconds before retracting.");
+    return Task.CompletedTask;
+}
+
+static async Task TestDesktopCalendarWindowRenderingAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 8, 29, 10, 0, 0, TimeSpan.FromHours(8));
+    var repository = new SqliteTodoRepository(databasePath);
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    await service.CreateManualAsync(
+        new CreateManualTodoRequest("窗口布局待办", null, PriorityLevel.P1, now.AddHours(2), null, null),
+        CancellationToken.None);
+    var viewModel = new DesktopCalendarViewModel(repository, new FixedClock(now), timeZone, _ => Task.CompletedTask);
+    await viewModel.RefreshAsync();
+    var statePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}", "desktop-calendar.json");
+    new DesktopCalendarStateStore(statePath).Save(new DesktopCalendarWindowState(
+        Left: 100,
+        Top: 100,
+        DockEdge: DesktopCalendarDockEdge.Left));
+    Exception? renderFailure = null;
+    var renderThread = new Thread(() =>
+    {
+        try
+        {
+            var window = new WechatDashboard.App.Views.Todos.DesktopCalendarWindow(
+                viewModel,
+                new DesktopCalendarStateStore(statePath));
+            window.Show();
+            window.UpdateLayout();
+            var initialWidth = window.ActualWidth;
+            var initialHeight = window.ActualHeight;
+            var retractMethod = typeof(WechatDashboard.App.Views.Todos.DesktopCalendarWindow).GetMethod(
+                "RetractToEdge",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var revealMethod = typeof(WechatDashboard.App.Views.Todos.DesktopCalendarWindow).GetMethod(
+                "RevealFromEdge",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            AssertTrue(retractMethod is not null && revealMethod is not null, "Desktop calendar should expose its private edge transition methods to the runtime test.");
+            retractMethod!.Invoke(window, null);
+            window.UpdateLayout();
+            var calendarSurface = window.FindName("CalendarSurface") as System.Windows.Controls.Border;
+            var revealHandle = window.FindName("EdgeRevealHandle") as System.Windows.Controls.Border;
+            AssertTrue(calendarSurface is not null && revealHandle is not null, "Desktop calendar should render its surface and edge reveal handle.");
+            AssertEqual(System.Windows.Visibility.Hidden, calendarSurface!.Visibility, "Retracting should hide the full calendar surface.");
+            AssertEqual(System.Windows.Visibility.Visible, revealHandle!.Visibility, "Retracting should show a clickable edge handle.");
+            AssertEqual(initialWidth, window.ActualWidth, "Retracting should not change the calendar width.");
+            AssertEqual(initialHeight, window.ActualHeight, "Retracting should not change the calendar height.");
+            revealMethod!.Invoke(window, null);
+            window.UpdateLayout();
+            AssertEqual(System.Windows.Visibility.Visible, calendarSurface.Visibility, "Click restoration should show the full calendar surface.");
+            AssertEqual(System.Windows.Visibility.Collapsed, revealHandle.Visibility, "Click restoration should hide the edge handle.");
+            window.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            renderFailure = ex;
+        }
+        finally
+        {
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeShutdown();
+        }
+    });
+    renderThread.SetApartmentState(ApartmentState.STA);
+    renderThread.Start();
+
+    AssertTrue(renderThread.Join(TimeSpan.FromSeconds(15)), "Desktop calendar render thread should finish without hanging.");
+    if (renderFailure is not null)
+    {
+        throw new InvalidOperationException("Desktop calendar should construct and render its populated Todo templates.", renderFailure);
+    }
 }
 
 static Task TestShihuatongMessageContentDecoderAsync()

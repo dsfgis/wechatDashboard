@@ -7,10 +7,13 @@ using System.Windows.Controls;
 using Forms = System.Windows.Forms;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Classification;
+using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.App.Services;
+using WechatDashboard.App.ViewModels.Todos;
+using WechatDashboard.App.Views.Todos;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 using WechatDashboard.Infrastructure.Capture;
@@ -74,6 +77,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly Forms.NotifyIcon _trayIcon;
     private readonly Forms.ContextMenuStrip _trayMenu;
     private readonly System.Drawing.Icon? _ownedTrayIcon;
+    private DesktopCalendarWindow? _desktopCalendarWindow;
     // 从托盘恢复时保留最小化前的窗口状态
     private WindowState _windowStateBeforeMinimize = WindowState.Normal;
     // 关闭前异步清理只执行一次
@@ -171,6 +175,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         MainContentTabs.SelectedIndex = tabIndex;
+    }
+
+    private async void DesktopCalendarButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_desktopCalendarWindow is null)
+            {
+                var viewModel = new DesktopCalendarViewModel(
+                    _todoRepository,
+                    SystemClock.Instance,
+                    TimeZoneInfo.Local,
+                    TodoFeature.Workbench.OpenTodoAsync);
+                var stateStore = new DesktopCalendarStateStore(
+                    Path.Combine(ProjectToolPaths.UserDataRoot, "desktop-calendar.json"));
+                _desktopCalendarWindow = new DesktopCalendarWindow(viewModel, stateStore);
+                _desktopCalendarWindow.Closed += (_, _) => _desktopCalendarWindow = null;
+            }
+
+            await _desktopCalendarWindow.ShowWidgetAsync();
+        }
+        catch (Exception ex)
+        {
+            var failedWindow = _desktopCalendarWindow;
+            _desktopCalendarWindow = null;
+
+            try
+            {
+                failedWindow?.Shutdown();
+            }
+            catch
+            {
+                // Keep the main window alive even if cleanup of a partially rendered widget fails.
+            }
+
+            MessageBox.Show(
+                this,
+                $"桌面日历打开失败：{ex.Message}",
+                "桌面日历",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
     }
 
 
@@ -602,6 +648,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         e.Cancel = true;
         _isClosingAfterCleanup = true;
         _trayIcon.Visible = false;
+        _desktopCalendarWindow?.Shutdown();
+        _desktopCalendarWindow = null;
 
         try
         {
