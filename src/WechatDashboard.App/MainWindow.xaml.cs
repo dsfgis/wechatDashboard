@@ -106,6 +106,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _dashboardStatusText = "按项目统计最近消息。";
     private string _dashboardChartType = "bar";
     public TodoFeatureCoordinator TodoFeature { get; }
+    public DesktopCalendarViewModel ScheduleOverview { get; }
 
     public MainWindow()
     {
@@ -139,6 +140,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     .FirstOrDefault(item => item.Tag?.ToString() == tabIndex.ToString());
             },
             async () => await RefreshAsync());
+        ScheduleOverview = new DesktopCalendarViewModel(
+            _todoRepository,
+            SystemClock.Instance,
+            TimeZoneInfo.Local,
+            TodoFeature.Workbench.OpenTodoAsync);
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;
@@ -165,7 +171,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>Switches the content page from the selected sidebar item.</summary>
-    private void SidebarNavigation_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void SidebarNavigation_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (MainContentTabs is null ||
             SidebarNavigation.SelectedItem is not ListBoxItem selectedItem ||
@@ -175,6 +181,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         MainContentTabs.SelectedIndex = tabIndex;
+        if (tabIndex == 8 && ScheduleOverview is not null)
+        {
+            await ScheduleOverview.RefreshAsync();
+        }
     }
 
     private async void DesktopCalendarButton_Click(object sender, RoutedEventArgs e)
@@ -183,14 +193,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             if (_desktopCalendarWindow is null)
             {
-                var viewModel = new DesktopCalendarViewModel(
-                    _todoRepository,
-                    SystemClock.Instance,
-                    TimeZoneInfo.Local,
-                    TodoFeature.Workbench.OpenTodoAsync);
                 var stateStore = new DesktopCalendarStateStore(
                     Path.Combine(ProjectToolPaths.UserDataRoot, "desktop-calendar.json"));
-                _desktopCalendarWindow = new DesktopCalendarWindow(viewModel, stateStore);
+                _desktopCalendarWindow = new DesktopCalendarWindow(ScheduleOverview, stateStore);
                 _desktopCalendarWindow.Closed += (_, _) => _desktopCalendarWindow = null;
             }
 
