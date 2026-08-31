@@ -1,9 +1,9 @@
-# WechatDashboard（微信项目消息看板）
+# WechatDashboard（IM 消息看板）
 
-WechatDashboard 是一个仅面向 Windows 的 WPF 桌面应用，用于在本机汇集微信、石化通等协作消息，并完成消息去重、`@我` 识别、项目归类、紧急度排序、待办创建和项目看板展示。应用数据保存在项目目录下的本地 SQLite 数据库中。
+WechatDashboard 是一个仅面向 Windows 的 WPF 桌面应用，用于在本机汇集微信、石化通等协作消息，并完成消息去重、`@我` 识别、项目归类、紧急度排序、待办管理、桌面日历和项目看板展示。业务数据保存在项目目录下的本地 SQLite 数据库中；微信读取器状态和桌面日历偏好保存在当前用户的 `%LocalAppData%\WechatDashboard`。
 
 > [!IMPORTANT]
-> **编译成功不等于能够读取微信或石化通消息。** 微信读取还需要已登录且有本地消息数据的 Windows 微信客户端、Python 读取依赖，以及合法取得的当前账户数据库 Key；石化通读取需要已登录的兼容客户端进程，并且当前版本的 `LxMainNew` 已加载 `imcore.dll`。客户端升级后，内部数据库或进程布局变化也可能导致读取失效。
+> **编译成功不等于能够读取微信或石化通消息。** 微信读取还需要已登录且有本地消息数据的 Windows 微信客户端、完整的 KeyProbe/`wx_key.dll` 组件，以及合法取得的当前账户数据库 Key；石化通读取需要已登录的兼容客户端进程，并且当前版本的 `LxMainNew` 已加载 `imcore.dll`。客户端升级后，内部数据库或进程布局变化也可能导致读取失效。
 
 本项目只应用于当前用户本人或已明确授权的数据。不要用它读取无权访问的账户、设备或消息。
 
@@ -13,7 +13,10 @@ WechatDashboard 是一个仅面向 Windows 的 WPF 桌面应用，用于在本�
 - 从石化通本地加密数据库增量读取消息，不依赖窗口 OCR。
 - 支持微信、石化通、飞书、钉钉的 JSONL/JSON 文件导入入口。
 - 统一消息去重，并在“消息流”中显示明确的来源标签。
-- 根据用户别名识别 `@我`，自动生成待办并支持完成、提醒和追溯原消息。
+- 根据用户别名识别 `@我`，自动生成默认当天到期的待办；也可创建手工待办、自定义分组和分组颜色。
+- 待办支持完成、提醒、编辑和追溯原消息；创建和详情中的截止时间使用日期、小时、分钟选择控件。
+- 主窗口提供“日程概览”，可在右侧月历中按日期查看待办并打开详情。
+- 提供半透明桌面待办日历，支持拖动、缩放、透明度调节、四边吸附和离开后自动收起；窗口状态会自动保存。
 - 按项目、时间或群名聚合消息和待办，提供柱状图、环形图和折线图展示。
 - 所有业务数据落在本地 SQLite；采集进度通过增量游标持久化。
 
@@ -21,8 +24,9 @@ WechatDashboard 是一个仅面向 Windows 的 WPF 桌面应用，用于在本�
 
 - .NET 10、C#、WPF
 - SQLite / SQLCipher
-- Python 本地微信数据库兼容读取器
+- 原生 C# 微信本地数据库读取器（SQLCipher V4、WAL/SHM 快照和 zstd/XML 内容解析）
 - 独立 x64 `WechatDashboard.KeyProbe` 进程，用于隔离加载授权的 `wx_key.dll`
+- Python 读取器仅作为冻结的兼容性测试基准，不在生产读取路径中启动
 
 ```text
 src/WechatDashboard.Domain/          领域实体和枚举
@@ -31,7 +35,7 @@ src/WechatDashboard.Infrastructure/  SQLite 仓储及微信/石化通采集适�
 src/WechatDashboard.App/             WPF 桌面界面
 src/WechatDashboard.KeyProbe/        独立的微信 DB Key 探测进程
 tests/WechatDashboard.Tests/         .NET 回归测试程序
-tools/wechat-local-reader/           Python 微信本地库读取器及其测试
+tools/wechat-local-reader/           Python 兼容性基准读取器及其测试
 tools/wx-key-tools/                  微信 Key 工具包装脚本、完整工具包及 SHA-256 清单
 tools/result/                        本机运行结果和敏感数据；已被 Git 忽略
 design/                              设计和系统测试文档
@@ -43,16 +47,16 @@ design/                              设计和系统测试文档
 
 1. Git。
 2. x64 .NET 10 SDK。只有 Runtime 不能完成源码编译。
-3. Python 3.10 或更高版本。当前源码优先调用 `tools\wechat-local-reader\wechat_local_reader.py`。
-4. Python 加密与压缩依赖：AES 后端使用 `cryptography` 或 `pycryptodome`，zstd 后端使用 `zstandard` 或 `pyzstd`。下文采用 `cryptography + zstandard`。
-5. Windows 桌面微信客户端，以及需要读取时的石化通客户端。
-6. 若使用微信自动提取 Key，使用仓库中随附的 `wx_key-windows-v2.1.8` 工具包。该包包含未签名的第三方二进制，使用前应按组织安全要求复核 `tools\wx-key-tools\README.md` 和哈希清单。
+3. Windows 桌面微信客户端，以及需要读取时的石化通客户端。
+4. 若使用微信自动提取 Key，使用仓库中随附的 `wx_key-windows-v2.1.8` 工具包。该包包含未签名的第三方二进制，使用前应按组织安全要求复核 `tools\wx-key-tools\README.md` 和哈希清单。
+5. 仅在运行 Python 兼容性基准测试时需要 Python 3.10+，以及 `cryptography`、`zstandard`；启动应用和生产读取微信不依赖 Python。
 
 可先检查环境：
 
 ```powershell
 git --version
 dotnet --info
+# 仅运行 Python 兼容性测试时检查
 python --version
 ```
 
@@ -64,33 +68,33 @@ python --version
 git clone <repository-url>
 Set-Location wechatDashboard
 
-python -m pip install --upgrade cryptography zstandard
 dotnet restore WechatDashboard.sln
-dotnet build WechatDashboard.sln --no-restore -v minimal
+dotnet build WechatDashboard.sln --configuration Release --no-restore -m:1 -v minimal
 ```
 
 建议在首次启动前运行测试：
 
 ```powershell
-dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj --no-restore
-python -m unittest discover -v -s tools\wechat-local-reader -p test_wechat_local_reader.py
+dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj --configuration Release --no-restore --no-build
 ```
 
 启动 WPF 应用：
 
 ```powershell
-dotnet run --project src\WechatDashboard.App\WechatDashboard.App.csproj --no-restore
+dotnet run --project src\WechatDashboard.App\WechatDashboard.App.csproj --configuration Release --no-restore
 ```
 
-首次启动会创建以下目录和文件：
+应用运行和微信初始化会按需创建以下目录和文件：
 
 ```text
 tools\result\data\wechat-dashboard.db
 tools\result\capture-inbox\
-tools\result\wechat-local-reader\
+%LocalAppData%\WechatDashboard\Reader\state.json
+%LocalAppData%\WechatDashboard\Reader\protected-wechat-key.bin
+%LocalAppData%\WechatDashboard\desktop-calendar.json
 ```
 
-当前版本按源码目录布局查找 Python 读取器、KeyProbe 和生成数据，尚不是完整的安装包形态。**不要只把 `WechatDashboard.App.exe` 单独复制到另一台机器运行**；新环境应保留仓库目录结构，或先完成包含所有工具及运行时状态目录的正式发布打包。
+当前版本尚不是经过干净机器验收的完整安装包。**不要只把 `WechatDashboard.App.exe` 单独复制到另一台机器运行**；至少还需要应用依赖、`WechatDashboard.KeyProbe.exe` 和经过核验的 `wx_key.dll`。源码运行时，程序会在仓库构建输出和工具目录中查找这些组件。
 
 ## 新环境读取微信消息
 
@@ -112,9 +116,9 @@ tools\result\wechat-local-reader\
 
 ### 2. 准备微信数据库 Key
 
-微信本地数据库是加密的，必须使用当前账户、当前本机数据库对应的 64 位十六进制 DB Key。支持两种方式。
+微信本地数据库是加密的，必须使用当前账户、当前本机数据库对应的 DB Key。当前界面只提供受控的 KeyProbe 自动提取流程，不提供明文 Key 手工输入。
 
-#### 方式 A：独立 KeyProbe 自动提取（推荐）
+#### 独立 KeyProbe 自动提取
 
 1. 确认完整工具包已经随 Git 克隆到本机：
 
@@ -133,20 +137,14 @@ tools\result\wechat-local-reader\
 4. 登录并打开微信，然后启动 WechatDashboard。
 5. 进入“采集源设置”或“采集诊断”，选择首次初始化的“历史范围”（7 天、30 天或全部）。
 6. 点击“自动提取 Key”。按照界面提示，在 5 分钟内重新登录微信，不要提前关闭微信进程。
-7. 界面提示 Key 提取成功后，立即点击“初始化本地库”。初始化会验证 Key，并在 `tools\result\wechat-local-reader` 下生成配置、Key 映射和解密结果。
+7. “自动提取 Key”会在同一次流程中完成数据库验证和原生读取器初始化；成功后无需再点击“初始化本地库”。后者用于重新执行初始化流程。
 
-KeyProbe 作为独立 x64 进程运行，优先通过当前用户的随机命名管道把 Key 交给应用；WPF 本身不会直接加载 `wx_key.dll`。源码中的 PowerShell/Key 文件链路仅保留为兼容回退。
-
-#### 方式 B：手工导入已有 DB Key
-
-如果已通过合法方式取得当前数据库的 Key，可在“采集源设置”或“采集诊断”顶部的“DB Key”密码框中输入 **64 个十六进制字符**，选择历史范围，然后直接点击“初始化本地库”。
-
-不要把 DB Key 写入 README、问题单、聊天记录、截图或命令行参数。Key 必须与当前账户和当前本地数据库匹配；旧账户或客户端重建数据库前的 Key 通常不能继续使用。
+KeyProbe 作为独立 x64 进程运行，通过当前用户限定的随机命名管道把 Key 交给应用；WPF 本身不会直接加载 `wx_key.dll`。验证成功后，Key 使用 Windows DPAPI CurrentUser 加密保存到 `%LocalAppData%\WechatDashboard\Reader\protected-wechat-key.bin`，后续启动会先从该缓存恢复并重新验证。不要把 DB Key 写入 README、问题单、聊天记录、截图或命令行参数。
 
 ### 3. 启用并读取微信
 
 1. 初始化成功后，打开“采集源设置”。
-2. 确认“微信本地数据库 / `WeChatLocalCommand`”已启用，点击“保存设置”。
+2. 确认“微信本地数据库”已启用，点击“保存设置”。
 3. 打开“微信消息”，点击“读取当天消息”，确认可以看到群名、发送人、时间和正文。
 4. 若要把消息送入统一消息流、项目看板和待办管线，点击顶部“采集一次”或“开始监听”。
 
@@ -154,22 +152,30 @@ KeyProbe 作为独立 x64 进程运行，优先通过当前用户的随机命名
 
 ### 4. 验证微信初始化结果
 
-初始化就绪至少要求以下两个文件存在：
+初始化成功后，无密钥状态和受保护 Key 默认位于：
 
 ```text
-tools\result\wechat-local-reader\config.json
-tools\result\wechat-local-reader\all_keys.json
+%LocalAppData%\WechatDashboard\Reader\state.json
+%LocalAppData%\WechatDashboard\Reader\protected-wechat-key.bin
 ```
 
-读取和解密过程中还可能生成：
+读取过程中会使用以下快照和临时目录：
 
 ```text
-tools\result\wechat-local-reader\decrypted\
-tools\result\wechat-local-reader\wx-key-found.txt   # 仅兼容回退路径可能生成
-tools\result\wechat-local-reader\wx-key-probe.log   # 仅兼容回退路径可能生成
+%LocalAppData%\WechatDashboard\Reader\Snapshots\
+%LocalAppData%\WechatDashboard\Reader\Temp\
 ```
 
-如果切换微信账户、微信重建了本地数据库，或原 Key 已失效，应先关闭应用，把 `tools\result\wechat-local-reader` 改名备份到安全位置，再重新执行 Key 提取和初始化。不要直接复用旧的 `config.json` 和 `all_keys.json`。
+如果切换微信账户、微信重建了本地数据库，或原 Key 已失效，应先关闭应用，清除 `%LocalAppData%\WechatDashboard\Reader\protected-wechat-key.bin`，再重新执行 Key 提取。不要把该文件复制给其他 Windows 用户或设备。
+
+## 待办日期与日程概览
+
+1. 在“待办理”中点击“添加待办”或打开待办详情。截止时间使用日期选择器及小时、分钟下拉框；清空日期表示无截止时间。新选择的日期默认 `23:59`，已有截止时间会保留原时分。
+2. 在主窗口左侧点击“日程概览”，右侧会显示 6×7 月历、所选日期的待办及状态摘要。使用上月、今天、下月切换月份；点击待办标题可打开详情。
+3. 如需独立常驻窗口，在主窗口左侧点击“桌面日历”。日程概览和桌面日历使用同一份待办数据、月历视图和详情流程。
+4. 在独立窗口中拖动标题栏可移动窗口；开启“自动吸附”后，靠近屏幕边缘会自动停靠，也可点击“停靠边缘”。
+5. 停靠后鼠标离开 2 秒，日历会缩进屏幕边缘；点击保留的蓝色把手即可展开。
+6. 窗口位置、大小、透明度、吸附开关和停靠边缘保存在 `%LocalAppData%\WechatDashboard\desktop-calendar.json`。关闭日历只会隐藏窗口，退出主程序时才结束它。
 
 ## 新环境读取石化通消息
 
@@ -203,13 +209,12 @@ tools\result\wechat-local-reader\wx-key-probe.log   # 仅兼容回退路径可�
 
 | 现象 | 可能原因与处理 |
 | --- | --- |
-| 编译成功，但微信显示“本地读取器未安装” | 应从仓库根目录运行，并确认 `tools\wechat-local-reader\wechat_local_reader.py` 存在且 `python --version` 可执行。不要只复制 WPF EXE。 |
+| 编译成功，但微信显示“原生 C# 微信读取器不可用” | 构建整个解决方案，确认 `WechatDashboard.KeyProbe.exe` 已生成且 `wx_key.dll` 位于受支持的工具目录；不要只复制 WPF EXE。 |
 | 微信显示“未找到 Weixin 进程” | 先登录并打开 Windows 微信客户端；确认进程名是 `Weixin`。 |
 | 微信显示“未检测到数据目录” | 本机没有生成聊天数据库，或实际存储路径不在自动扫描范围。先确认 `db_storage\message` 实际存在。 |
 | “自动提取 Key”失败或提示缺少 DLL | 先确认 Git 已完整下载 `tools\wx-key-tools\wx_key-windows-v2.1.8`，再构建整个解决方案；不要只复制 WPF EXE。用 `SHA256SUMS.txt` 检查 `wx_key.dll` 是否损坏或被替换。 |
-| 初始化提示缺少 AES/zstd 后端 | 执行 `python -m pip install --upgrade cryptography zstandard`。 |
 | 读取微信或石化通进程时提示“拒绝访问” | 先让看板与目标客户端以相同 Windows 用户和相同权限级别运行；仍失败时再以管理员身份启动看板。不要为绕过组织安全策略而关闭防护软件。 |
-| 微信初始化结束但没有 `config.json`/`all_keys.json` | Key 未取得、Key 与数据库不匹配、Python 依赖缺失或数据库正在被占用。查看界面摘要中的已脱敏错误后重新初始化。 |
+| 微信初始化失败或重启后无法恢复 | Key 未取得、受保护缓存不属于当前 Windows 用户、Key 与数据库不匹配，或数据库快照/结构不兼容。查看界面中的分阶段脱敏错误；必要时重置 Reader 后重新提取。 |
 | 石化通一直显示“等待运行” | 客户端尚未完成登录，或当前 `LxMainNew` 没有加载 `imcore.dll`。也可能是客户端版本/进程名已经变化。 |
 | 石化通提示数据库正在持续写入 | 程序连续三次未得到一致快照；等待片刻后再点“采集一次”。 |
 | 石化通只能看到当天消息 | 这是当前首次游标的设计，不是界面筛选问题；微信“历史范围”不影响石化通。 |
@@ -217,17 +222,17 @@ tools\result\wechat-local-reader\wx-key-probe.log   # 仅兼容回退路径可�
 
 ## 本地数据与安全
 
-以下内容可能包含 DB Key、已解密数据库、聊天正文、联系人或项目数据：
+以下内容可能包含受保护的 DB Key、数据库快照、聊天正文、联系人或项目数据：
 
 ```text
-tools\result\wechat-local-reader\
 tools\result\data\wechat-dashboard.db
 tools\result\capture-inbox\
+%LocalAppData%\WechatDashboard\Reader\
 ```
 
-`tools\result` 已被 `.gitignore` 忽略，但“被 Git 忽略”不代表“磁盘上已加密”。请遵守以下要求：
+`tools\result` 已被 `.gitignore` 忽略；`protected-wechat-key.bin` 使用当前 Windows 用户的 DPAPI 保护，但其他运行数据不因此自动加密。请遵守以下要求：
 
-- 不要提交、上传、截图或转发 `wx-key-found.txt`、`all_keys.json`、`config.json`、解密数据库和真实消息文件。
+- 不要提交、上传、截图或转发 `protected-wechat-key.bin`、数据库快照和真实消息文件。
 - 不要把 `tools\result` 放进公共网盘或未经批准的同步目录。
 - 需要迁移电脑时，按组织的数据安全规则单独处理运行数据；不要把旧 Key 当作普通配置复制。
 - 不要在日志、Issue 或故障描述中粘贴 Key、完整消息正文、联系人身份或内存地址。
@@ -276,10 +281,14 @@ tools\result\capture-inbox\DingTalk
 
 ```powershell
 dotnet restore WechatDashboard.sln
-dotnet build WechatDashboard.sln --no-restore -v minimal
-dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj --no-restore
+dotnet build WechatDashboard.sln --configuration Release --no-restore -m:1 -v minimal
+dotnet run --project tests\WechatDashboard.Tests\WechatDashboard.Tests.csproj --configuration Release --no-restore --no-build
+
+# 可选：运行冻结的 Python 兼容性基准测试
+python -m pip install --upgrade cryptography zstandard
 python -m unittest discover -v -s tools\wechat-local-reader -p test_wechat_local_reader.py
-dotnet run --project src\WechatDashboard.App\WechatDashboard.App.csproj --no-restore
+
+dotnet run --project src\WechatDashboard.App\WechatDashboard.App.csproj --configuration Release --no-restore
 ```
 
 构建和测试应串行执行，避免多个进程同时写入 `bin`/`obj` 导致 DLL 锁定。如果 WPF 正在运行，可关闭它后重新构建；开发时也可临时把独立构建输出写到 `tools\result\build-check`。
@@ -287,7 +296,7 @@ dotnet run --project src\WechatDashboard.App\WechatDashboard.App.csproj --no-res
 ## 当前边界
 
 - 当前仓库以源码运行和开发验证为主，尚未提供经过干净机器验收的完整安装器。
-- 微信仍使用 Python 兼容读取器完成数据库解密和消息解析；原生 C# 读取链路尚未完全替代它。
+- 微信生产读取路径已切换为原生 C#；Python 读取器仅保留为冻结测试基准。离线夹具与字段级对照通过不等于真实微信版本或新机器已经验收。
 - 客户端内部格式并非公开稳定接口，微信或石化通升级后需要重新做兼容验证。
 - 仓库当前没有根级 `LICENSE` 文件；随附工具包是为本项目部署而提交，不代表项目代码或第三方二进制获得了不受限制的自由再分发许可。
 
