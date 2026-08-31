@@ -25,7 +25,9 @@ public sealed class TodoDetailViewModel : ObservableObject
     private string? _description;
     private PriorityLevel _priority;
     private TodoStatus _status;
-    private string _dueAtText;
+    private DateTime? _dueDate;
+    private int _dueHour = 23;
+    private int _dueMinute = 59;
     private DateTime? _reminderDate;
     private int _reminderHour;
     private int _reminderMinute;
@@ -57,7 +59,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         _description = _todo.Description;
         _priority = _todo.Priority;
         _status = _todo.Status;
-        _dueAtText = FormatTime(_todo.DueAt);
+        SetDueSelection(_todo.DueAt);
         var reminderSelection = _currentReminder?.ScheduledAt.LocalDateTime ?? GetDefaultReminderTime(_clock.Now);
         _reminderDate = reminderSelection.Date;
         _reminderHour = reminderSelection.Hour;
@@ -84,6 +86,8 @@ public sealed class TodoDetailViewModel : ObservableObject
     public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
     public IReadOnlyList<TodoStatus> Statuses { get; } = Enum.GetValues<TodoStatus>();
     public ObservableCollection<TodoGroupOption> GroupOptions { get; } = new();
+    public IReadOnlyList<int> DueHours { get; } = Enumerable.Range(0, 24).ToArray();
+    public IReadOnlyList<int> DueMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
@@ -139,10 +143,22 @@ public sealed class TodoDetailViewModel : ObservableObject
         }
     }
 
-    public string DueAtText
+    public DateTime? DueDate
     {
-        get => _dueAtText;
-        set => SetProperty(ref _dueAtText, value);
+        get => _dueDate;
+        set => SetProperty(ref _dueDate, value);
+    }
+
+    public int DueHour
+    {
+        get => _dueHour;
+        set => SetProperty(ref _dueHour, value);
+    }
+
+    public int DueMinute
+    {
+        get => _dueMinute;
+        set => SetProperty(ref _dueMinute, value);
     }
 
     public DateTime? ReminderDate
@@ -198,9 +214,9 @@ public sealed class TodoDetailViewModel : ObservableObject
 
     private async Task SaveAsync()
     {
-        if (!TryParseOptionalTime(DueAtText, out var dueAt))
+        if (!TryGetOptionalDueTime(out var dueAt))
         {
-            _dialogs.ShowError("截止时间格式应为 yyyy-MM-dd HH:mm，或留空。", "保存失败");
+            _dialogs.ShowError("请选择有效的截止日期和时间，或清空日期。", "保存失败");
             return;
         }
 
@@ -228,7 +244,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         GroupColor = SelectedGroup.Color;
         OnPropertyChanged(nameof(GroupName));
         OnPropertyChanged(nameof(GroupColor));
-        DueAtText = FormatTime(updated.DueAt);
+        SetDueSelection(updated.DueAt);
         StatusText = "待办已保存。";
         await _refreshWorkbench();
     }
@@ -305,22 +321,31 @@ public sealed class TodoDetailViewModel : ObservableObject
         RequestClose?.Invoke(this, EventArgs.Empty);
     }
 
-    private static bool TryParseOptionalTime(string? text, out DateTimeOffset? result)
+    private bool TryGetOptionalDueTime(out DateTimeOffset? result)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        if (DueDate is not { } date)
         {
             result = null;
             return true;
         }
 
-        if (DateTimeOffset.TryParse(text, out var parsed))
+        if (DueHour is < 0 or > 23 || DueMinute is < 0 or > 59)
         {
-            result = parsed;
-            return true;
+            result = null;
+            return false;
         }
 
-        result = null;
-        return false;
+        var localTime = DateTime.SpecifyKind(
+            date.Date.AddHours(DueHour).AddMinutes(DueMinute),
+            DateTimeKind.Unspecified);
+        if (TimeZoneInfo.Local.IsInvalidTime(localTime))
+        {
+            result = null;
+            return false;
+        }
+
+        result = new DateTimeOffset(localTime, TimeZoneInfo.Local.GetUtcOffset(localTime));
+        return true;
     }
 
     private bool TryGetReminderTime(out DateTimeOffset result)
@@ -354,6 +379,22 @@ public sealed class TodoDetailViewModel : ObservableObject
         ReminderMinute = localTime.Minute;
     }
 
+    private void SetDueSelection(DateTimeOffset? value)
+    {
+        if (value is not { } dueAt)
+        {
+            DueDate = null;
+            DueHour = 23;
+            DueMinute = 59;
+            return;
+        }
+
+        var localTime = dueAt.LocalDateTime;
+        DueDate = localTime.Date;
+        DueHour = localTime.Hour;
+        DueMinute = localTime.Minute;
+    }
+
     private static DateTime GetDefaultReminderTime(DateTimeOffset now)
     {
         var localTime = now.LocalDateTime.AddMinutes(5);
@@ -367,5 +408,4 @@ public sealed class TodoDetailViewModel : ObservableObject
             DateTimeKind.Unspecified);
     }
 
-    private static string FormatTime(DateTimeOffset? value) => value?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "";
 }

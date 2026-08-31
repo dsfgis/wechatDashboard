@@ -49,8 +49,24 @@
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
             </ComboBox>
-            <TextBlock Text="截止时间（yyyy-MM-dd HH:mm，留空表示无截止时间）" Foreground="#6B7280" />
-            <TextBox Text="{Binding DueAtText, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8" />
+            <TextBlock Text="截止时间（清空日期表示无截止时间）" Foreground="#6B7280" />
+            <Grid Margin="0,4,0,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <DatePicker SelectedDate="{Binding DueDate, UpdateSourceTrigger=PropertyChanged}"
+                            SelectedDateFormat="Short" MinWidth="150" />
+                <ComboBox Grid.Column="1" ItemsSource="{Binding DueHours}" SelectedItem="{Binding DueHour}"
+                          ItemStringFormat="{}{0:00}" Width="64" Margin="8,0,4,0" />
+                <TextBlock Grid.Column="2" Text="时" VerticalAlignment="Center" />
+                <ComboBox Grid.Column="3" ItemsSource="{Binding DueMinutes}" SelectedItem="{Binding DueMinute}"
+                          ItemStringFormat="{}{0:00}" Width="64" Margin="8,0,4,0" />
+                <TextBlock Grid.Column="4" Text="分" VerticalAlignment="Center" />
+            </Grid>
             <CheckBox Content="创建后设置首次提醒" IsChecked="{Binding HasReminder}" Margin="0,0,0,8" />
             <Grid Margin="0,0,0,16" IsEnabled="{Binding HasReminder}">
                 <Grid.ColumnDefinitions>

@@ -1448,17 +1448,15 @@ static async Task TestTodoCreateViewModelAsync()
     viewModel.Title = "  手动创建  ";
     viewModel.Description = "不依赖消息";
     viewModel.SelectedGroup = viewModel.GroupOptions.Single(item => item.Id == group.Id);
-    viewModel.DueAtText = "2026/08/24";
-    viewModel.SaveCommand.Execute(null);
-    AssertEqual(1, dialogs.Errors.Count, "Non-canonical due time should be rejected before persistence.");
-
-    viewModel.DueAtText = "2026-08-24 13:00";
+    viewModel.DueDate = new DateTime(2026, 8, 24);
+    viewModel.DueHour = 13;
+    viewModel.DueMinute = 0;
     viewModel.HasReminder = true;
     viewModel.ReminderDate = now.LocalDateTime.Date;
     viewModel.ReminderHour = now.Hour;
     viewModel.ReminderMinute = now.Minute;
     viewModel.SaveCommand.Execute(null);
-    AssertEqual(2, dialogs.Errors.Count, "Reminder at the current time should be rejected.");
+    AssertEqual(1, dialogs.Errors.Count, "Reminder at the current time should be rejected.");
 
     viewModel.ReminderMinute = now.Minute + 5;
 
@@ -1471,7 +1469,7 @@ static async Task TestTodoCreateViewModelAsync()
     AssertEqual("手动创建", active.Single().Title, "Create view model should persist a trimmed title.");
     AssertEqual(group.Id, active.Single().GroupId, "Create view model should persist the selected group.");
     var expectedLocalDue = new DateTime(2026, 8, 24, 13, 0, 0, DateTimeKind.Unspecified);
-    AssertEqual(new DateTimeOffset(expectedLocalDue, TimeZoneInfo.Local.GetUtcOffset(expectedLocalDue)), active.Single().DueAt, "Canonical due time should use the local offset.");
+    AssertEqual(new DateTimeOffset(expectedLocalDue, TimeZoneInfo.Local.GetUtcOffset(expectedLocalDue)), active.Single().DueAt, "Selected due date and time should use the local offset.");
     AssertEqual(1, (await new SqliteReminderRepository(databasePath).GetForTodoAsync(active.Single().Id, CancellationToken.None)).Count, "Valid future reminder should persist.");
     AssertEqual(1, createdCount, "Successful submission should notify the shell exactly once.");
 }

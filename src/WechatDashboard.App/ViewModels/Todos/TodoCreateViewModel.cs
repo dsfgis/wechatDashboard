@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Globalization;
 using WechatDashboard.App.Presentation;
 using WechatDashboard.App.Services;
 using WechatDashboard.Application.Common;
@@ -25,7 +24,9 @@ public sealed class TodoCreateViewModel : ObservableObject
     private string _title = "";
     private string? _description;
     private PriorityLevel _priority = PriorityLevel.P2;
-    private string _dueAtText = "";
+    private DateTime? _dueDate;
+    private int _dueHour = 23;
+    private int _dueMinute = 59;
     private bool _hasReminder;
     private DateTime? _reminderDate;
     private int _reminderHour;
@@ -72,6 +73,8 @@ public sealed class TodoCreateViewModel : ObservableObject
     public ObservableCollection<TodoGroupOption> GroupOptions { get; } = new();
     public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
     public IReadOnlyList<TodoGroupColorOption> NewGroupColors { get; }
+    public IReadOnlyList<int> DueHours { get; } = Enumerable.Range(0, 24).ToArray();
+    public IReadOnlyList<int> DueMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
@@ -81,7 +84,9 @@ public sealed class TodoCreateViewModel : ObservableObject
     public string Title { get => _title; set => SetProperty(ref _title, value); }
     public string? Description { get => _description; set => SetProperty(ref _description, value); }
     public PriorityLevel Priority { get => _priority; set => SetProperty(ref _priority, value); }
-    public string DueAtText { get => _dueAtText; set => SetProperty(ref _dueAtText, value); }
+    public DateTime? DueDate { get => _dueDate; set => SetProperty(ref _dueDate, value); }
+    public int DueHour { get => _dueHour; set => SetProperty(ref _dueHour, value); }
+    public int DueMinute { get => _dueMinute; set => SetProperty(ref _dueMinute, value); }
     public bool HasReminder { get => _hasReminder; set => SetProperty(ref _hasReminder, value); }
     public DateTime? ReminderDate { get => _reminderDate; set => SetProperty(ref _reminderDate, value); }
     public int ReminderHour { get => _reminderHour; set => SetProperty(ref _reminderHour, value); }
@@ -140,9 +145,9 @@ public sealed class TodoCreateViewModel : ObservableObject
 
     private async Task SaveAsync()
     {
-        if (!TryParseOptionalTime(DueAtText, out var dueAt))
+        if (!TryGetOptionalDueTime(out var dueAt))
         {
-            _dialogs.ShowError("截止时间格式应为 yyyy-MM-dd HH:mm，或留空。", "创建失败");
+            _dialogs.ShowError("请选择有效的截止日期和时间，或清空日期。", "创建失败");
             return;
         }
 
@@ -193,34 +198,31 @@ public sealed class TodoCreateViewModel : ObservableObject
         }
     }
 
-    private static bool TryParseOptionalTime(string? text, out DateTimeOffset? result)
+    private bool TryGetOptionalDueTime(out DateTimeOffset? result)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        if (DueDate is not { } date)
         {
             result = null;
             return true;
         }
 
-        if (DateTime.TryParseExact(
-                text.Trim(),
-                "yyyy-MM-dd HH:mm",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.None,
-                out var parsed))
+        if (DueHour is < 0 or > 23 || DueMinute is < 0 or > 59)
         {
-            var localTime = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
-            if (TimeZoneInfo.Local.IsInvalidTime(localTime))
-            {
-                result = null;
-                return false;
-            }
-
-            result = new DateTimeOffset(localTime, TimeZoneInfo.Local.GetUtcOffset(localTime));
-            return true;
+            result = null;
+            return false;
         }
 
-        result = null;
-        return false;
+        var localTime = DateTime.SpecifyKind(
+            date.Date.AddHours(DueHour).AddMinutes(DueMinute),
+            DateTimeKind.Unspecified);
+        if (TimeZoneInfo.Local.IsInvalidTime(localTime))
+        {
+            result = null;
+            return false;
+        }
+
+        result = new DateTimeOffset(localTime, TimeZoneInfo.Local.GetUtcOffset(localTime));
+        return true;
     }
 
     private bool TryGetReminderTime(out DateTimeOffset result)
