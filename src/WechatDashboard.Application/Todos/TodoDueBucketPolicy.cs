@@ -19,16 +19,14 @@ public sealed class TodoDueBucketPolicy
             return TodoDueBucket.NoDueDate;
         }
 
-        if (dueAt.Value <= now)
+        var localNow = TimeZoneInfo.ConvertTime(now, _timeZone);
+        var localDueAt = TimeZoneInfo.ConvertTime(dueAt.Value, _timeZone);
+        if (localDueAt.Date < localNow.Date)
         {
             return TodoDueBucket.Overdue;
         }
 
-        var localNow = TimeZoneInfo.ConvertTime(now, _timeZone);
-        var nextLocalDay = localNow.Date.AddDays(1);
-        var nextDayOffset = _timeZone.GetUtcOffset(nextLocalDay);
-        var nextDayStart = new DateTimeOffset(nextLocalDay, nextDayOffset);
-        return dueAt.Value < nextDayStart
+        return localDueAt.Date == localNow.Date
             ? TodoDueBucket.DueToday
             : TodoDueBucket.Upcoming;
     }

@@ -29,6 +29,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
     ("Todo due bucket policy separates overdue, today, upcoming and undated items", TestTodoDueBucketPolicyAsync),
+    ("Todo workbench summary matches its mutually exclusive visible groups", TestTodoWorkbenchBucketSummaryAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
@@ -229,13 +230,74 @@ static Task TestTodoDueBucketPolicyAsync()
     var now = new DateTimeOffset(2026, 8, 9, 14, 0, 0, TimeSpan.FromHours(8));
     var policy = new TodoDueBucketPolicy(TimeZoneInfo.FindSystemTimeZoneById("China Standard Time"));
 
-    AssertEqual(TodoDueBucket.Overdue, policy.Classify(now.AddMinutes(-1), now), "A past due time should be overdue.");
+    AssertEqual(TodoDueBucket.DueToday, policy.Classify(now.AddMinutes(-1), now), "An earlier due time on the current local date should remain due today.");
     AssertEqual(TodoDueBucket.DueToday, policy.Classify(now.AddHours(2), now), "A later due time today should be due today.");
     AssertEqual(TodoDueBucket.Upcoming, policy.Classify(now.AddDays(1), now), "A due time tomorrow should be upcoming.");
     AssertEqual(TodoDueBucket.NoDueDate, policy.Classify(null, now), "A missing due time should be undated.");
-    AssertEqual(TodoDueBucket.Overdue, policy.Classify(now, now), "A Todo due exactly now should be overdue, not duplicated across groups.");
+    AssertEqual(TodoDueBucket.DueToday, policy.Classify(now, now), "A Todo due exactly now should remain due today.");
+    AssertEqual(TodoDueBucket.Overdue, policy.Classify(now.AddDays(-1), now), "Only a due date before the current local date should be overdue.");
 
     return Task.CompletedTask;
+}
+
+static async Task TestTodoWorkbenchBucketSummaryAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var todos = new SqliteTodoRepository(databasePath);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var todoService = new TodoApplicationService(unitOfWork, clock);
+    var pinnedOverdue = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("已置顶且昨天到期", null, PriorityLevel.P2, now.AddDays(-1), null, null),
+        CancellationToken.None)).Todo!;
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("昨天到期", null, PriorityLevel.P2, now.AddDays(-1), null, null),
+        CancellationToken.None);
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("今天早些时候到期", null, PriorityLevel.P2, now.AddHours(-1), null, null),
+        CancellationToken.None);
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("今天稍后到期", null, PriorityLevel.P2, now.AddHours(1), null, null),
+        CancellationToken.None);
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("明天到期", null, PriorityLevel.P2, now.AddDays(1), null, null),
+        CancellationToken.None);
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("无截止时间", null, PriorityLevel.P2, null, null, null),
+        CancellationToken.None);
+    await todos.SetPinnedAsync(pinnedOverdue.Id, true, now, CancellationToken.None);
+
+    var workbench = new TodoWorkbenchViewModel(
+        todos,
+        new SqliteMessageRepository(databasePath),
+        new SqliteReminderRepository(databasePath),
+        todoService,
+        new ReminderApplicationService(unitOfWork, clock),
+        new SqliteFollowedProjectRepository(databasePath),
+        new TodoDueBucketPolicy(timeZone),
+        clock,
+        new FakeTodoDialogService(),
+        _ => Task.CompletedTask,
+        () => Task.CompletedTask);
+
+    await workbench.RefreshAsync();
+
+    AssertEqual(6, workbench.ActiveCount, "The active total should equal the sum of all visible mutually exclusive groups.");
+    AssertEqual(1, workbench.Pinned.Count, "Pinned Todos should appear only in the pinned group.");
+    AssertEqual(1, workbench.Overdue.Count, "The overdue group should exclude pinned Todos and include only dates before today.");
+    AssertEqual(1, workbench.OverdueCount, "The summary overdue count should match the visible overdue group.");
+    AssertEqual(2, workbench.DueToday.Count, "Past and future times on today's local date should both be due today.");
+    AssertEqual(1, workbench.Upcoming.Count, "Tomorrow should be upcoming.");
+    AssertEqual(1, workbench.NoDueDate.Count, "A missing deadline should remain undated.");
+    AssertEqual(
+        "活动待办 6 条：已置顶 1 条、已逾期 1 条、今日到期 2 条、后续到期 1 条、无截止时间 1 条。",
+        workbench.StatusText,
+        "The summary should use the same mutually exclusive counts shown by the group headers.");
 }
 
 static async Task TestManualMessageToTodoAsync()
@@ -3088,6 +3150,12 @@ static async Task TestProjectColorSettingsXamlAsync()
     AssertTrue(xaml.Contains("SelectedValue=\"{Binding Color, Mode=OneWay}\"", StringComparison.Ordinal), "The color dropdown should display the persisted row color without mutating the row before persistence succeeds.");
     AssertTrue(xaml.Contains("SelectionChanged=\"FollowedProjectColorComboBox_SelectionChanged\"", StringComparison.Ordinal), "The project color dropdown should save selection changes immediately.");
     AssertFalse(xaml.Contains("<TextBlock Text=\"{Binding Color}\" Foreground=\"{Binding Color}\"", StringComparison.Ordinal), "The project color column should no longer render a non-editable color code.");
+
+    var pendingXamlPath = Path.Combine(ProjectToolPaths.ProjectRoot, "src", "WechatDashboard.App", "Views", "Todos", "TodoPendingView.xaml");
+    var pendingXaml = await File.ReadAllTextAsync(pendingXamlPath, CancellationToken.None);
+    AssertTrue(
+        pendingXaml.Contains("Text=\"{Binding ProjectName, Mode=OneWay}\" Foreground=\"{Binding ProjectColor, Mode=OneWay}\"", StringComparison.Ordinal),
+        "The pending Todo project name should bind its own text foreground directly to the latest project color.");
 }
 
 static async Task TestNativeWeChatKeyDerivationAsync()

@@ -29,9 +29,14 @@
                             <TextBlock Text="{Binding Priority}" Foreground="#DC2626" FontWeight="SemiBold" Margin="0,0,8,0" />
                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
-                        <TextBlock Margin="0,4,0,0" Foreground="#4B5563" TextTrimming="CharacterEllipsis">
-                            <Run Text="项目 "/><Run Text="{Binding ProjectName, Mode=OneWay}" Foreground="{Binding ProjectColor, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="　截止 "/><Run Text="{Binding DueAt, Mode=OneWay}"/><Run Text="　提醒 "/><Run Text="{Binding ReminderAt, Mode=OneWay}"/>
-                        </TextBlock>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="项目 " Foreground="#4B5563" />
+                            <TextBlock Text="{Binding ProjectName, Mode=OneWay}" Foreground="{Binding ProjectColor, Mode=OneWay}" FontWeight="SemiBold" />
+                            <TextBlock Text="　截止 " Foreground="#4B5563" />
+                            <TextBlock Text="{Binding DueAt, Mode=OneWay}" Foreground="#4B5563" />
+                            <TextBlock Text="　提醒 " Foreground="#4B5563" />
+                            <TextBlock Text="{Binding ReminderAt, Mode=OneWay}" Foreground="#4B5563" />
+                        </StackPanel>
                         <TextBlock Margin="0,3,0,0" Foreground="#6B7280" TextTrimming="CharacterEllipsis">
                             <Run Text="{Binding Source, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SourceChatName, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SenderName, Mode=OneWay}"/>
                         </TextBlock>

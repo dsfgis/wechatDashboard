@@ -84,7 +84,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
 
     public int ActiveCount => Pinned.Count + Overdue.Count + DueToday.Count + Upcoming.Count + NoDueDate.Count;
     public int SelectedCount => ActiveRows().Count(row => row.IsSelected);
-    public int OverdueCount => Pinned.Count(row => row.Bucket == TodoDueBucket.Overdue) + Overdue.Count;
+    public int OverdueCount => Overdue.Count;
     public string SelectAllButtonText => ActiveCount > 0 && SelectedCount == ActiveCount ? "取消全选" : "全选";
 
     public async Task RefreshAsync()
@@ -118,7 +118,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         Replace(NoDueDate, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.NoDueDate));
         Replace(Completed, rows.Where(row => !activeIds.Contains(row.Todo.Id))
             .OrderByDescending(row => row.Todo.CompletedAt ?? row.Todo.UpdatedAt));
-        StatusText = $"活动待办 {ActiveCount} 条，其中已置顶 {Pinned.Count} 条、已逾期 {OverdueCount} 条。";
+        StatusText = $"活动待办 {ActiveCount} 条：已置顶 {Pinned.Count} 条、已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条、后续到期 {Upcoming.Count} 条、无截止时间 {NoDueDate.Count} 条。";
         OnPropertyChanged(nameof(ActiveCount));
         OnPropertyChanged(nameof(OverdueCount));
         UpdateSelectionState();
