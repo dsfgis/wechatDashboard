@@ -22,9 +22,9 @@
                     <ComboBox ItemsSource="{Binding Statuses}" SelectedItem="{Binding Status}" Margin="0,4,0,0" />
                 </StackPanel>
             </Grid>
-            <TextBlock Text="分组" Foreground="#6B7280" />
-            <ComboBox ItemsSource="{Binding GroupOptions}" SelectedItem="{Binding SelectedGroup}"
-                      IsEnabled="{Binding IsGroupEditable}" Margin="0,4,0,12">
+            <TextBlock Text="项目" Foreground="#6B7280" />
+            <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}"
+                      IsEnabled="{Binding IsProjectEditable}" Margin="0,4,0,12">
                 <ComboBox.ItemTemplate>
                     <DataTemplate>
                         <StackPanel Orientation="Horizontal">
@@ -34,6 +34,7 @@
                     </DataTemplate>
                 </ComboBox.ItemTemplate>
             </ComboBox>
+            <TextBlock Text="项目选项来自“关注设置 → 项目设置”。" Foreground="#9CA3AF" FontSize="12" Margin="0,-8,0,12" />
             <TextBlock Text="截止时间（清空日期表示无截止时间）" Foreground="#6B7280" />
             <Grid Margin="0,4,0,12">
                 <Grid.ColumnDefinitions>
@@ -54,6 +55,7 @@
             </Grid>
             <WrapPanel Margin="0,0,0,16">
                 <Button Content="保存待办" Command="{Binding SaveCommand}" Padding="16,7" Margin="0,0,8,0" />
+                <Button Content="完成并转入已办" Command="{Binding CompleteCommand}" Padding="16,7" Margin="0,0,8,0" />
                 <Button Content="查看原始消息" Command="{Binding NavigateToSourceCommand}" Padding="16,7" />
             </WrapPanel>
 

@@ -15,6 +15,8 @@ public sealed class DesktopCalendarViewModel : ObservableObject
     private readonly IClock _clock;
     private readonly TimeZoneInfo _timeZone;
     private readonly Func<long, Task> _openTodo;
+    private readonly Func<Task> _onTodoCompleted;
+    private readonly IFollowedProjectRepository? _projects;
     private IReadOnlyDictionary<DateTime, IReadOnlyList<DesktopCalendarTodoItemViewModel>> _todosByDate =
         new Dictionary<DateTime, IReadOnlyList<DesktopCalendarTodoItemViewModel>>();
     private DateTime _displayMonth;
@@ -25,12 +27,16 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         ITodoRepository todos,
         IClock clock,
         TimeZoneInfo timeZone,
-        Func<long, Task> openTodo)
+        Func<long, Task> openTodo,
+        Func<Task>? onTodoCompleted = null,
+        IFollowedProjectRepository? projects = null)
     {
         _todos = todos;
         _clock = clock;
         _timeZone = timeZone;
         _openTodo = openTodo;
+        _onTodoCompleted = onTodoCompleted ?? (() => Task.CompletedTask);
+        _projects = projects;
         var today = LocalDate(clock.Now);
         _displayMonth = new DateTime(today.Year, today.Month, 1);
         _selectedDate = today;
@@ -40,6 +46,9 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         SelectDateCommand = new RelayCommand(SelectDate);
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync());
         OpenTodoCommand = new AsyncRelayCommand(OpenTodoAsync, parameter => parameter is long id && id > 0);
+        CompleteTodoCommand = new AsyncRelayCommand(
+            CompleteTodoAsync,
+            parameter => parameter is DesktopCalendarTodoItemViewModel { IsCompleted: false });
         BuildCalendarDays();
     }
 
@@ -51,6 +60,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
     public RelayCommand SelectDateCommand { get; }
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand OpenTodoCommand { get; }
+    public AsyncRelayCommand CompleteTodoCommand { get; }
 
     public DateTime DisplayMonth => _displayMonth;
     public DateTime SelectedDate => _selectedDate;
@@ -64,30 +74,38 @@ public sealed class DesktopCalendarViewModel : ObservableObject
 
     public async Task RefreshAsync()
     {
-        var activeTask = _todos.GetActiveAsync(CancellationToken.None);
-        var completedTask = _todos.GetCompletedAsync(CancellationToken.None);
-        await Task.WhenAll(activeTask, completedTask);
-        var all = activeTask.Result.Concat(completedTask.Result).ToArray();
-        _todosByDate = all
-            .Where(todo => todo.DueAt.HasValue)
-            .Select(todo => new
-            {
-                Date = LocalDate(todo.DueAt!.Value),
-                Item = CreateTodoItem(todo)
-            })
-            .GroupBy(entry => entry.Date)
-            .ToDictionary(
-                group => group.Key,
-                group => (IReadOnlyList<DesktopCalendarTodoItemViewModel>)group
-                    .Select(entry => entry.Item)
-                    .OrderBy(item => item.IsCompleted)
-                    .ThenBy(item => item.Priority)
-                    .ThenBy(item => item.DueAt)
-                    .ToArray());
+        var snapshot = await Task.Run(async () =>
+        {
+            var activeTask = _todos.GetActiveAsync(CancellationToken.None);
+            var completedTask = _todos.GetCompletedAsync(CancellationToken.None);
+            var projectsTask = _projects?.GetAllAsync(CancellationToken.None)
+                ?? Task.FromResult<IReadOnlyList<FollowedProject>>(Array.Empty<FollowedProject>());
+            await Task.WhenAll(activeTask, completedTask, projectsTask);
+            var allItems = activeTask.Result.Concat(completedTask.Result).ToArray();
+            var projectLookup = projectsTask.Result.Where(item => item.IsActive).ToDictionary(item => item.Id);
+            var byDate = allItems
+                .Where(todo => todo.DueAt.HasValue)
+                .Select(todo => new
+                {
+                    Date = LocalDate(todo.DueAt!.Value),
+                    Item = CreateTodoItem(todo, projectLookup)
+                })
+                .GroupBy(entry => entry.Date)
+                .ToDictionary(
+                    group => group.Key,
+                    group => (IReadOnlyList<DesktopCalendarTodoItemViewModel>)group
+                        .Select(entry => entry.Item)
+                        .OrderBy(item => item.IsCompleted)
+                        .ThenBy(item => item.Priority)
+                        .ThenBy(item => item.DueAt)
+                        .ToArray());
+            return (AllCount: allItems.Length, ByDate: byDate);
+        });
+        _todosByDate = snapshot.ByDate;
 
         BuildCalendarDays();
         var scheduledCount = _todosByDate.Values.Sum(items => items.Count);
-        var unscheduledCount = all.Length - scheduledCount;
+        var unscheduledCount = snapshot.AllCount - scheduledCount;
         StatusText = unscheduledCount == 0
             ? $"共加载 {scheduledCount} 条有截止日期的待办。"
             : $"共加载 {scheduledCount} 条日历待办，另有 {unscheduledCount} 条未设置截止日期。";
@@ -123,6 +141,23 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         await RefreshAsync();
     }
 
+    public async Task CompleteTodoAsync(long todoId)
+    {
+        if (todoId <= 0)
+        {
+            return;
+        }
+
+        var updated = await _todos.MarkSelectedCompletedAsync(
+            new[] { todoId },
+            _clock.Now,
+            CancellationToken.None);
+        await Task.WhenAll(RefreshAsync(), _onTodoCompleted());
+        StatusText = updated == 1
+            ? "待办已完成并转入已办。"
+            : "待办已被办理或不存在，日历已刷新。";
+    }
+
     private void SelectDate(object? parameter)
     {
         if (parameter is DateTime date)
@@ -136,6 +171,14 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         if (parameter is long todoId)
         {
             await OpenTodoAsync(todoId);
+        }
+    }
+
+    private async Task CompleteTodoAsync(object? parameter)
+    {
+        if (parameter is DesktopCalendarTodoItemViewModel todo)
+        {
+            await CompleteTodoAsync(todo.Id);
         }
     }
 
@@ -186,15 +229,22 @@ public sealed class DesktopCalendarViewModel : ObservableObject
 
     private DateTime LocalDate(DateTimeOffset value) => TimeZoneInfo.ConvertTime(value, _timeZone).Date;
 
-    private DesktopCalendarTodoItemViewModel CreateTodoItem(TodoItem todo)
+    private DesktopCalendarTodoItemViewModel CreateTodoItem(
+        TodoItem todo,
+        IReadOnlyDictionary<long, FollowedProject> projectLookup)
     {
         var localDueAt = TimeZoneInfo.ConvertTime(todo.DueAt!.Value, _timeZone);
+        var project = todo.ManagedProjectId is { } projectId && projectLookup.TryGetValue(projectId, out var resolved)
+            ? resolved
+            : null;
         return new DesktopCalendarTodoItemViewModel(
             todo.Id,
             todo.Title,
             todo.Priority,
             localDueAt,
-            todo.Status is TodoStatus.Done or TodoStatus.Ignored);
+            todo.Status is TodoStatus.Done or TodoStatus.Ignored,
+            project?.ProjectName ?? "未指定项目",
+            project?.Color ?? ProjectColorPolicy.DefaultColor);
     }
 }
 
@@ -203,7 +253,9 @@ public sealed record DesktopCalendarTodoItemViewModel(
     string Title,
     PriorityLevel Priority,
     DateTimeOffset DueAt,
-    bool IsCompleted)
+    bool IsCompleted,
+    string ProjectName,
+    string ProjectColor)
 {
     public string TimeText => DueAt.ToString("HH:mm");
     public string StatusText => IsCompleted ? "已办理" : Priority.ToString();

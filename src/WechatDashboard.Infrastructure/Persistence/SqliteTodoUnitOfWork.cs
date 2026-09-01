@@ -53,7 +53,8 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             request.ProjectId,
             request.Priority,
             request.DueAt,
-            isAutoCreated: false);
+            isAutoCreated: false,
+            managedProjectId: request.ManagedProjectId);
         var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
 
         if (request.FirstReminderAt is { } reminderAt)
@@ -83,6 +84,13 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             return new CreateManualTodoResult(CreateManualTodoOutcome.GroupMissing, null);
         }
 
+        if (request.ManagedProjectId is { } managedProjectId &&
+            !await FollowedProjectExistsAsync(connection, transaction, managedProjectId, cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new CreateManualTodoResult(CreateManualTodoOutcome.ProjectMissing, null);
+        }
+
         var todo = new TodoItem(
             Id: 0,
             SourceMessageId: null,
@@ -98,6 +106,7 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             IsAutoCreated: false)
         {
             GroupId = request.GroupId,
+            ManagedProjectId = request.ManagedProjectId,
             IsPinned = false
         };
         var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
@@ -171,11 +180,20 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             return null;
         }
 
+
+        if (request.ManagedProjectId is { } managedProjectId &&
+            !await FollowedProjectExistsAsync(connection, transaction, managedProjectId, cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
         await using var update = connection.CreateCommand();
         update.Transaction = transaction;
         update.CommandText = """
             UPDATE todo_items
             SET title = $title, description = $description, project_id = $projectId, group_id = $groupId,
+                managed_project_id = $managedProjectId,
                 priority = $priority, due_at = $dueAt, status = $status,
                 updated_at = $now, completed_at = $completedAt,
                 is_pinned = CASE WHEN $status IN ($done, $ignored) THEN 0 ELSE is_pinned END
@@ -185,6 +203,7 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         update.Parameters.AddWithValue("$description", request.Description is null ? DBNull.Value : request.Description);
         update.Parameters.AddWithValue("$projectId", request.ProjectId is null ? DBNull.Value : request.ProjectId.Value);
         update.Parameters.AddWithValue("$groupId", request.GroupId is null ? DBNull.Value : request.GroupId.Value);
+        update.Parameters.AddWithValue("$managedProjectId", request.ManagedProjectId is null ? DBNull.Value : request.ManagedProjectId.Value);
         update.Parameters.AddWithValue("$priority", request.Priority.ToString());
         update.Parameters.AddWithValue("$dueAt", request.DueAt is null ? DBNull.Value : request.DueAt.Value.ToString("O"));
         update.Parameters.AddWithValue("$status", request.Status.ToString());
@@ -208,6 +227,19 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         var updated = await SqliteTodoRepository.GetByIdAsync(connection, transaction, request.TodoId, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return updated;
+    }
+
+    private static async Task<bool> FollowedProjectExistsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long projectId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT 1 FROM followed_projects WHERE id = $id AND is_active = 1;";
+        command.Parameters.AddWithValue("$id", projectId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
     public async Task<TodoReminder?> ScheduleReminderAsync(

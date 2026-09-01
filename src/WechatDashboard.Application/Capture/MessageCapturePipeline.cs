@@ -19,6 +19,7 @@ public sealed class MessageCapturePipeline
     private readonly MentionDetector _mentionDetector;
     private readonly ProjectClassifier _projectClassifier;
     private readonly UrgencyRanker _urgencyRanker;
+    private readonly Func<Message, long?> _managedProjectMatcher;
 
     public MessageCapturePipeline(
         IEnumerable<IMessageCaptureAdapter> adapters,
@@ -26,7 +27,8 @@ public sealed class MessageCapturePipeline
         IProcessingOffsetRepository offsetRepository,
         MentionDetector mentionDetector,
         ProjectClassifier projectClassifier,
-        UrgencyRanker urgencyRanker)
+        UrgencyRanker urgencyRanker,
+        Func<Message, long?>? managedProjectMatcher = null)
     {
         _adapters = adapters.ToArray();
         _messageProcessingUnitOfWork = messageProcessingUnitOfWork;
@@ -34,6 +36,7 @@ public sealed class MessageCapturePipeline
         _mentionDetector = mentionDetector;
         _projectClassifier = projectClassifier;
         _urgencyRanker = urgencyRanker;
+        _managedProjectMatcher = managedProjectMatcher ?? (_ => null);
     }
 
     /// <summary>
@@ -140,7 +143,13 @@ public sealed class MessageCapturePipeline
                     var classification = _projectClassifier.Classify(savedMessage);
                     var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
                     var todo = isMentionMe
-                        ? TodoService.CreateFromMention(savedMessage, classification, urgency)
+                        ? TodoService.CreateFromMention(
+                            savedMessage,
+                            classification,
+                            urgency,
+                            DateTimeOffset.Now,
+                            TimeZoneInfo.Local,
+                            _managedProjectMatcher(savedMessage))
                         : null;
                     return new MessageProcessingArtifacts(classification, urgency, todo);
                 },

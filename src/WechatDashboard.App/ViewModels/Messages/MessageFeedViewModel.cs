@@ -220,26 +220,35 @@ public sealed class MessageFeedViewModel : ObservableObject
     private async Task ReplaceItemsAsync(IEnumerable<Message> messages)
     {
         var messageList = messages.ToArray();
-        var todosByMessageId = await _todoRepository.GetBySourceMessageIdsAsync(
-            messageList.Select(message => message.Id).ToArray(),
-            CancellationToken.None);
-        var detector = new MentionDetector(_aliases());
-        Items.Clear();
-        foreach (var message in messageList)
+        var aliases = _aliases().ToArray();
+        var itemRows = await Task.Run(async () =>
         {
-            todosByMessageId.TryGetValue(message.Id, out var todo);
-            var todoAction = FormatTodoAction(todo);
-            Items.Add(new MessageListItemViewModel(
-                message.Id,
-                message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
-                FormatSource(message.Source),
-                message.ChatName,
-                message.SenderName,
-                message.IsMentionMe ? "是" : "否",
-                message.Content,
-                MessageHighlighter.HighlightMentions(message.Content, detector.ExtractMentionedAliases(message.Content)),
-                todoAction.Text,
-                todoAction.ToolTip));
+            var todosByMessageId = await _todoRepository.GetBySourceMessageIdsAsync(
+                messageList.Select(message => message.Id).ToArray(),
+                CancellationToken.None);
+            var detector = new MentionDetector(aliases);
+            return messageList.Select(message =>
+            {
+                todosByMessageId.TryGetValue(message.Id, out var todo);
+                var todoAction = FormatTodoAction(todo);
+                return new MessageListItemViewModel(
+                    message.Id,
+                    message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+                    FormatSource(message.Source),
+                    message.ChatName,
+                    message.SenderName,
+                    message.IsMentionMe ? "是" : "否",
+                    message.Content,
+                    MessageHighlighter.HighlightMentions(message.Content, detector.ExtractMentionedAliases(message.Content)),
+                    todoAction.Text,
+                    todoAction.ToolTip);
+            }).ToArray();
+        });
+
+        Items.Clear();
+        foreach (var item in itemRows)
+        {
+            Items.Add(item);
         }
     }
 

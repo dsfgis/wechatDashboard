@@ -16,7 +16,8 @@ public static class TodoFactory
         long? projectId = null,
         PriorityLevel? priority = null,
         DateTimeOffset? dueAt = null,
-        bool isAutoCreated = false)
+        bool isAutoCreated = false,
+        long? managedProjectId = null)
     {
         return new TodoItem(
             Id: 0,
@@ -30,7 +31,10 @@ public static class TodoFactory
             CreatedAt: now,
             UpdatedAt: now,
             CompletedAt: null,
-            IsAutoCreated: isAutoCreated);
+            IsAutoCreated: isAutoCreated)
+        {
+            ManagedProjectId = managedProjectId
+        };
     }
 
     public static string BuildTitle(string content)

@@ -1,7 +1,7 @@
 <Window x:Class="WechatDashboard.App.Views.Todos.TodoCreateWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="添加待办" Width="620" Height="650" MinWidth="560" MinHeight="560"
+        Title="添加待办" Width="620" Height="580" MinWidth="560" MinHeight="520"
         WindowStartupLocation="CenterOwner" Background="#F4F6F8"
         FocusManager.FocusedElement="{Binding ElementName=TitleTextBox}">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -19,8 +19,8 @@
                     <ComboBox ItemsSource="{Binding Priorities}" SelectedItem="{Binding Priority}" Margin="0,4,0,0" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Margin="8,0,0,0">
-                    <TextBlock Text="分组" Foreground="#6B7280" />
-                    <ComboBox ItemsSource="{Binding GroupOptions}" SelectedItem="{Binding SelectedGroup}" Margin="0,4,0,0">
+                    <TextBlock Text="项目" Foreground="#6B7280" />
+                    <ComboBox ItemsSource="{Binding ProjectOptions}" SelectedItem="{Binding SelectedProject}" Margin="0,4,0,0">
                         <ComboBox.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal">
@@ -32,23 +32,7 @@
                     </ComboBox>
                 </StackPanel>
             </Grid>
-            <TextBlock Text="新增分组名称" Foreground="#6B7280" />
-            <DockPanel Margin="0,4,0,8">
-                <Button DockPanel.Dock="Right" Content="新增并选中" Command="{Binding AddGroupCommand}" Padding="14,6" Margin="8,0,0,0" />
-                <TextBox Text="{Binding NewGroupName, UpdateSourceTrigger=PropertyChanged}" Padding="8" ToolTip="输入自定义待办分组名称" />
-            </DockPanel>
-            <TextBlock Text="分组颜色" Foreground="#6B7280" />
-            <ComboBox ItemsSource="{Binding NewGroupColors}" SelectedItem="{Binding SelectedNewGroupColor}"
-                      Width="160" HorizontalAlignment="Left" Margin="0,4,0,12" Padding="6,4">
-                    <ComboBox.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Orientation="Horizontal">
-                                <Border Width="12" Height="12" CornerRadius="6" Background="{Binding Color}" Margin="0,0,6,0" />
-                                <TextBlock Text="{Binding Name}" Foreground="{Binding Color}" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ComboBox.ItemTemplate>
-            </ComboBox>
+            <TextBlock Text="项目来自“关注设置 → 项目设置”；此处只选择，不新增项目。" Foreground="#9CA3AF" FontSize="12" Margin="0,-8,0,12" />
             <TextBlock Text="截止时间（清空日期表示无截止时间）" Foreground="#6B7280" />
             <Grid Margin="0,4,0,12">
                 <Grid.ColumnDefinitions>

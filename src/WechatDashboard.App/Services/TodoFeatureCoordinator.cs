@@ -32,11 +32,10 @@ public sealed class TodoFeatureCoordinator : IDisposable
         var todoRepository = new SqliteTodoRepository(databasePath);
         var messageRepository = new SqliteMessageRepository(databasePath);
         var reminderRepository = new SqliteReminderRepository(databasePath);
-        var groupRepository = new SqliteTodoGroupRepository(databasePath);
+        var projectRepository = new SqliteFollowedProjectRepository(databasePath);
         var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
         var todoService = new TodoApplicationService(unitOfWork, clock);
         var reminderService = new ReminderApplicationService(unitOfWork, clock);
-        var groupService = new TodoGroupApplicationService(groupRepository, clock);
         var dialogs = new TodoDialogService();
         Workbench = new TodoWorkbenchViewModel(
             todoRepository,
@@ -44,7 +43,7 @@ public sealed class TodoFeatureCoordinator : IDisposable
             reminderRepository,
             todoService,
             reminderService,
-            groupService,
+            projectRepository,
             new TodoDueBucketPolicy(TimeZoneInfo.Local),
             clock,
             dialogs,

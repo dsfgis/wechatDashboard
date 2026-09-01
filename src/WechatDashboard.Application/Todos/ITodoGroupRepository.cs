@@ -10,6 +10,13 @@ public enum CreateTodoGroupOutcome
 
 public sealed record CreateTodoGroupResult(CreateTodoGroupOutcome Outcome, TodoGroup Group);
 
+public enum DeleteTodoGroupOutcome
+{
+    Deleted,
+    InUse,
+    Missing
+}
+
 public interface ITodoGroupRepository
 {
     Task<IReadOnlyList<TodoGroup>> GetAllAsync(CancellationToken cancellationToken);
@@ -20,4 +27,5 @@ public interface ITodoGroupRepository
         string color,
         DateTimeOffset now,
         CancellationToken cancellationToken);
+    Task<DeleteTodoGroupOutcome> DeleteAsync(long id, CancellationToken cancellationToken);
 }

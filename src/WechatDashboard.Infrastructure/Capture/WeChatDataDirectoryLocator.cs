@@ -4,6 +4,9 @@ namespace WechatDashboard.Infrastructure.Capture;
 
 public static class WeChatDataDirectoryLocator
 {
+    private static readonly object CacheGate = new();
+    private static string? _cachedDatabaseRoot;
+
     private static readonly string[] CandidateDbStoragePaths =
     {
         Path.Combine("cache", "xwechat_files"),
@@ -13,11 +16,23 @@ public static class WeChatDataDirectoryLocator
 
     public static string? Locate()
     {
+        lock (CacheGate)
+        {
+            if (!string.IsNullOrWhiteSpace(_cachedDatabaseRoot) && Directory.Exists(_cachedDatabaseRoot))
+            {
+                return _cachedDatabaseRoot;
+            }
+        }
+
         foreach (var root in GetSearchRoots())
         {
             var found = SearchUnderRoot(root);
             if (found is not null)
             {
+                lock (CacheGate)
+                {
+                    _cachedDatabaseRoot = found;
+                }
                 return found;
             }
         }

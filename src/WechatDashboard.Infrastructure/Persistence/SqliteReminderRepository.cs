@@ -73,6 +73,52 @@ public sealed class SqliteReminderRepository : IReminderRepository
         return result;
     }
 
+    /// <summary>批量读取多个待办的提醒，避免列表刷新时为每条待办单独打开数据库连接。</summary>
+    public async Task<IReadOnlyDictionary<long, IReadOnlyList<TodoReminder>>> GetForTodosAsync(
+        IReadOnlyCollection<long> todoIds,
+        CancellationToken cancellationToken)
+    {
+        var distinctIds = todoIds.Where(id => id > 0).Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            return new Dictionary<long, IReadOnlyList<TodoReminder>>();
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        var remindersByTodo = new Dictionary<long, List<TodoReminder>>();
+        foreach (var batch in distinctIds.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = batch.Select((_, index) => $"$todoId{index}").ToArray();
+            command.CommandText = $"""
+                {SelectColumns}
+                WHERE todo_id IN ({string.Join(", ", placeholders)})
+                ORDER BY todo_id, created_at, id;
+                """;
+            for (var index = 0; index < batch.Length; index++)
+            {
+                command.Parameters.AddWithValue(placeholders[index], batch[index]);
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var reminder = ReadReminder(reader);
+                if (!remindersByTodo.TryGetValue(reminder.TodoId, out var reminders))
+                {
+                    reminders = new List<TodoReminder>();
+                    remindersByTodo.Add(reminder.TodoId, reminders);
+                }
+
+                reminders.Add(reminder);
+            }
+        }
+
+        return remindersByTodo.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<TodoReminder>)pair.Value);
+    }
+
     public async Task<IReadOnlyList<ReminderDispatchItem>> GetDueAsync(
         DateTimeOffset now,
         int limit,

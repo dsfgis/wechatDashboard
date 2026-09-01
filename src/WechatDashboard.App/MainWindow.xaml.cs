@@ -82,6 +82,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private WindowState _windowStateBeforeMinimize = WindowState.Normal;
     // 关闭前异步清理只执行一次
     private bool _isClosingAfterCleanup;
+    // 只有托盘“退出”或系统结束会话时才真正关闭；标题栏关闭按钮仅隐藏到托盘。
+    private bool _isExitRequested;
     private IReadOnlyDictionary<string, CaptureSourceRunResult> _latestCaptureSourceResults =
         new Dictionary<string, CaptureSourceRunResult>(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _captureSourceLastSuccessAt =
@@ -101,6 +103,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private int _wechatMessagePageNumber = 1;
     private int _wechatMessagePageSize = DefaultWeChatMessagePageSize;
     private int _wechatMessageTotalCount;
+    private bool _wechatMessagesLoaded;
     private string _wechatMessagePageText = "第 0/0 页，共 0 条";
     private string _wechatMessageStatusText = "默认读取当天微信消息。请先提取 DB Key 并初始化本地库。";
     private string _dashboardStatusText = "按项目统计最近消息。";
@@ -144,7 +147,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _todoRepository,
             SystemClock.Instance,
             TimeZoneInfo.Local,
-            TodoFeature.Workbench.OpenTodoAsync);
+            TodoFeature.Workbench.OpenTodoAsync,
+            TodoFeature.RefreshAsync,
+            _followedProjectRepository);
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;
@@ -168,6 +173,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Visible = true
         };
         _trayIcon.DoubleClick += (_, _) => ShowMainWindowFromTray();
+        System.Windows.Application.Current.SessionEnding += Application_SessionEnding;
     }
 
     /// <summary>Switches the content page from the selected sidebar item.</summary>
@@ -181,9 +187,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         MainContentTabs.SelectedIndex = tabIndex;
-        if (tabIndex == 8 && ScheduleOverview is not null)
+        switch (tabIndex)
         {
-            await ScheduleOverview.RefreshAsync();
+            case 0:
+            case 1:
+                await TodoFeature.Workbench.RefreshAsync();
+                break;
+            case 2:
+                await TodoFeature.MessageFeed.RefreshAsync();
+                break;
+            case 3 when !_wechatMessagesLoaded:
+                await LoadTodayWeChatMessagesAsync(1, ensureInitialized: true);
+                break;
+            case 8 when ScheduleOverview is not null:
+                await ScheduleOverview.RefreshAsync();
+                break;
         }
     }
 
@@ -324,18 +342,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ObservableCollection<FollowedProjectRow> FollowedProjects { get; } = new();
     // 项目关键字列表（UI 绑定）
     public ObservableCollection<FollowedProjectKeywordRow> FollowedProjectKeywords { get; } = new();
+    public IReadOnlyList<ProjectColorOption> ProjectColors { get; } =
+    [
+        new("灰色", ProjectColorPolicy.DefaultColor),
+        new("红色", ProjectColorPolicy.Red),
+        new("橙色", ProjectColorPolicy.Orange),
+        new("绿色", ProjectColorPolicy.Green),
+        new("蓝色", ProjectColorPolicy.Blue),
+        new("紫色", ProjectColorPolicy.Purple),
+        new("粉色", ProjectColorPolicy.Pink)
+    ];
 
     /// <summary>窗口加载完成：初始化数据库、加载采集源设置，并在读取器就绪时读取当天消息。</summary>
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        // Loaded 在首帧绘制前触发。先让出 Dispatcher，确保窗口和加载状态能够立即显示。
+        await System.Windows.Threading.Dispatcher.Yield(
+            System.Windows.Threading.DispatcherPriority.Background);
         await InitializeAndRefreshAsync(seedIfEmpty: true);
         await TodoFeature.StartAsync();
         ApplyBootstrapRange();
-        await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
+        await Task.Run(() => _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None));
         await LoadCaptureSourceSettingsAsync();
         if (_readerService.IsInitialized)
         {
-            await LoadTodayWeChatMessagesAsync(1, ensureInitialized: false);
+            WeChatMessageStatusText = "微信读取器已就绪；打开“微信消息”页时加载当天消息。";
         }
 
         await StartLiveListenerAsync();
@@ -567,11 +598,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ApplyBootstrapRange();
         if (_readerService.IsAvailable && !_readerService.IsInitialized)
         {
-            await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
+            await Task.Run(() => _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None));
         }
 
-        _liveCaptureCts = new CancellationTokenSource();
-        _liveCaptureTask = RunLiveCaptureLoopAsync(_liveCaptureCts.Token);
+        var liveCaptureCts = new CancellationTokenSource();
+        _liveCaptureCts = liveCaptureCts;
+        // SQLite、目录枚举、快照和消息解析包含同步工作；整个循环必须从 UI 线程移出。
+        _liveCaptureTask = Task.Run(() => RunLiveCaptureLoopAsync(liveCaptureCts.Token));
         ListenerStatusText = _readerService.IsInitialized
             ? "监听已启动：前台空闲 15 秒检查一次，托盘后台空闲 2 分钟检查一次"
             : $"监听已启动（部分失败）：微信未初始化；{_readerService.LastError ?? "请点击“自动提取 Key”"}。其他采集源继续运行。";
@@ -639,10 +672,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        _isExitRequested = true;
         Close();
     }
 
-    /// <summary>窗口关闭时停止监听并释放托盘资源，避免后台任务泄漏。</summary>
+    /// <summary>标题栏关闭按钮隐藏到托盘；显式退出时停止监听并释放资源。</summary>
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
         if (_isClosingAfterCleanup)
@@ -651,6 +685,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         e.Cancel = true;
+        if (!_isExitRequested)
+        {
+            _isBackgroundMode = true;
+            Hide();
+            return;
+        }
+
         _isClosingAfterCleanup = true;
         _trayIcon.Visible = false;
         _desktopCalendarWindow?.Shutdown();
@@ -664,12 +705,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
+            System.Windows.Application.Current.SessionEnding -= Application_SessionEnding;
             _trayIcon.Dispose();
             _trayMenu.Dispose();
             _ownedTrayIcon?.Dispose();
             Closing -= MainWindow_Closing;
             Close();
         }
+    }
+
+    private void Application_SessionEnding(object? sender, SessionEndingCancelEventArgs e)
+    {
+        _isExitRequested = true;
     }
 
     private static System.Drawing.Icon? LoadApplicationIcon()
@@ -693,17 +740,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>初始化数据库并刷新；seedIfEmpty 控制首次空库时是否播种示例。</summary>
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
     {
-        await _databaseInitializer.InitializeAsync(CancellationToken.None);
+        await Task.Run(() => _databaseInitializer.InitializeAsync(CancellationToken.None));
         await LoadUserAliasesAsync();
         await LoadFollowedChatsAsync();
         await LoadFollowedProjectsAsync();
         if (seedIfEmpty)
         {
             // 空库时播种示例，便于首次体验
-            var existingMessages = await _messageRepository.GetRecentAsync(1, CancellationToken.None);
+            var existingMessages = await Task.Run(
+                () => _messageRepository.GetRecentAsync(1, CancellationToken.None));
             if (existingMessages.Count == 0)
             {
-                await SeedSampleMessagesAsync();
+                await Task.Run(SeedSampleMessagesAsync);
             }
         }
 
@@ -717,15 +765,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task RefreshAsync()
     {
-        // 取最近 100 条入库消息用于首页展示与摘要统计
-        var recentMessages = await _messageRepository.GetRecentAsync(100, CancellationToken.None);
-        // 取所有未完成待办，用于待办列表与项目汇总
-        var pendingTodos = await _todoRepository.GetPendingAsync(CancellationToken.None);
+        var dashboardTask = CreateDashboardSnapshotAsync(
+            ReadSelectedDashboardDimension(),
+            DashboardChartType);
+        var pendingTodosTask = Task.Run(() => _todoRepository.GetPendingAsync(CancellationToken.None));
+        var managedProjectsTask = Task.Run(() => _followedProjectRepository.GetAllAsync(CancellationToken.None));
+        var messageCountTask = Task.Run(() => _messageRepository.GetMessageCountAsync(CancellationToken.None));
+        var dataDirectoryTask = Task.Run(WeChatDataDirectoryLocator.Locate);
+        var shihuatongReadyTask = Task.Run(() => ShihuatongLocalDatabaseCaptureAdapter.IsProcessRunning);
+        await Task.WhenAll(
+            dashboardTask,
+            pendingTodosTask,
+            managedProjectsTask,
+            messageCountTask,
+            dataDirectoryTask,
+            shihuatongReadyTask);
+
+        var dashboard = dashboardTask.Result;
+        var recentMessages = dashboard.RecentMessages;
+        var pendingTodos = pendingTodosTask.Result;
+        var managedProjectNames = managedProjectsTask.Result.ToDictionary(project => project.Id, project => project.ProjectName);
         // 采集源：微信本地数据库（基于 wechat-local-reader 解密）
         var localDatabaseSource = CaptureAdapterFactory.CreateWeChatLocalDatabaseSource(_readerService);
         var localDatabaseConfigPath = CaptureAdapterFactory.GetWeChatLocalDatabaseConfigPath();
         // 微信数据目录（db_storage），用于初始化本地数据库采集源
-        var dataDir = WeChatDataDirectoryLocator.Locate();
+        var dataDir = dataDirectoryTask.Result;
         // 计算本地数据库采集源的状态文案
         var localDbStatus = _readerService.IsInitialized ? "已就绪"
             : _readerService.IsAvailable ? (_readerService.LastError ?? "等待初始化")
@@ -740,14 +804,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 项目汇总：按项目分组统计待办数量与高优先级数量
         Replace(ProjectSummaries, pendingTodos
-            .GroupBy(todo => ProjectName(todo.ProjectId))
+            .GroupBy(todo => todo.ManagedProjectId is { } projectId && managedProjectNames.TryGetValue(projectId, out var projectName)
+                ? projectName
+                : "未指定项目")
             .Select(group => new ProjectSummaryRow(
                 group.Key,
                 group.Count(),
                 group.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1))));
 
         // 采集诊断列表：展示各采集源的可用性与状态
-        var shihuatongLocalDatabaseReady = ShihuatongLocalDatabaseCaptureAdapter.IsProcessRunning;
+        var shihuatongLocalDatabaseReady = shihuatongReadyTask.Result;
         var diagnosticRows = new[]
         {
             new DiagnosticRow("ManualImportAdapter", "可用", DateTimeOffset.Now.LocalDateTime.ToString("yyyy-MM-dd HH:mm"), "示例消息和手动导入入口已就绪"),
@@ -783,10 +849,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         HighPriorityTodoCount = pendingTodos.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1);
 
         // 刷新项目看板图表和消息流分页（强制重新计算总数）
-        await LoadProjectDashboardAsync();
-        await TodoFeature.RefreshAsync();
-        SummaryText = $"消息 {TodoFeature.MessageFeed.TotalCount} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
+        ApplyDashboardSnapshot(dashboard);
+        await RefreshSelectedFeatureAsync();
+        SummaryText = $"消息 {messageCountTask.Result} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
     }
+
+    private Task RefreshSelectedFeatureAsync() => MainContentTabs.SelectedIndex switch
+    {
+        0 or 1 => TodoFeature.Workbench.RefreshAsync(),
+        2 => TodoFeature.MessageFeed.RefreshAsync(),
+        8 => ScheduleOverview.RefreshAsync(),
+        _ => Task.CompletedTask
+    };
 
     /// <summary>项目看板维度切换：按项目、时间或群名重新统计。</summary>
     private async void DashboardDimensionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -814,32 +888,44 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>加载项目看板统计图，默认统计最近一批入库消息。</summary>
     private async Task LoadProjectDashboardAsync()
     {
-        var messages = await _messageRepository.GetRecentAsync(DashboardMessageSampleLimit, CancellationToken.None);
         var dimension = ReadSelectedDashboardDimension();
-        var rows = BuildDashboardRows(messages, dimension);
-        if (dimension == "time" && DashboardChartType == "line")
-        {
-            // 时间聚合默认按最近日期优先；折线图需要按时间正序连接数据点。
-            rows = rows.Reverse().ToArray();
-        }
+        var snapshot = await CreateDashboardSnapshotAsync(dimension, DashboardChartType);
+        ApplyDashboardSnapshot(snapshot);
+    }
 
-        Replace(DashboardChartRows, rows);
+    private Task<DashboardSnapshot> CreateDashboardSnapshotAsync(string dimension, string chartType) =>
+        Task.Run(async () =>
+        {
+            var messages = await _messageRepository.GetRecentAsync(DashboardMessageSampleLimit, CancellationToken.None);
+            var rows = BuildDashboardRows(messages, dimension);
+            if (dimension == "time" && chartType == "line")
+            {
+                // 时间聚合默认按最近日期优先；折线图需要按时间正序连接数据点。
+                rows = rows.Reverse().ToArray();
+            }
 
-        var dimensionText = dimension switch
-        {
-            "time" => "时间",
-            "chat" => "群名",
-            _ => "项目"
-        };
-        var chartTypeText = DashboardChartType switch
-        {
-            "pie" => "环形占比图",
-            "line" => "趋势折线图",
-            _ => "横向柱状图"
-        };
-        DashboardStatusText = rows.Count == 0
-            ? $"暂无可统计消息。当前维度：按{dimensionText}。"
-            : $"按{dimensionText}统计最近 {messages.Count} 条入库消息，使用{chartTypeText}显示前 {rows.Count} 项。";
+            var dimensionText = dimension switch
+            {
+                "time" => "时间",
+                "chat" => "群名",
+                _ => "项目"
+            };
+            var chartTypeText = chartType switch
+            {
+                "pie" => "环形占比图",
+                "line" => "趋势折线图",
+                _ => "横向柱状图"
+            };
+            var status = rows.Count == 0
+                ? $"暂无可统计消息。当前维度：按{dimensionText}。"
+                : $"按{dimensionText}统计最近 {messages.Count} 条入库消息，使用{chartTypeText}显示前 {rows.Count} 项。";
+            return new DashboardSnapshot(messages.Take(100).ToArray(), rows, status);
+        });
+
+    private void ApplyDashboardSnapshot(DashboardSnapshot snapshot)
+    {
+        Replace(DashboardChartRows, snapshot.Rows);
+        DashboardStatusText = snapshot.StatusText;
     }
 
     private string ReadSelectedDashboardDimension()
@@ -991,7 +1077,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
 
             SummaryText = "正在从受保护缓存恢复微信 DB Key...";
-            var initialized = await _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None);
+            var initialized = await Task.Run(
+                () => _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None));
             if (!initialized)
             {
                 var error = _readerService.LastError ?? "未知错误";
@@ -1006,9 +1093,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _wechatMessagePageSize = ReadSelectedWeChatMessagePageSize();
         var safePage = Math.Max(1, pageNumber);
         WeChatMessageStatusText = $"正在读取今天微信消息第 {safePage} 页，每页 {_wechatMessagePageSize} 条...";
-        var page = await _readerService.ReadMessagesAsync(
-            new WeChatLocalMessageReadOptions(DateTime.Today, safePage, _wechatMessagePageSize),
-            CancellationToken.None);
+        var readOptions = new WeChatLocalMessageReadOptions(DateTime.Today, safePage, _wechatMessagePageSize);
+        var page = await Task.Run(
+            () => _readerService.ReadMessagesAsync(readOptions, CancellationToken.None));
         if (page is null)
         {
             var error = _readerService.LastError ?? "未知错误";
@@ -1026,6 +1113,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _wechatMessagePageNumber = page.PageNumber;
         _wechatMessageTotalCount = page.TotalCount;
+        _wechatMessagesLoaded = true;
 
         // 将本页读取到的微信消息同步入库：去重持久化，并为 @我 的消息自动创建待办。
         // 复用采集管线的"去重 -> 分类 -> 评分 -> 建待办"流程，SourceMessageKey 去重避免重复建待办。
@@ -1035,18 +1123,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         int syncedPersisted = 0;
         if (page.Messages.Count > 0)
         {
-            await _captureSemaphore.WaitAsync(CancellationToken.None);
-            try
+            var syncPipeline = CreateCapturePipeline();
+            var syncResult = await Task.Run(async () =>
             {
-                var syncPipeline = CreateCapturePipeline();
-                var syncResult = await syncPipeline.ProcessAsync(page.Messages, CancellationToken.None);
-                syncedPersisted = syncResult.PersistedCount;
-                syncedTodos = syncResult.CreatedTodoCount;
-            }
-            finally
-            {
-                _captureSemaphore.Release();
-            }
+                await _captureSemaphore.WaitAsync(CancellationToken.None);
+                try
+                {
+                    return await syncPipeline.ProcessAsync(page.Messages, CancellationToken.None);
+                }
+                finally
+                {
+                    _captureSemaphore.Release();
+                }
+            });
+            syncedPersisted = syncResult.PersistedCount;
+            syncedTodos = syncResult.CreatedTodoCount;
         }
 
         // 按关注群过滤消息（若配置了关注群）
@@ -1204,31 +1295,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task LoadCaptureSourceSettingsAsync()
     {
-        await _settingsRepository.MigrateKindAsync(
-            source: "WeChat",
-            oldKind: "WeChatLocalCommand",
-            newKind: CaptureSourceKind.WeChatLocalDatabase.ToString(),
-            newDisplayName: "微信本地数据库",
-            newLocation: "原生 C#（只读本地数据库）",
-            CancellationToken.None);
-        var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
-        var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
-
-        var rows = new List<CaptureSourceSettingRow>();
-        foreach (var source in defaultSources)
+        var rows = await Task.Run(async () =>
         {
-            var saved = savedSettings.FirstOrDefault(s =>
-                s.Source == source.Source && s.Kind == source.Kind.ToString());
-
-            rows.Add(new CaptureSourceSettingRow
+            await _settingsRepository.MigrateKindAsync(
+                source: "WeChat",
+                oldKind: "WeChatLocalCommand",
+                newKind: CaptureSourceKind.WeChatLocalDatabase.ToString(),
+                newDisplayName: "微信本地数据库",
+                newLocation: "原生 C#（只读本地数据库）",
+                CancellationToken.None);
+            var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
+            var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
+            return defaultSources.Select(source =>
             {
-                Source = source.Source,
-                DisplayName = source.DisplayName,
-                Kind = source.Kind.ToString(),
-                Location = source.Location,
-                IsEnabled = saved?.IsEnabled ?? source.IsEnabled
-            });
-        }
+                var saved = savedSettings.FirstOrDefault(setting =>
+                    setting.Source == source.Source && setting.Kind == source.Kind.ToString());
+                return new CaptureSourceSettingRow
+                {
+                    Source = source.Source,
+                    DisplayName = source.DisplayName,
+                    Kind = source.Kind.ToString(),
+                    Location = source.Location,
+                    IsEnabled = saved?.IsEnabled ?? source.IsEnabled
+                };
+            }).ToArray();
+        });
 
         Replace(CaptureSourceSettings, rows);
     }
@@ -1239,16 +1330,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task LoadUserAliasesAsync()
     {
-        var aliases = await _aliasRepository.GetAllAsync(CancellationToken.None);
-        if (aliases.Count == 0)
+        var aliases = await Task.Run(async () =>
         {
+            var storedAliases = await _aliasRepository.GetAllAsync(CancellationToken.None);
+            if (storedAliases.Count > 0)
+            {
+                return storedAliases;
+            }
+
             var seeded = new List<UserAlias>();
             foreach (var alias in DefaultMentionAliases.All)
             {
                 seeded.Add(await _aliasRepository.SaveAsync(alias, CancellationToken.None));
             }
-            aliases = seeded;
-        }
+            return (IReadOnlyList<UserAlias>)seeded;
+        });
 
         _currentAliases = aliases.Select(alias => alias.Alias).ToArray();
         Replace(Aliases, aliases.Select(alias => new UserAliasRow(alias.Id, alias.Alias)));
@@ -1259,9 +1355,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task LoadFollowedChatsAsync()
     {
-        var chats = await _followedChatRepository.GetAllAsync(CancellationToken.None);
+        var snapshot = await Task.Run(async () =>
+        {
+            var chatsTask = _followedChatRepository.GetAllAsync(CancellationToken.None);
+            var modeTask = _followedChatRepository.GetFilterModeAsync(CancellationToken.None);
+            await Task.WhenAll(chatsTask, modeTask);
+            return (Chats: chatsTask.Result, Mode: modeTask.Result);
+        });
+        var chats = snapshot.Chats;
         _currentFollowedChats = chats.Select(c => c.ChatName).ToArray();
-        _followedChatFilterMode = await _followedChatRepository.GetFilterModeAsync(CancellationToken.None);
+        _followedChatFilterMode = snapshot.Mode;
         Replace(FollowedChats, chats.Select(c => new FollowedChatRow(c.Id, c.ChatName)));
         if (FollowedChatFilterModeCheckBox is not null)
         {
@@ -1327,22 +1430,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>加载项目及其关键字，并为旧项目补充以项目名为关键字的兼容项。</summary>
     private async Task LoadFollowedProjectsAsync()
     {
-        var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
-        var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
-        var addedDefaultKeyword = false;
-        foreach (var project in projects.Where(project => keywords.All(keyword => keyword.ProjectId != project.Id)))
+        var snapshot = await Task.Run(async () =>
         {
-            await _followedProjectKeywordRepository.SaveAsync(project.Id, project.ProjectName, CancellationToken.None);
-            addedDefaultKeyword = true;
-        }
-        if (addedDefaultKeyword)
-        {
-            keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
-        }
+            var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+            var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+            var addedDefaultKeyword = false;
+            foreach (var project in projects.Where(project => keywords.All(keyword => keyword.ProjectId != project.Id)))
+            {
+                await _followedProjectKeywordRepository.SaveAsync(project.Id, project.ProjectName, CancellationToken.None);
+                addedDefaultKeyword = true;
+            }
+            if (addedDefaultKeyword)
+            {
+                keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+            }
+            return (Projects: projects, Keywords: keywords);
+        });
+        var projects = snapshot.Projects;
+        var keywords = snapshot.Keywords;
 
         _currentFollowedProjects = projects.Select(project => project.ProjectName).ToArray();
         _currentFollowedProjectKeywords = keywords;
-        Replace(FollowedProjects, projects.Select(project => new FollowedProjectRow(project.Id, project.ProjectName)));
+        Replace(FollowedProjects, projects.Select(project => new FollowedProjectRow(project.Id, project.ProjectName, project.Color)));
         Replace(FollowedProjectKeywords, keywords.Select(keyword => new FollowedProjectKeywordRow(keyword.Id, keyword.ProjectId, keyword.ProjectName, keyword.Keyword)));
     }
 
@@ -1356,13 +1465,71 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        var project = await _followedProjectRepository.SaveAsync(projectName, CancellationToken.None);
+        var color = NewFollowedProjectColorComboBox?.SelectedItem is ProjectColorOption selectedColor
+            ? selectedColor.Color
+            : ProjectColorPolicy.DefaultColor;
+        var project = await _followedProjectRepository.SaveAsync(projectName, color, CancellationToken.None);
         await _followedProjectKeywordRepository.SaveAsync(project.Id, projectName, CancellationToken.None);
         if (NewFollowedProjectTextBox is not null) NewFollowedProjectTextBox.Text = "";
         await LoadFollowedProjectsAsync();
         ProjectKeywordProjectComboBox.SelectedValue = project.Id;
         await LoadProjectDashboardAsync();
         SummaryText = $"已添加项目「{projectName}」，可继续为它添加多个关键字。";
+    }
+
+    private async void FollowedProjectColorComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox comboBox ||
+            comboBox.DataContext is not FollowedProjectRow row ||
+            comboBox.SelectedItem is not ProjectColorOption selectedColor ||
+            string.Equals(row.Color, selectedColor.Color, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var originalColor = row.Color;
+        var selectedKeywordProjectId = ProjectKeywordProjectComboBox?.SelectedValue is long projectId
+            ? projectId
+            : (long?)null;
+        comboBox.IsEnabled = false;
+        try
+        {
+            var outcome = await _followedProjectRepository.UpdateColorAsync(
+                row.Id,
+                selectedColor.Color,
+                CancellationToken.None);
+            if (outcome == UpdateFollowedProjectColorOutcome.Missing)
+            {
+                await LoadFollowedProjectsAsync();
+                if (selectedKeywordProjectId.HasValue && ProjectKeywordProjectComboBox is { } missingProjectComboBox)
+                {
+                    missingProjectComboBox.SelectedValue = selectedKeywordProjectId.Value;
+                }
+                SummaryText = $"项目「{row.ProjectName}」已不存在，颜色未保存，项目列表已刷新。";
+                return;
+            }
+
+            await LoadFollowedProjectsAsync();
+            if (selectedKeywordProjectId.HasValue && ProjectKeywordProjectComboBox is { } keywordProjectComboBox)
+            {
+                keywordProjectComboBox.SelectedValue = selectedKeywordProjectId.Value;
+            }
+            await Task.WhenAll(
+                TodoFeature.Workbench.RefreshAsync(),
+                ScheduleOverview.RefreshAsync());
+            SummaryText = outcome == UpdateFollowedProjectColorOutcome.Updated
+                ? $"已将项目「{row.ProjectName}」的颜色更新为{selectedColor.Name}。"
+                : $"项目「{row.ProjectName}」的颜色未变化。";
+        }
+        catch (Exception)
+        {
+            comboBox.SelectedValue = originalColor;
+            SummaryText = $"项目「{row.ProjectName}」颜色保存失败，已恢复原颜色。";
+        }
+        finally
+        {
+            comboBox.IsEnabled = true;
+        }
     }
 
     /// <summary>删除项目以及它关联的所有关键字。</summary>
@@ -1377,6 +1544,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _followedProjectKeywordRepository.DeleteByProjectIdAsync(row.Id, CancellationToken.None);
         await _followedProjectRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedProjectsAsync();
+        await TodoFeature.Workbench.RefreshAsync();
+        await ScheduleOverview.RefreshAsync();
         await LoadProjectDashboardAsync();
         SummaryText = $"已删除项目「{row.ProjectName}」及其关键字。";
     }
@@ -1428,12 +1597,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>按最长关键字优先匹配群名和消息正文，返回归属项目名称。</summary>
     private string MatchFollowedProject(Message message)
     {
-        var match = _currentFollowedProjectKeywords
-            .Where(keyword => message.ChatName.Contains(keyword.Keyword, StringComparison.OrdinalIgnoreCase)
-                || message.Content.Contains(keyword.Keyword, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(keyword => keyword.Keyword.Length)
-            .ThenBy(keyword => keyword.ProjectName, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+        var match = FollowedProjectMatcher.Match(message, _currentFollowedProjectKeywords);
         return match?.ProjectName ?? "";
     }
 
@@ -1517,7 +1681,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             new UrgencyRanker(
                 priorityContacts: new[] { "王经理", "赵经理" },
-                priorityProjectIds: new[] { 1L, 2L }));
+                priorityProjectIds: new[] { 1L, 2L }),
+            message => FollowedProjectMatcher.Match(message, _currentFollowedProjectKeywords)?.ProjectId);
     }
 
     /// <summary>
@@ -1887,18 +2052,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         };
         return new ProjectClassifier(configuredRules.Concat(defaultRules));
     }
-    /// <summary>根据项目 ID 返回项目名称，未匹配返回"未分类"。</summary>
-    private static string ProjectName(long? projectId)
-    {
-        return projectId switch
-        {
-            1 => "CRM升级",
-            2 => "支付平台",
-            3 => "数据中台",
-            _ => "未分类"
-        };
-    }
-
     /// <summary>清空集合并依次追加新项，用于 ObservableCollection 的批量替换。</summary>
     private static void Replace<T>(ObservableCollection<T> collection, IEnumerable<T> items)
     {
@@ -1990,6 +2143,11 @@ public sealed record DashboardChartRow(string Label, int Count, string CountText
 
 internal sealed record DashboardAggregate(string Label, int Count, string Detail);
 
+internal sealed record DashboardSnapshot(
+    IReadOnlyList<Message> RecentMessages,
+    IReadOnlyList<DashboardChartRow> Rows,
+    string StatusText);
+
 /// <summary>采集诊断行数据：展示各采集适配器的状态与最近成功时间。</summary>
 public sealed record DiagnosticRow(string Adapter, string Status, string LastSuccessAt, string Detail);
 
@@ -2018,5 +2176,5 @@ public sealed record UserAliasRow(long Id, string Alias);
 public sealed record FollowedChatRow(long Id, string ChatName);
 
 /// <summary>关注项目行数据：用于 UI 展示与删除操作。</summary>
-public sealed record FollowedProjectRow(long Id, string ProjectName);
+public sealed record FollowedProjectRow(long Id, string ProjectName, string Color);
 public sealed record FollowedProjectKeywordRow(long Id, long ProjectId, string ProjectName, string Keyword);

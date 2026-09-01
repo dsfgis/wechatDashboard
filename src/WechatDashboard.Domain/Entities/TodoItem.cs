@@ -35,6 +35,9 @@ public sealed record TodoItem(
     /// <summary>用户自定义待办分组；为空表示未分组。</summary>
     public long? GroupId { get; init; }
 
+    /// <summary>用户可见的关注项目关联；与历史分类 ProjectId 分离。</summary>
+    public long? ManagedProjectId { get; init; }
+
     /// <summary>是否固定显示在活动待办列表顶部。</summary>
     public bool IsPinned { get; init; }
 }

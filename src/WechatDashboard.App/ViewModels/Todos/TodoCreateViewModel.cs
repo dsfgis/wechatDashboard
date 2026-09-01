@@ -1,23 +1,24 @@
 using System.Collections.ObjectModel;
 using WechatDashboard.App.Presentation;
 using WechatDashboard.App.Services;
+using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.App.ViewModels.Todos;
 
-public sealed record TodoGroupOption(long? Id, string Name, string Color)
+public sealed record TodoProjectOption(long? Id, string Name, string Color)
 {
-    public static TodoGroupOption Ungrouped { get; } = new(null, "未分组", TodoGroupColorPolicy.DefaultColor);
+    public static TodoProjectOption Unassigned { get; } = new(null, "未指定项目", ProjectColorPolicy.DefaultColor);
 }
 
-public sealed record TodoGroupColorOption(string Name, string Color);
+public sealed record ProjectColorOption(string Name, string Color);
 
 public sealed class TodoCreateViewModel : ObservableObject
 {
     private readonly TodoApplicationService _todos;
-    private readonly TodoGroupApplicationService _groups;
+    private readonly IFollowedProjectRepository _projects;
     private readonly IClock _clock;
     private readonly ITodoDialogService _dialogs;
     private readonly Func<Task> _onCreated;
@@ -31,54 +32,38 @@ public sealed class TodoCreateViewModel : ObservableObject
     private DateTime? _reminderDate;
     private int _reminderHour;
     private int _reminderMinute;
-    private TodoGroupOption _selectedGroup = TodoGroupOption.Ungrouped;
-    private TodoGroupColorOption _selectedNewGroupColor;
-    private string _newGroupName = "";
+    private TodoProjectOption _selectedProject = TodoProjectOption.Unassigned;
     private string _statusText = "";
     private bool _isSaved;
 
     public TodoCreateViewModel(
         TodoApplicationService todos,
-        TodoGroupApplicationService groups,
+        IFollowedProjectRepository projects,
         IClock clock,
         ITodoDialogService dialogs,
         Func<Task> onCreated)
     {
         _todos = todos;
-        _groups = groups;
+        _projects = projects;
         _clock = clock;
         _dialogs = dialogs;
         _onCreated = onCreated;
-        NewGroupColors =
-        [
-            new("灰色", TodoGroupColorPolicy.DefaultColor),
-            new("红色", TodoGroupColorPolicy.Red),
-            new("橙色", TodoGroupColorPolicy.Orange),
-            new("绿色", TodoGroupColorPolicy.Green),
-            new("蓝色", TodoGroupColorPolicy.Blue),
-            new("紫色", TodoGroupColorPolicy.Purple),
-            new("粉色", TodoGroupColorPolicy.Pink)
-        ];
-        _selectedNewGroupColor = NewGroupColors[0];
         var reminder = _clock.Now.LocalDateTime.AddMinutes(5);
         _reminderDate = reminder.Date;
         _reminderHour = reminder.Hour;
         _reminderMinute = reminder.Minute;
         SaveCommand = new AsyncRelayCommand(_ => SaveAsync(), _ => !_isSaved);
-        AddGroupCommand = new AsyncRelayCommand(_ => AddGroupAsync());
         CancelCommand = new RelayCommand(_ => RequestClose?.Invoke(this, EventArgs.Empty));
     }
 
     public event EventHandler? RequestClose;
-    public ObservableCollection<TodoGroupOption> GroupOptions { get; } = new();
+    public ObservableCollection<TodoProjectOption> ProjectOptions { get; } = new();
     public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
-    public IReadOnlyList<TodoGroupColorOption> NewGroupColors { get; }
     public IReadOnlyList<int> DueHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> DueMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
-    public AsyncRelayCommand AddGroupCommand { get; }
     public RelayCommand CancelCommand { get; }
 
     public string Title { get => _title; set => SetProperty(ref _title, value); }
@@ -91,55 +76,31 @@ public sealed class TodoCreateViewModel : ObservableObject
     public DateTime? ReminderDate { get => _reminderDate; set => SetProperty(ref _reminderDate, value); }
     public int ReminderHour { get => _reminderHour; set => SetProperty(ref _reminderHour, value); }
     public int ReminderMinute { get => _reminderMinute; set => SetProperty(ref _reminderMinute, value); }
-    public TodoGroupOption SelectedGroup { get => _selectedGroup; set => SetProperty(ref _selectedGroup, value); }
-    public TodoGroupColorOption SelectedNewGroupColor { get => _selectedNewGroupColor; set => SetProperty(ref _selectedNewGroupColor, value); }
-    public string NewGroupName { get => _newGroupName; set => SetProperty(ref _newGroupName, value); }
+    public TodoProjectOption SelectedProject { get => _selectedProject; set => SetProperty(ref _selectedProject, value); }
     public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
 
-    public async Task LoadGroupsAsync()
+    public async Task LoadProjectsAsync()
     {
         try
         {
-            var selectedId = SelectedGroup.Id;
-            var groups = await _groups.GetAllAsync(CancellationToken.None);
-            GroupOptions.Clear();
-            GroupOptions.Add(TodoGroupOption.Ungrouped);
-            foreach (var group in groups)
+            var selectedId = SelectedProject.Id;
+            var projects = await _projects.GetAllAsync(CancellationToken.None);
+            ProjectOptions.Clear();
+            ProjectOptions.Add(TodoProjectOption.Unassigned);
+            foreach (var project in projects)
             {
-                GroupOptions.Add(new TodoGroupOption(group.Id, group.Name, group.Color));
+                ProjectOptions.Add(new TodoProjectOption(project.Id, project.ProjectName, project.Color));
             }
 
-            SelectedGroup = GroupOptions.FirstOrDefault(item => item.Id == selectedId) ?? TodoGroupOption.Ungrouped;
+            SelectedProject = ProjectOptions.FirstOrDefault(item => item.Id == selectedId) ?? TodoProjectOption.Unassigned;
             StatusText = "";
         }
         catch (Exception)
         {
-            GroupOptions.Clear();
-            GroupOptions.Add(TodoGroupOption.Ungrouped);
-            SelectedGroup = TodoGroupOption.Ungrouped;
-            StatusText = "分组加载失败，请稍后重试；这不是“当前没有分组”。";
-        }
-    }
-
-    private async Task AddGroupAsync()
-    {
-        try
-        {
-            var result = await _groups.CreateAsync(NewGroupName, SelectedNewGroupColor.Color, CancellationToken.None);
-            await LoadGroupsAsync();
-            SelectedGroup = GroupOptions.First(item => item.Id == result.Group.Id);
-            NewGroupName = "";
-            StatusText = result.Outcome == CreateTodoGroupOutcome.Created
-                ? $"已新增分组“{result.Group.Name}”。"
-                : $"分组“{result.Group.Name}”已存在，已为你选中。";
-        }
-        catch (ArgumentException exception)
-        {
-            StatusText = exception.Message;
-        }
-        catch (Exception)
-        {
-            StatusText = "新增分组失败，请稍后重试。";
+            ProjectOptions.Clear();
+            ProjectOptions.Add(TodoProjectOption.Unassigned);
+            SelectedProject = TodoProjectOption.Unassigned;
+            StatusText = "项目加载失败，请稍后重试；这不是“当前没有项目”。";
         }
     }
 
@@ -172,12 +133,13 @@ public sealed class TodoCreateViewModel : ObservableObject
                     Priority,
                     dueAt,
                     reminderAt,
-                    SelectedGroup.Id),
+                    GroupId: null,
+                    ManagedProjectId: SelectedProject.Id),
                 CancellationToken.None);
-            if (result.Outcome == CreateManualTodoOutcome.GroupMissing)
+            if (result.Outcome == CreateManualTodoOutcome.ProjectMissing)
             {
-                await LoadGroupsAsync();
-                StatusText = "所选分组已不存在，请重新选择后保存。";
+                await LoadProjectsAsync();
+                StatusText = "所选项目已不存在，请重新选择后保存。";
                 return;
             }
 
@@ -212,9 +174,7 @@ public sealed class TodoCreateViewModel : ObservableObject
             return false;
         }
 
-        var localTime = DateTime.SpecifyKind(
-            date.Date.AddHours(DueHour).AddMinutes(DueMinute),
-            DateTimeKind.Unspecified);
+        var localTime = DateTime.SpecifyKind(date.Date.AddHours(DueHour).AddMinutes(DueMinute), DateTimeKind.Unspecified);
         if (TimeZoneInfo.Local.IsInvalidTime(localTime))
         {
             result = null;

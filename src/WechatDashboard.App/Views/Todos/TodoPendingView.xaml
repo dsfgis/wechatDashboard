@@ -30,7 +30,7 @@
                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
                         <TextBlock Margin="0,4,0,0" Foreground="#4B5563" TextTrimming="CharacterEllipsis">
-                            <Run Text="分组 "/><Run Text="{Binding GroupName, Mode=OneWay}" Foreground="{Binding GroupColor, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="　截止 "/><Run Text="{Binding DueAt, Mode=OneWay}"/><Run Text="　提醒 "/><Run Text="{Binding ReminderAt, Mode=OneWay}"/>
+                            <Run Text="项目 "/><Run Text="{Binding ProjectName, Mode=OneWay}" Foreground="{Binding ProjectColor, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="　截止 "/><Run Text="{Binding DueAt, Mode=OneWay}"/><Run Text="　提醒 "/><Run Text="{Binding ReminderAt, Mode=OneWay}"/>
                         </TextBlock>
                         <TextBlock Margin="0,3,0,0" Foreground="#6B7280" TextTrimming="CharacterEllipsis">
                             <Run Text="{Binding Source, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SourceChatName, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding SenderName, Mode=OneWay}"/>

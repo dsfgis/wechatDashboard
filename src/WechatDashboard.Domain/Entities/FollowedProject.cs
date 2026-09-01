@@ -13,4 +13,8 @@ public sealed record FollowedProject(
     long Id,
     string ProjectName,
     bool IsActive,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt)
+{
+    /// <summary>项目在待办及设置界面中的固定色板颜色。</summary>
+    public string Color { get; init; } = "#4B5563";
+}

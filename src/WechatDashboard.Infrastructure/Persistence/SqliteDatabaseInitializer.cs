@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Text;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 
@@ -56,6 +57,7 @@ public sealed class SqliteDatabaseInitializer
             checksum: "todo-group-colors-v1",
             sql: TodoGroupColorsMigrationSql,
             cancellationToken);
+        await ApplyProjectAssignmentMigrationAsync(connection, cancellationToken);
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -104,6 +106,238 @@ public sealed class SqliteDatabaseInitializer
         await record.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
+
+    private static async Task ApplyProjectAssignmentMigrationAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const int version = 5;
+        const string name = "todo-project-assignment";
+        const string checksum = "todo-project-assignment-v1";
+
+        await using var check = connection.CreateCommand();
+        check.CommandText = "SELECT checksum FROM schema_migrations WHERE version = $version;";
+        check.Parameters.AddWithValue("$version", version);
+        var existingChecksum = await check.ExecuteScalarAsync(cancellationToken) as string;
+        if (existingChecksum is not null)
+        {
+            if (!string.Equals(existingChecksum, checksum, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Schema migration {version} checksum mismatch.");
+            }
+
+            return;
+        }
+
+        await using var transaction = connection.BeginTransaction();
+        try
+        {
+            await EnsureColumnAsync(
+                connection,
+                transaction,
+                "followed_projects",
+                "color",
+                "TEXT NOT NULL DEFAULT '#4B5563'",
+                cancellationToken);
+            await EnsureColumnAsync(
+                connection,
+                transaction,
+                "todo_items",
+                "managed_project_id",
+                "INTEGER NULL REFERENCES followed_projects(id) ON DELETE SET NULL",
+                cancellationToken);
+            await ExecuteAsync(connection, transaction, TodoProjectAssignmentMigrationSql, cancellationToken);
+
+            var followedProjects = await ReadNamedIdsAsync(
+                connection,
+                transaction,
+                "SELECT id, project_name FROM followed_projects;",
+                cancellationToken);
+            var projectsByName = followedProjects
+                .GroupBy(item => NormalizeName(item.Name), StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Select(item => item.Id).ToArray(), StringComparer.Ordinal);
+            var groups = await ReadNamedIdsAsync(
+                connection,
+                transaction,
+                "SELECT id, name FROM todo_groups;",
+                cancellationToken);
+
+            var mappedGroupTodos = 0;
+            var nameConflicts = 0;
+            foreach (var group in groups)
+            {
+                if (!projectsByName.TryGetValue(NormalizeName(group.Name), out var matchingProjectIds))
+                {
+                    continue;
+                }
+
+                if (matchingProjectIds.Length != 1)
+                {
+                    nameConflicts++;
+                    continue;
+                }
+
+                mappedGroupTodos += await AssignProjectAsync(
+                    connection,
+                    transaction,
+                    "group_id = $sourceId",
+                    group.Id,
+                    matchingProjectIds[0],
+                    cancellationToken);
+            }
+
+            var legacyProjects = await ReadNamedIdsAsync(
+                connection,
+                transaction,
+                "SELECT id, name FROM projects;",
+                cancellationToken);
+            var mappedLegacyProjectTodos = 0;
+            foreach (var legacyProject in legacyProjects)
+            {
+                if (!projectsByName.TryGetValue(NormalizeName(legacyProject.Name), out var matchingProjectIds))
+                {
+                    continue;
+                }
+
+                if (matchingProjectIds.Length != 1)
+                {
+                    nameConflicts++;
+                    continue;
+                }
+
+                mappedLegacyProjectTodos += await AssignProjectAsync(
+                    connection,
+                    transaction,
+                    "group_id IS NULL AND project_id = $sourceId",
+                    legacyProject.Id,
+                    matchingProjectIds[0],
+                    cancellationToken);
+            }
+
+            var unmatchedGroupTodos = await CountAsync(
+                connection,
+                transaction,
+                "SELECT COUNT(*) FROM todo_items WHERE group_id IS NOT NULL AND managed_project_id IS NULL;",
+                cancellationToken);
+
+            await using var report = connection.CreateCommand();
+            report.Transaction = transaction;
+            report.CommandText = """
+                INSERT INTO schema_migration_reports (
+                    version, mapped_group_todos, unmatched_group_todos,
+                    mapped_legacy_project_todos, name_conflicts, created_at)
+                VALUES ($version, $mappedGroups, $unmatchedGroups, $mappedLegacy, $conflicts, $createdAt);
+                """;
+            report.Parameters.AddWithValue("$version", version);
+            report.Parameters.AddWithValue("$mappedGroups", mappedGroupTodos);
+            report.Parameters.AddWithValue("$unmatchedGroups", unmatchedGroupTodos);
+            report.Parameters.AddWithValue("$mappedLegacy", mappedLegacyProjectTodos);
+            report.Parameters.AddWithValue("$conflicts", nameConflicts);
+            report.Parameters.AddWithValue("$createdAt", DateTimeOffset.UtcNow.ToString("O"));
+            await report.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var record = connection.CreateCommand();
+            record.Transaction = transaction;
+            record.CommandText = "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES ($version, $name, $checksum, $appliedAt);";
+            record.Parameters.AddWithValue("$version", version);
+            record.Parameters.AddWithValue("$name", name);
+            record.Parameters.AddWithValue("$checksum", checksum);
+            record.Parameters.AddWithValue("$appliedAt", DateTimeOffset.UtcNow.ToString("O"));
+            await record.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    private static async Task ExecuteAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task EnsureColumnAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string tableName,
+        string columnName,
+        string definition,
+        CancellationToken cancellationToken)
+    {
+        await using var check = connection.CreateCommand();
+        check.Transaction = transaction;
+        check.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{tableName}') WHERE name = $columnName;";
+        check.Parameters.AddWithValue("$columnName", columnName);
+        if (Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken)) > 0)
+        {
+            return;
+        }
+
+        await ExecuteAsync(
+            connection,
+            transaction,
+            $"ALTER TABLE {tableName} ADD COLUMN {columnName} {definition};",
+            cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<(long Id, string Name)>> ReadNamedIdsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        var rows = new List<(long Id, string Name)>();
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add((reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return rows;
+    }
+
+    private static async Task<int> AssignProjectAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sourcePredicate,
+        long sourceId,
+        long projectId,
+        CancellationToken cancellationToken)
+    {
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = $"UPDATE todo_items SET managed_project_id = $projectId WHERE managed_project_id IS NULL AND {sourcePredicate};";
+        update.Parameters.AddWithValue("$projectId", projectId);
+        update.Parameters.AddWithValue("$sourceId", sourceId);
+        return await update.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<int> CountAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+    }
+
+    private static string NormalizeName(string value) =>
+        value.Trim().Normalize(NormalizationForm.FormC).ToUpperInvariant();
 
     private const string MigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -160,6 +394,20 @@ public sealed class SqliteDatabaseInitializer
     private const string TodoGroupColorsMigrationSql = """
         ALTER TABLE todo_groups
             ADD COLUMN color TEXT NOT NULL DEFAULT '#4B5563';
+        """;
+
+    private const string TodoProjectAssignmentMigrationSql = """
+        CREATE INDEX IF NOT EXISTS idx_todo_items_managed_project_id
+            ON todo_items(managed_project_id);
+
+        CREATE TABLE IF NOT EXISTS schema_migration_reports (
+            version INTEGER PRIMARY KEY,
+            mapped_group_todos INTEGER NOT NULL,
+            unmatched_group_todos INTEGER NOT NULL,
+            mapped_legacy_project_todos INTEGER NOT NULL,
+            name_conflicts INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """;
 
     /// <summary>

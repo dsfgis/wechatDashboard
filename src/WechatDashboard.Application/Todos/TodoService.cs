@@ -27,7 +27,8 @@ public static class TodoService
         ClassificationResult classification,
         UrgencyScore urgency,
         DateTimeOffset now,
-        TimeZoneInfo timeZone)
+        TimeZoneInfo timeZone,
+        long? managedProjectId = null)
     {
         var dueAt = new TodoDueBucketPolicy(timeZone).EndOfToday(now);
         return TodoFactory.CreateFromMessage(
@@ -36,6 +37,7 @@ public static class TodoService
             urgency.Priority,
             now,
             dueAt: dueAt,
-            isAutoCreated: true);
+            isAutoCreated: true,
+            managedProjectId: managedProjectId);
     }
 }

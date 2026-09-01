@@ -23,7 +23,7 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, project_name, is_active, created_at
+            SELECT id, project_name, is_active, created_at, color
             FROM followed_projects
             WHERE is_active = 1
             ORDER BY id;
@@ -42,26 +42,31 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
     /// <summary>
     /// 保存关注项目：存在则重新激活，不存在则新增。返回最新状态的实体。
     /// </summary>
-    public async Task<FollowedProject> SaveAsync(string projectName, CancellationToken cancellationToken)
+    public Task<FollowedProject> SaveAsync(string projectName, CancellationToken cancellationToken) =>
+        SaveAsync(projectName, ProjectColorPolicy.DefaultColor, cancellationToken);
+
+    public async Task<FollowedProject> SaveAsync(string projectName, string color, CancellationToken cancellationToken)
     {
         var normalized = projectName.Trim();
+        var normalizedColor = ProjectColorPolicy.Normalize(color);
         var now = DateTimeOffset.Now;
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
         await using var command = connection.CreateCommand();
         // 利用 ON CONFLICT 处理重复项目名：重新激活
         command.CommandText = """
-            INSERT INTO followed_projects (project_name, is_active, created_at)
-            VALUES ($projectName, 1, $createdAt)
+            INSERT INTO followed_projects (project_name, is_active, created_at, color)
+            VALUES ($projectName, 1, $createdAt, $color)
             ON CONFLICT(project_name)
             DO UPDATE SET is_active = 1;
             """;
         command.Parameters.AddWithValue("$projectName", normalized);
         command.Parameters.AddWithValue("$createdAt", now.ToString("O"));
+        command.Parameters.AddWithValue("$color", normalizedColor);
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         // 回读最新状态
         command.Parameters.Clear();
-        command.CommandText = "SELECT id, project_name, is_active, created_at FROM followed_projects WHERE project_name = $projectName;";
+        command.CommandText = "SELECT id, project_name, is_active, created_at, color FROM followed_projects WHERE project_name = $projectName;";
         command.Parameters.AddWithValue("$projectName", normalized);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
@@ -69,7 +74,53 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
             return ReadProject(reader);
         }
 
-        return new FollowedProject(0, normalized, true, now);
+        return new FollowedProject(0, normalized, true, now) { Color = normalizedColor };
+    }
+
+    public async Task<UpdateFollowedProjectColorOutcome> UpdateColorAsync(
+        long id,
+        string color,
+        CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return UpdateFollowedProjectColorOutcome.Missing;
+        }
+
+        var normalizedColor = ProjectColorPolicy.Normalize(color);
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT color FROM followed_projects WHERE id = $id AND is_active = 1;";
+        read.Parameters.AddWithValue("$id", id);
+        var currentColor = await read.ExecuteScalarAsync(cancellationToken) as string;
+        if (currentColor is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectColorOutcome.Missing;
+        }
+
+        if (string.Equals(currentColor, normalizedColor, StringComparison.OrdinalIgnoreCase))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectColorOutcome.Unchanged;
+        }
+
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "UPDATE followed_projects SET color = $color WHERE id = $id AND is_active = 1;";
+        update.Parameters.AddWithValue("$color", normalizedColor);
+        update.Parameters.AddWithValue("$id", id);
+        var affected = await update.ExecuteNonQueryAsync(cancellationToken);
+        if (affected != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectColorOutcome.Missing;
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return UpdateFollowedProjectColorOutcome.Updated;
     }
 
     /// <summary>按 ID 物理删除关注项目。</summary>
@@ -89,6 +140,9 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
             Id: reader.GetInt64(0),
             ProjectName: reader.GetString(1),
             IsActive: reader.GetInt32(2) == 1,
-            CreatedAt: DateTimeOffset.Parse(reader.GetString(3)));
+            CreatedAt: DateTimeOffset.Parse(reader.GetString(3)))
+        {
+            Color = reader.GetString(4)
+        };
     }
 }

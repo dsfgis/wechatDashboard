@@ -26,6 +26,18 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
+        <Style x:Key="TodoCompletionCheckBoxStyle" TargetType="CheckBox">
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="ToolTip" Value="勾选后完成并转入已办" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                    <Setter Property="IsEnabled" Value="False" />
+                    <Setter Property="ToolTip" Value="该待办已办理" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
     </UserControl.Resources>
 
     <Border Background="#F7FAFC"
@@ -134,23 +146,35 @@
                                             <ItemsControl ItemsSource="{Binding PreviewTodos}">
                                                 <ItemsControl.ItemTemplate>
                                                     <DataTemplate>
-                                                        <Button Command="{Binding DataContext.OpenTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding Id}"
-                                                                Style="{StaticResource TodoTitleButtonStyle}">
-                                                            <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="11">
-                                                                <TextBlock.Style>
-                                                                    <Style TargetType="TextBlock">
-                                                                        <Setter Property="Foreground" Value="#334155" />
-                                                                        <Style.Triggers>
-                                                                            <DataTrigger Binding="{Binding IsCompleted}" Value="True">
-                                                                                <Setter Property="TextDecorations" Value="Strikethrough" />
-                                                                                <Setter Property="Foreground" Value="#94A3B8" />
-                                                                            </DataTrigger>
-                                                                        </Style.Triggers>
-                                                                    </Style>
-                                                                </TextBlock.Style>
-                                                            </TextBlock>
-                                                        </Button>
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto" />
+                                                                <ColumnDefinition Width="*" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <CheckBox Grid.Column="0"
+                                                                      IsChecked="{Binding IsCompleted, Mode=OneWay}"
+                                                                      Command="{Binding DataContext.CompleteTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                      CommandParameter="{Binding}"
+                                                                      Style="{StaticResource TodoCompletionCheckBoxStyle}" />
+                                                            <Button Grid.Column="1"
+                                                                    Command="{Binding DataContext.OpenTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                    CommandParameter="{Binding Id}"
+                                                                    Style="{StaticResource TodoTitleButtonStyle}">
+                                                                <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="11">
+                                                                    <TextBlock.Style>
+                                                                        <Style TargetType="TextBlock">
+                                                                            <Setter Property="Foreground" Value="#334155" />
+                                                                            <Style.Triggers>
+                                                                                <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                                                    <Setter Property="TextDecorations" Value="Strikethrough" />
+                                                                                    <Setter Property="Foreground" Value="#94A3B8" />
+                                                                                </DataTrigger>
+                                                                            </Style.Triggers>
+                                                                        </Style>
+                                                                    </TextBlock.Style>
+                                                                </TextBlock>
+                                                            </Button>
+                                                        </Grid>
                                                     </DataTemplate>
                                                 </ItemsControl.ItemTemplate>
                                             </ItemsControl>
@@ -204,37 +228,53 @@
                                 </ListBox.ItemContainerStyle>
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
-                                        <Button Command="{Binding DataContext.OpenTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                CommandParameter="{Binding Id}"
-                                                Style="{StaticResource TodoTitleButtonStyle}">
-                                            <Border BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="7" Padding="8" Background="#F8FAFC">
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Grid.Column="0">
-                                                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" FontWeight="SemiBold">
-                                                            <TextBlock.Style>
-                                                                <Style TargetType="TextBlock">
-                                                                    <Setter Property="Foreground" Value="#1E293B" />
-                                                                    <Style.Triggers>
-                                                                        <DataTrigger Binding="{Binding IsCompleted}" Value="True">
-                                                                            <Setter Property="TextDecorations" Value="Strikethrough" />
-                                                                            <Setter Property="Foreground" Value="#94A3B8" />
-                                                                        </DataTrigger>
-                                                                    </Style.Triggers>
-                                                                </Style>
-                                                            </TextBlock.Style>
-                                                        </TextBlock>
-                                                        <TextBlock Foreground="#64748B" FontSize="11" Margin="0,4,0,0">
-                                                            <Run Text="{Binding TimeText, Mode=OneWay}"/><Run Text="　"/><Run Text="{Binding StatusText, Mode=OneWay}"/>
-                                                        </TextBlock>
-                                                    </StackPanel>
-                                                    <TextBlock Grid.Column="1" Text="›" FontSize="20" Foreground="#64748B" VerticalAlignment="Center" Margin="8,0,0,0" />
-                                                </Grid>
-                                            </Border>
-                                        </Button>
+                                        <Border BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="7" Padding="8" Background="#F8FAFC">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <CheckBox Grid.Column="0"
+                                                          IsChecked="{Binding IsCompleted, Mode=OneWay}"
+                                                          Command="{Binding DataContext.CompleteTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                          CommandParameter="{Binding}"
+                                                          Style="{StaticResource TodoCompletionCheckBoxStyle}" />
+                                                <Button Grid.Column="1"
+                                                        Command="{Binding DataContext.OpenTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                        CommandParameter="{Binding Id}"
+                                                        Style="{StaticResource TodoTitleButtonStyle}">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <StackPanel Grid.Column="0">
+                                                            <TextBlock Text="{Binding Title}" TextWrapping="Wrap" FontWeight="SemiBold">
+                                                                <TextBlock.Style>
+                                                                    <Style TargetType="TextBlock">
+                                                                        <Setter Property="Foreground" Value="#1E293B" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                                                                <Setter Property="TextDecorations" Value="Strikethrough" />
+                                                                                <Setter Property="Foreground" Value="#94A3B8" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </TextBlock.Style>
+                                                            </TextBlock>
+                                                            <TextBlock Foreground="#64748B" FontSize="11" Margin="0,4,0,0">
+                                                                <Run Text="{Binding TimeText, Mode=OneWay}"/><Run Text="　"/><Run Text="{Binding StatusText, Mode=OneWay}"/>
+                                                            </TextBlock>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
+                                                                <Border Width="8" Height="8" CornerRadius="4" Background="{Binding ProjectColor}" Margin="0,0,5,0" VerticalAlignment="Center" />
+                                                                <TextBlock Text="{Binding ProjectName}" Foreground="{Binding ProjectColor}" FontSize="11" />
+                                                            </StackPanel>
+                                                        </StackPanel>
+                                                        <TextBlock Grid.Column="1" Text="›" FontSize="20" Foreground="#64748B" VerticalAlignment="Center" Margin="8,0,0,0" />
+                                                    </Grid>
+                                                </Button>
+                                            </Grid>
+                                        </Border>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
                             </ListBox>

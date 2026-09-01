@@ -438,16 +438,39 @@
 
                         <Separator Margin="0,16,0,12" />
                         <TextBlock Text="项目设置" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
-                        <TextBlock Text="先创建项目，再为项目添加多个关键字。群名或消息正文包含任一关键字时，消息将归入该项目。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
+                        <TextBlock Text="先为项目选择颜色并创建项目，再为项目添加多个关键字。手动待办可直接选择项目；自动待办仍按群名或消息正文中的项目关键字归属。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" TextWrapping="Wrap" />
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <TextBox x:Name="NewFollowedProjectTextBox" Width="260" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入项目名称" />
+                            <TextBox x:Name="NewFollowedProjectTextBox" Width="220" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入项目名称" />
+                            <ComboBox x:Name="NewFollowedProjectColorComboBox" Width="120" ItemsSource="{Binding ProjectColors}" SelectedIndex="0" Margin="0,0,8,0" ToolTip="选择项目颜色">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,6,0" />
+                                            <TextBlock Text="{Binding Name}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
                             <Button x:Name="AddFollowedProjectButton" Content="添加项目" Click="AddFollowedProjectButton_Click" Margin="0,0,8,0" Padding="16,4" />
                             <Button x:Name="DeleteFollowedProjectButton" Content="删除选中" Click="DeleteFollowedProjectButton_Click" Padding="16,4" />
                         </StackPanel>
                         <DataGrid x:Name="FollowedProjectsGrid" ItemsSource="{Binding FollowedProjects}" Height="130" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
-                                <DataGridTextColumn Header="项目名称" Binding="{Binding ProjectName}" Width="*" />
+                                <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" IsReadOnly="True" />
+                                <DataGridTextColumn Header="项目名称" Binding="{Binding ProjectName}" Width="*" IsReadOnly="True" />
+                                <DataGridTemplateColumn Header="颜色" Width="120">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ComboBox ItemsSource="{Binding DataContext.ProjectColors, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                      DisplayMemberPath="Name"
+                                                      SelectedValuePath="Color"
+                                                      SelectedValue="{Binding Color, Mode=OneWay}"
+                                                      SelectionChanged="FollowedProjectColorComboBox_SelectionChanged"
+                                                      ToolTip="选择后立即保存项目颜色"
+                                                      MinWidth="105" />
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                             </DataGrid.Columns>
                         </DataGrid>
 

@@ -8,6 +8,10 @@ public interface IReminderRepository
 
     Task<IReadOnlyList<TodoReminder>> GetForTodoAsync(long todoId, CancellationToken cancellationToken);
 
+    Task<IReadOnlyDictionary<long, IReadOnlyList<TodoReminder>>> GetForTodosAsync(
+        IReadOnlyCollection<long> todoIds,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<ReminderDispatchItem>> GetDueAsync(
         DateTimeOffset now,
         int limit,

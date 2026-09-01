@@ -11,7 +11,8 @@ public sealed record CreateTodoFromMessageRequest(
     long? ProjectId,
     PriorityLevel? Priority,
     DateTimeOffset? DueAt,
-    DateTimeOffset? FirstReminderAt);
+    DateTimeOffset? FirstReminderAt,
+    long? ManagedProjectId = null);
 
 public enum CreateTodoOutcome
 {
@@ -28,12 +29,14 @@ public sealed record CreateManualTodoRequest(
     PriorityLevel? Priority,
     DateTimeOffset? DueAt,
     DateTimeOffset? FirstReminderAt,
-    long? GroupId);
+    long? GroupId,
+    long? ManagedProjectId = null);
 
 public enum CreateManualTodoOutcome
 {
     Created,
-    GroupMissing
+    GroupMissing,
+    ProjectMissing
 }
 
 public sealed record CreateManualTodoResult(CreateManualTodoOutcome Outcome, TodoItem? Todo);
@@ -47,7 +50,8 @@ public sealed record UpdateTodoRequest(
     DateTimeOffset? DueAt,
     TodoStatus Status,
     DateTimeOffset ExpectedUpdatedAt,
-    long? GroupId = null);
+    long? GroupId = null,
+    long? ManagedProjectId = null);
 
 /// <summary>任意消息转 Todo 的用例服务；事务细节由工作单元实现。</summary>
 public sealed class TodoApplicationService

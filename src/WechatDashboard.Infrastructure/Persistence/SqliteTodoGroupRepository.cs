@@ -85,6 +85,30 @@ public sealed class SqliteTodoGroupRepository : ITodoGroupRepository
         }
     }
 
+    public async Task<DeleteTodoGroupOutcome> DeleteAsync(long id, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM todo_groups
+            WHERE id = $id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM todo_items
+                  WHERE group_id = $id
+              );
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        if (await command.ExecuteNonQueryAsync(cancellationToken) == 1)
+        {
+            return DeleteTodoGroupOutcome.Deleted;
+        }
+
+        return await GetByIdAsync(connection, transaction: null, id, cancellationToken) is null
+            ? DeleteTodoGroupOutcome.Missing
+            : DeleteTodoGroupOutcome.InUse;
+    }
+
     private static async Task<TodoGroup?> GetByNormalizedNameAsync(
         SqliteConnection connection,
         string normalizedName,

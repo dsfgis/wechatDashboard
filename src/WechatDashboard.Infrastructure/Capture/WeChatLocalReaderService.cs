@@ -13,6 +13,7 @@ public sealed class WeChatLocalReaderService : IAsyncDisposable
     private readonly IWeChatLocalDatabaseReader? _reader;
     private readonly Func<string?> _databaseRootLocator;
     private readonly Func<int?> _processIdLocator;
+    private readonly SemaphoreSlim _protectedRestoreGate = new(1, 1);
     private string _bootstrapRange = "30d";
     private string? _lastError;
     private bool _protectedRestoreAttempted;
@@ -84,35 +85,36 @@ public sealed class WeChatLocalReaderService : IAsyncDisposable
     /// <summary>从 Windows DPAPI CurrentUser 密文缓存恢复并验证 Key；不会启动 KeyProbe。</summary>
     public async Task<bool> TryRestoreProtectedKeyAsync(CancellationToken cancellationToken)
     {
-        if (IsInitialized)
-        {
-            _lastError = null;
-            return true;
-        }
-
-        if (_protectedRestoreAttempted)
-        {
-            _lastError ??= "微信本地数据库尚未初始化，请点击“自动提取 Key”。";
-            return false;
-        }
-
-        _protectedRestoreAttempted = true;
-
-        if (_reader is null || !_reader.IsAvailable)
-        {
-            _lastError = "原生 C# 微信读取器不可用，请检查 KeyProbe 和 wx_key.dll。";
-            return false;
-        }
-
-        var databaseRoot = _databaseRootLocator();
-        if (string.IsNullOrWhiteSpace(databaseRoot))
-        {
-            _lastError = "未找到微信 db_storage 数据目录，请确认微信已登录。";
-            return false;
-        }
-
+        await _protectedRestoreGate.WaitAsync(cancellationToken);
         try
         {
+            if (IsInitialized)
+            {
+                _lastError = null;
+                return true;
+            }
+
+            if (_protectedRestoreAttempted)
+            {
+                _lastError ??= "微信本地数据库尚未初始化，请点击“自动提取 Key”。";
+                return false;
+            }
+
+            _protectedRestoreAttempted = true;
+
+            if (_reader is null || !_reader.IsAvailable)
+            {
+                _lastError = "原生 C# 微信读取器不可用，请检查 KeyProbe 和 wx_key.dll。";
+                return false;
+            }
+
+            var databaseRoot = _databaseRootLocator();
+            if (string.IsNullOrWhiteSpace(databaseRoot))
+            {
+                _lastError = "未找到微信 db_storage 数据目录，请确认微信已登录。";
+                return false;
+            }
+
             var result = await _reader.RestoreProtectedKeyAsync(
                 new WeChatProtectedKeyRestoreRequest(databaseRoot, _bootstrapRange),
                 cancellationToken);
@@ -131,8 +133,14 @@ public sealed class WeChatLocalReaderService : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _lastError = FormatError(exception, _reader.Diagnostics);
+            _lastError = FormatError(
+                exception,
+                _reader?.Diagnostics ?? Array.Empty<WeChatReaderStageResult>());
             return false;
+        }
+        finally
+        {
+            _protectedRestoreGate.Release();
         }
     }
 
@@ -212,12 +220,20 @@ public sealed class WeChatLocalReaderService : IAsyncDisposable
     /// <summary>显式重置 reader：清除内存会话和 DPAPI Key 缓存，但不删除消息数据。</summary>
     public async Task ClearProtectedKeyAsync(CancellationToken cancellationToken)
     {
-        if (_reader is not null)
+        await _protectedRestoreGate.WaitAsync(cancellationToken);
+        try
         {
-            await _reader.ClearProtectedKeyAsync(cancellationToken);
+            if (_reader is not null)
+            {
+                await _reader.ClearProtectedKeyAsync(cancellationToken);
+            }
+            _protectedRestoreAttempted = false;
+            _lastError = "微信 Reader 已重置，请点击“自动提取 Key”重新初始化。";
         }
-        _protectedRestoreAttempted = false;
-        _lastError = "微信 Reader 已重置，请点击“自动提取 Key”重新初始化。";
+        finally
+        {
+            _protectedRestoreGate.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()

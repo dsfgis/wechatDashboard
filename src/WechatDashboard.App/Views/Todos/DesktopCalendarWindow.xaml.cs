@@ -20,8 +20,10 @@ public partial class DesktopCalendarWindow : Window
     private readonly DispatcherTimer _refreshTimer;
     private readonly DispatcherTimer _autoHideTimer;
     private DesktopCalendarDockEdge _dockEdge;
+    private Size? _dockedWindowSize;
     private bool _allowClose;
     private bool _isApplyingPosition;
+    private bool _isApplyingSize;
     private bool _hasAppliedSavedState;
     private bool _isRetracted;
 
@@ -85,6 +87,7 @@ public partial class DesktopCalendarWindow : Window
         EdgeSnapCheckBox.IsChecked = state.IsEdgeSnapEnabled;
         _dockEdge = state.DockEdge;
         ApplyInitialPosition(state);
+        _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetWindowSize();
         SetExpandedVisualState();
         UpdateDockStatus();
     }
@@ -113,7 +116,12 @@ public partial class DesktopCalendarWindow : Window
         e.Handled = true;
         _autoHideTimer.Stop();
         _dockEdge = DesktopCalendarDockEdge.None;
+        _dockedWindowSize = null;
         UpdateDockStatus();
+        // Windows Aero Snap may resize a borderless window while DragMove is ending.
+        // Preserve the user's size before the OS sees the edge and restore it when
+        // applying our position-only calendar docking behavior.
+        var sizeBeforeDrag = GetWindowSize();
         try
         {
             DragMove();
@@ -125,7 +133,7 @@ public partial class DesktopCalendarWindow : Window
 
         if (EdgeSnapCheckBox.IsChecked == true)
         {
-            DockToNearestEdge(force: false);
+            DockToNearestEdge(force: false, sizeBeforeDrag);
         }
         else
         {
@@ -190,6 +198,7 @@ public partial class DesktopCalendarWindow : Window
             if (!remainsDocked)
             {
                 _dockEdge = DesktopCalendarDockEdge.None;
+                _dockedWindowSize = null;
                 UpdateDockStatus();
             }
         }
@@ -197,13 +206,17 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (_hasAppliedSavedState && _dockEdge != DesktopCalendarDockEdge.None)
+        if (!_isApplyingSize && _hasAppliedSavedState && _dockEdge != DesktopCalendarDockEdge.None)
         {
+            if (!_isRetracted)
+            {
+                _dockedWindowSize = e.NewSize;
+            }
             ApplyCurrentDockPosition(GetWorkArea());
         }
     }
 
-    private void DockToNearestEdge(bool force)
+    private void DockToNearestEdge(bool force, Size? preservedSize = null)
     {
         var area = GetWorkArea();
         var distances = new Dictionary<DesktopCalendarDockEdge, double>
@@ -217,25 +230,43 @@ public partial class DesktopCalendarWindow : Window
         if (!force && nearest.Value > SnapThreshold)
         {
             _dockEdge = DesktopCalendarDockEdge.None;
+            _dockedWindowSize = null;
             UpdateDockStatus();
             return;
         }
 
         _dockEdge = nearest.Key;
+        var size = preservedSize ?? GetWindowSize();
+        _dockedWindowSize = size;
         SetExpandedVisualState();
-        ApplyCurrentDockPosition(area);
+        ApplyWindowSize(size);
+        ApplyCurrentDockPosition(area, size);
         UpdateDockStatus();
-        SaveState();
+        SaveState(size);
     }
 
-    private void ApplyCurrentDockPosition(Rect area)
+    private void ApplyCurrentDockPosition(Rect area, Size? preservedSize = null)
     {
-        var size = GetWindowSize();
+        var size = preservedSize ?? GetWindowSize();
         var currentPosition = new System.Windows.Point(Left, Top);
         var position = _isRetracted
             ? DesktopCalendarDockLayout.GetRetractedPosition(area, size, currentPosition, _dockEdge)
             : DesktopCalendarDockLayout.GetDockedPosition(area, size, currentPosition, _dockEdge);
         ApplyPosition(position);
+    }
+
+    private void ApplyWindowSize(Size size)
+    {
+        _isApplyingSize = true;
+        try
+        {
+            Width = Math.Max(MinWidth, size.Width);
+            Height = Math.Max(MinHeight, size.Height);
+        }
+        finally
+        {
+            _isApplyingSize = false;
+        }
     }
 
     private void ApplyPosition(System.Windows.Point position)
@@ -278,13 +309,15 @@ public partial class DesktopCalendarWindow : Window
             return;
         }
 
+        var size = _dockedWindowSize ?? GetWindowSize();
         SaveState();
         _isRetracted = true;
         CalendarSurface.Visibility = Visibility.Hidden;
         ConfigureRevealHandle();
         EdgeRevealHandle.Visibility = Visibility.Visible;
         ResizeMode = ResizeMode.NoResize;
-        ApplyCurrentDockPosition(GetWorkArea());
+        ApplyWindowSize(size);
+        ApplyCurrentDockPosition(GetWorkArea(), size);
     }
 
     private void EdgeRevealHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -305,9 +338,11 @@ public partial class DesktopCalendarWindow : Window
             return;
         }
 
+        var size = _dockedWindowSize ?? GetWindowSize();
         _autoHideTimer.Stop();
         SetExpandedVisualState();
-        ApplyCurrentDockPosition(GetWorkArea());
+        ApplyWindowSize(size);
+        ApplyCurrentDockPosition(GetWorkArea(), size);
         UpdateDockStatus();
         Activate();
     }
@@ -362,14 +397,14 @@ public partial class DesktopCalendarWindow : Window
         return new Rect(topLeft, bottomRight);
     }
 
-    private void SaveState()
+    private void SaveState(Size? preservedSize = null)
     {
         if (!_hasAppliedSavedState)
         {
             return;
         }
 
-        var size = GetWindowSize();
+        var size = preservedSize ?? _dockedWindowSize ?? GetWindowSize();
         var visiblePosition = DesktopCalendarDockLayout.GetDockedPosition(
             GetWorkArea(),
             size,

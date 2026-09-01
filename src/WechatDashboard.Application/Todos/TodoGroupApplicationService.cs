@@ -30,4 +30,7 @@ public sealed class TodoGroupApplicationService
         var normalizedColor = TodoGroupColorPolicy.Normalize(color);
         return _groups.CreateAsync(displayName, normalizedName, normalizedColor, _clock.Now, cancellationToken);
     }
+
+    public Task<DeleteTodoGroupOutcome> DeleteAsync(long id, CancellationToken cancellationToken) =>
+        _groups.DeleteAsync(id, cancellationToken);
 }

@@ -37,14 +37,17 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Message context query locates the source message by stable id", TestMessageContextQueryAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("Todo group migration preserves existing todos and is idempotent", TestTodoGroupMigrationAsync),
+    ("Project assignment migration maps only same-name groups and clears deleted projects", TestTodoProjectAssignmentMigrationAsync),
     ("Todo group migration rolls back when schema creation fails", TestTodoGroupMigrationRollbackAsync),
     ("Todo groups normalize names and reject duplicates", TestTodoGroupsAsync),
+    ("Todo detail project choices match configured projects", TestTodoDetailProjectOptionsAsync),
     ("Manual Todo creation persists a group and optional reminder atomically", TestManualTodoCreationAsync),
     ("Todo group changes persist through completion", TestTodoGroupLifecycleAsync),
-    ("Manual Todo create view model prevents duplicate submission", TestTodoCreateViewModelAsync),
-    ("Todo rows show groups and truthful manual source", TestTodoRowPresentationAsync),
+    ("Manual Todo create view model selects a project and prevents duplicate submission", TestTodoCreateViewModelAsync),
+    ("Todo rows show projects and truthful manual source", TestTodoRowPresentationAsync),
     ("Todo workbench preserves checked rows across background refresh", TestTodoWorkbenchSelectionRefreshAsync),
     ("Desktop calendar groups scheduled Todos by local due date", TestDesktopCalendarViewModelAsync),
+    ("Calendar checkbox and detail button persist Todo completion", TestTodoCompletionEntryPointsAsync),
     ("Desktop calendar window preferences round-trip", TestDesktopCalendarStateStoreAsync),
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
@@ -85,6 +88,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync),
     ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync),
     ("Project keyword repository supports multiple keywords per project", TestFollowedProjectKeywordRepositoryAsync),
+    ("Project settings exposes a fixed-palette editable color column", TestProjectColorSettingsXamlAsync),
 };
 
 var failures = new List<string>();
@@ -366,10 +370,15 @@ static async Task TestReminderSnoozeAsync()
 
     var snoozed = await reminderService.SnoozeAsync(originalReminder.Id, snoozeUntil, CancellationToken.None);
     var reminders = await reminderRepository.GetForTodoAsync(created.Todo.Id, CancellationToken.None);
+    var reminderBatch = await reminderRepository.GetForTodosAsync(
+        new[] { created.Todo.Id, long.MaxValue },
+        CancellationToken.None);
     var persistedTodo = await todoRepository.GetByIdAsync(created.Todo.Id, CancellationToken.None);
 
     AssertTrue(snoozed.Succeeded, "A scheduled reminder should be snoozable.");
     AssertEqual(2, reminders.Count, "Snooze should preserve the old reminder and create a new one.");
+    AssertEqual(1, reminderBatch.Count, "Batch reminder lookup should omit Todo ids without reminders.");
+    AssertEqual(2, reminderBatch[created.Todo.Id].Count, "Batch reminder lookup should return the full reminder history in one query.");
     AssertEqual(ReminderStatus.Snoozed, reminders.Single(item => item.Id == originalReminder.Id).Status, "The old reminder should retain snooze history.");
     AssertEqual(ReminderStatus.Scheduled, reminders.Single(item => item.Id != originalReminder.Id).Status, "The replacement reminder should be scheduled.");
     AssertEqual(originalReminder.Id, reminders.Single(item => item.Id != originalReminder.Id).ParentReminderId, "The replacement should link to the old reminder.");
@@ -1167,6 +1176,107 @@ static async Task TestTodoGroupMigrationRollbackAsync()
     AssertEqual(0L, (long)(await migrationCommand.ExecuteScalarAsync() ?? 0L), "Failed v3 must not be recorded as applied.");
 }
 
+static async Task TestTodoProjectAssignmentMigrationAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    var initializer = new SqliteDatabaseInitializer(databasePath);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 9, 1, 10, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
+    var idCollisionProject = await projectRepository.SaveAsync("其他项目", ProjectColorPolicy.Blue, CancellationToken.None);
+    var matchedProject = await projectRepository.SaveAsync("工作", ProjectColorPolicy.Red, CancellationToken.None);
+    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), clock);
+    var matchedGroup = (await groupService.CreateAsync("工作", CancellationToken.None)).Group;
+    var unmatchedGroup = (await groupService.CreateAsync("不匹配分组", CancellationToken.None)).Group;
+    AssertEqual(idCollisionProject.Id, matchedGroup.Id, "Fixture should force a numeric ID collision between different project/group records.");
+    AssertTrue(matchedProject.Id != matchedGroup.Id, "The same-name project/group fixture should use different numeric IDs so mapping cannot pass accidentally by ID.");
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var matchedTodo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("同名分组待办", null, PriorityLevel.P2, null, null, matchedGroup.Id),
+        CancellationToken.None)).Todo!;
+    var unmatchedTodo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("仅 ID 可能碰撞", null, PriorityLevel.P2, null, null, unmatchedGroup.Id),
+        CancellationToken.None)).Todo!;
+
+    await using (var prepare = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await prepare.OpenAsync(CancellationToken.None);
+        await using var command = prepare.CreateCommand();
+        command.CommandText = "DELETE FROM schema_migration_reports WHERE version = 5; DELETE FROM schema_migrations WHERE version = 5;";
+        await command.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    await initializer.InitializeAsync(CancellationToken.None);
+    await initializer.InitializeAsync(CancellationToken.None);
+
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var mapped = await todoRepository.GetByIdAsync(matchedTodo.Id, CancellationToken.None);
+    var unmatched = await todoRepository.GetByIdAsync(unmatchedTodo.Id, CancellationToken.None);
+    AssertEqual(matchedProject.Id, mapped!.ManagedProjectId, "A group maps only to the unique followed project with the same normalized name.");
+    AssertEqual<long?>(null, unmatched!.ManagedProjectId, "A different group name must stay unassigned even when numeric IDs can collide.");
+    AssertEqual(matchedGroup.Id, mapped.GroupId, "Migration must retain the historical group id as read-only legacy data.");
+    AssertEqual(unmatchedGroup.Id, unmatched.GroupId, "Unmatched historical group data must remain intact.");
+
+    await using (var verification = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await verification.OpenAsync(CancellationToken.None);
+        await using var report = verification.CreateCommand();
+        report.CommandText = "SELECT mapped_group_todos, unmatched_group_todos FROM schema_migration_reports WHERE version = 5;";
+        await using var reader = await report.ExecuteReaderAsync(CancellationToken.None);
+        AssertTrue(await reader.ReadAsync(CancellationToken.None), "Project migration should record an auditable report.");
+        AssertEqual(1, reader.GetInt32(0), "Migration report should count the one same-name group mapping.");
+        AssertEqual(1, reader.GetInt32(1), "Migration report should count the unmatched historical group Todo.");
+    }
+
+    AssertEqual(ProjectColorPolicy.Red, (await projectRepository.GetAllAsync(CancellationToken.None)).Single(item => item.Id == matchedProject.Id).Color, "Project color must survive migration.");
+    await using (var injectFailure = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await injectFailure.OpenAsync(CancellationToken.None);
+        await using var command = injectFailure.CreateCommand();
+        command.CommandText = $"""
+            DELETE FROM schema_migration_reports WHERE version = 5;
+            DELETE FROM schema_migrations WHERE version = 5;
+            UPDATE todo_items SET managed_project_id = NULL WHERE id = {matchedTodo.Id};
+            CREATE TRIGGER fail_project_migration_report
+            BEFORE INSERT ON schema_migration_reports
+            WHEN NEW.version = 5
+            BEGIN
+                SELECT RAISE(ABORT, 'injected v5 failure');
+            END;
+            """;
+        await command.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    var migrationFailed = false;
+    try
+    {
+        await initializer.InitializeAsync(CancellationToken.None);
+    }
+    catch (SqliteException)
+    {
+        migrationFailed = true;
+    }
+    AssertTrue(migrationFailed, "An injected v5 failure should stop initialization.");
+    AssertEqual<long?>(null, (await todoRepository.GetByIdAsync(matchedTodo.Id, CancellationToken.None))!.ManagedProjectId, "A failed v5 transaction must roll back provisional Todo mappings.");
+
+    await using (var recover = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await recover.OpenAsync(CancellationToken.None);
+        await using var command = recover.CreateCommand();
+        command.CommandText = "DROP TRIGGER fail_project_migration_report;";
+        await command.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+    await initializer.InitializeAsync(CancellationToken.None);
+    AssertEqual(matchedProject.Id, (await todoRepository.GetByIdAsync(matchedTodo.Id, CancellationToken.None))!.ManagedProjectId, "Migration should succeed after the injected failure is removed.");
+
+    await projectRepository.DeleteAsync(matchedProject.Id, CancellationToken.None);
+    AssertEqual<long?>(null, (await todoRepository.GetByIdAsync(matchedTodo.Id, CancellationToken.None))!.ManagedProjectId, "Deleting a project should clear the Todo relation through ON DELETE SET NULL.");
+    AssertTrue(idCollisionProject.Id > 0, "The numeric-collision fixture project should be persisted.");
+}
+
 static async Task TestTodoGroupsAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
@@ -1228,6 +1338,62 @@ static async Task TestTodoGroupsAsync()
     AssertEqual(1, concurrentResults.Count(item => item.Outcome == CreateTodoGroupOutcome.Created), "Concurrent normalized group creation should create one row.");
     AssertEqual(1, concurrentResults.Count(item => item.Outcome == CreateTodoGroupOutcome.Existing), "Concurrent duplicate should return an existing business result.");
     AssertEqual(concurrentResults[0].Group.Id, concurrentResults[1].Group.Id, "Concurrent duplicate results should resolve to the same group.");
+
+    var unused = (await service.CreateAsync("临时分组", CancellationToken.None)).Group;
+    AssertEqual(DeleteTodoGroupOutcome.Deleted, await service.DeleteAsync(unused.Id, CancellationToken.None), "An unused configured group should be deletable.");
+    AssertEqual(DeleteTodoGroupOutcome.Missing, await service.DeleteAsync(unused.Id, CancellationToken.None), "Deleting a missing group should be an explicit business result.");
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("引用设置分组", null, PriorityLevel.P2, null, null, created.Group.Id),
+        CancellationToken.None);
+    AssertEqual(DeleteTodoGroupOutcome.InUse, await service.DeleteAsync(created.Group.Id, CancellationToken.None), "A configured group referenced by a Todo must not be deleted.");
+}
+
+static async Task TestTodoDetailProjectOptionsAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
+    var work = await projectRepository.SaveAsync("工作", ProjectColorPolicy.Blue, CancellationToken.None);
+    await projectRepository.SaveAsync("个人", ProjectColorPolicy.Green, CancellationToken.None);
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var todo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("核对设置项目", null, PriorityLevel.P2, null, null, GroupId: null, ManagedProjectId: work.Id),
+        CancellationToken.None)).Todo!;
+    var row = new TodoListItemViewModel(
+        todo,
+        null,
+        null,
+        TodoDueBucket.NoDueDate,
+        work.ProjectName,
+        work.Color,
+        () => { });
+    var detail = new TodoDetailViewModel(
+        row,
+        todoService,
+        projectRepository,
+        new ReminderApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
+        new SqliteReminderRepository(databasePath),
+        clock,
+        () => Task.CompletedTask,
+        _ => Task.CompletedTask,
+        new FakeTodoDialogService());
+
+    await detail.LoadProjectsAsync();
+    var configured = await projectRepository.GetAllAsync(CancellationToken.None);
+    AssertEqual(
+        string.Join(",", configured.Select(group => group.Id)),
+        string.Join(",", detail.ProjectOptions.Skip(1).Select(project => project.Id)),
+        "Detail choices should contain exactly the projects configured in settings, plus the explicit unassigned option.");
+    AssertEqual(work.Id, detail.SelectedProject.Id, "Detail should retain the Todo's configured project selection.");
+
+    var added = await projectRepository.SaveAsync("学习", ProjectColorPolicy.Purple, CancellationToken.None);
+    await detail.LoadProjectsAsync();
+    AssertTrue(detail.ProjectOptions.Any(project => project.Id == added.Id), "A project added in settings should appear after the detail choices reload.");
 }
 
 static async Task TestManualTodoCreationAsync()
@@ -1420,15 +1586,15 @@ static async Task TestTodoCreateViewModelAsync()
 
     var now = new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.FromHours(8));
     var clock = new FixedClock(now);
-    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), clock);
-    var group = (await groupService.CreateAsync("工作", CancellationToken.None)).Group;
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
+    var project = await projectRepository.SaveAsync("工作", ProjectColorPolicy.Red, CancellationToken.None);
     var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
     var createdCount = 0;
     var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var dialogs = new FakeTodoDialogService();
     var viewModel = new TodoCreateViewModel(
         todoService,
-        groupService,
+        projectRepository,
         clock,
         dialogs,
         () =>
@@ -1437,9 +1603,8 @@ static async Task TestTodoCreateViewModelAsync()
             return Task.CompletedTask;
         });
     viewModel.RequestClose += (_, _) => closed.TrySetResult();
-    await viewModel.LoadGroupsAsync();
-    AssertTrue(viewModel.NewGroupColors.Any(item => item.Name == "红色" && item.Color == TodoGroupColorPolicy.Red), "Create view model should offer red for new groups.");
-    AssertEqual(TodoGroupColorPolicy.DefaultColor, viewModel.GroupOptions.Single(item => item.Id == group.Id).Color, "Group options should expose the persisted color.");
+    await viewModel.LoadProjectsAsync();
+    AssertEqual(ProjectColorPolicy.Red, viewModel.ProjectOptions.Single(item => item.Id == project.Id).Color, "Project options should expose the persisted color.");
     viewModel.Title = "   ";
     viewModel.SaveCommand.Execute(null);
     AssertEqual("标题不能为空。", viewModel.StatusText, "Whitespace-only title should keep the form open with a business error.");
@@ -1447,7 +1612,7 @@ static async Task TestTodoCreateViewModelAsync()
 
     viewModel.Title = "  手动创建  ";
     viewModel.Description = "不依赖消息";
-    viewModel.SelectedGroup = viewModel.GroupOptions.Single(item => item.Id == group.Id);
+    viewModel.SelectedProject = viewModel.ProjectOptions.Single(item => item.Id == project.Id);
     viewModel.DueDate = new DateTime(2026, 8, 24);
     viewModel.DueHour = 13;
     viewModel.DueMinute = 0;
@@ -1467,7 +1632,8 @@ static async Task TestTodoCreateViewModelAsync()
     var active = await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None);
     AssertEqual(1, active.Count, "Rapid duplicate submission should create only one Todo.");
     AssertEqual("手动创建", active.Single().Title, "Create view model should persist a trimmed title.");
-    AssertEqual(group.Id, active.Single().GroupId, "Create view model should persist the selected group.");
+    AssertEqual(project.Id, active.Single().ManagedProjectId, "Create view model should persist the selected project.");
+    AssertEqual<long?>(null, active.Single().GroupId, "New project-based creation must not write the legacy group relation.");
     var expectedLocalDue = new DateTime(2026, 8, 24, 13, 0, 0, DateTimeKind.Unspecified);
     AssertEqual(new DateTimeOffset(expectedLocalDue, TimeZoneInfo.Local.GetUtcOffset(expectedLocalDue)), active.Single().DueAt, "Selected due date and time should use the local offset.");
     AssertEqual(1, (await new SqliteReminderRepository(databasePath).GetForTodoAsync(active.Single().Id, CancellationToken.None)).Count, "Valid future reminder should persist.");
@@ -1491,7 +1657,7 @@ static Task TestTodoRowPresentationAsync()
         null,
         false)
     {
-        GroupId = 7
+        ManagedProjectId = 7
     };
     var manualRow = new TodoListItemViewModel(
         manual,
@@ -1499,10 +1665,10 @@ static Task TestTodoRowPresentationAsync()
         null,
         TodoDueBucket.NoDueDate,
         "工作",
-        TodoGroupColorPolicy.Red,
+        ProjectColorPolicy.Red,
         () => { });
-    AssertEqual("工作", manualRow.GroupName, "Todo row should display the resolved group.");
-    AssertEqual(TodoGroupColorPolicy.Red, manualRow.GroupColor, "Todo row should expose the group's selected color.");
+    AssertEqual("工作", manualRow.ProjectName, "Todo row should display the resolved project.");
+    AssertEqual(ProjectColorPolicy.Red, manualRow.ProjectColor, "Todo row should expose the project's selected color.");
     AssertEqual("手动添加", manualRow.Source, "Source-less Todo should be labelled manual.");
     AssertEqual("无来源消息", manualRow.SourceChatName, "Manual Todo should not fake a chat.");
     AssertEqual("手动备注", manualRow.MessageContent, "Manual Todo should display its description.");
@@ -1513,7 +1679,7 @@ static Task TestTodoRowPresentationAsync()
         null,
         TodoDueBucket.NoDueDate,
         "工作",
-        TodoGroupColorPolicy.Red,
+        ProjectColorPolicy.Red,
         () => { });
     AssertEqual("来源消息丢失", missingSourceRow.Source, "Missing source must not be labelled manual.");
     AssertEqual("原始消息已不存在", missingSourceRow.SourceChatName, "Missing source should be explicit.");
@@ -1533,7 +1699,7 @@ static async Task TestTodoWorkbenchSelectionRefreshAsync()
     var reminders = new SqliteReminderRepository(databasePath);
     var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
     var todoService = new TodoApplicationService(unitOfWork, clock);
-    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), clock);
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
     var first = (await todoService.CreateManualAsync(
         new CreateManualTodoRequest("刷新时保留勾选一", null, PriorityLevel.P2, null, null, null),
         CancellationToken.None)).Todo!;
@@ -1546,7 +1712,7 @@ static async Task TestTodoWorkbenchSelectionRefreshAsync()
         reminders,
         todoService,
         new ReminderApplicationService(unitOfWork, clock),
-        groupService,
+        projectRepository,
         new TodoDueBucketPolicy(TimeZoneInfo.Local),
         clock,
         new FakeTodoDialogService(),
@@ -1619,6 +1785,86 @@ static async Task TestDesktopCalendarViewModelAsync()
 
     viewModel.MoveMonth(1);
     AssertEqual("2026年9月", viewModel.MonthTitle, "Month navigation should update the displayed month.");
+}
+
+static async Task TestTodoCompletionEntryPointsAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 8, 31, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var reminders = new SqliteReminderRepository(databasePath);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var todoService = new TodoApplicationService(unitOfWork, clock);
+    var reminderService = new ReminderApplicationService(unitOfWork, clock);
+    var groupService = new TodoGroupApplicationService(new SqliteTodoGroupRepository(databasePath), clock);
+    var calendarTodo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("日历勾选完成", null, PriorityLevel.P1, now.AddHours(2), null, null),
+        CancellationToken.None)).Todo!;
+    var workbenchRefreshCount = 0;
+    var calendar = new DesktopCalendarViewModel(
+        repository,
+        clock,
+        timeZone,
+        _ => Task.CompletedTask,
+        () =>
+        {
+            workbenchRefreshCount++;
+            return Task.CompletedTask;
+        });
+
+    await calendar.RefreshAsync();
+    AssertTrue(calendar.CompleteTodoCommand.CanExecute(calendar.SelectedTodos.Single()), "An active calendar Todo should expose an enabled completion checkbox command.");
+    await calendar.CompleteTodoAsync(calendarTodo.Id);
+
+    AssertEqual(1, workbenchRefreshCount, "Calendar completion should refresh the shared Todo workbench once.");
+    AssertEqual(0, (await repository.GetActiveAsync(CancellationToken.None)).Count, "Checking a calendar Todo should remove it from the active list.");
+    AssertEqual(TodoStatus.Done, (await repository.GetByIdAsync(calendarTodo.Id, CancellationToken.None))!.Status, "Calendar completion should persist Done status.");
+    AssertTrue(calendar.SelectedTodos.Single(item => item.Id == calendarTodo.Id).IsCompleted, "The completed calendar Todo should remain visible as checked history.");
+    AssertTrue(!calendar.CompleteTodoCommand.CanExecute(calendar.SelectedTodos.Single()), "A completed calendar Todo checkbox should not be actionable again.");
+
+    var detailTodo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("详情按钮完成", "只完成，不隐式保存编辑", PriorityLevel.P2, null, null, null),
+        CancellationToken.None)).Todo!;
+    var row = new TodoListItemViewModel(
+        detailTodo,
+        null,
+        null,
+        TodoDueBucket.NoDueDate,
+        "未指定项目",
+        ProjectColorPolicy.DefaultColor,
+        () => { });
+    var detailRefreshCount = 0;
+    var detail = new TodoDetailViewModel(
+        row,
+        todoService,
+        new SqliteFollowedProjectRepository(databasePath),
+        reminderService,
+        reminders,
+        clock,
+        () =>
+        {
+            detailRefreshCount++;
+            return Task.CompletedTask;
+        },
+        _ => Task.CompletedTask,
+        new FakeTodoDialogService());
+    var requestedClose = false;
+    detail.RequestClose += (_, _) => requestedClose = true;
+    detail.Title = "尚未保存的标题修改";
+
+    await detail.CompleteAsync();
+
+    AssertEqual(1, detailRefreshCount, "Detail completion should refresh the shared Todo workbench once.");
+    AssertTrue(requestedClose, "A successfully completed Todo detail should close after moving to completed history.");
+    var persistedDetailTodo = (await repository.GetByIdAsync(detailTodo.Id, CancellationToken.None))!;
+    AssertEqual(TodoStatus.Done, persistedDetailTodo.Status, "Detail completion should persist Done status.");
+    AssertEqual(detailTodo.Title, persistedDetailTodo.Title, "Completing from detail should not silently persist unsaved field edits.");
+    AssertTrue(!detail.CanComplete, "The detail completion button should become disabled after success.");
 }
 
 static Task TestDesktopCalendarStateStoreAsync()
@@ -1700,7 +1946,22 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             var revealMethod = typeof(WechatDashboard.App.Views.Todos.DesktopCalendarWindow).GetMethod(
                 "RevealFromEdge",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            AssertTrue(retractMethod is not null && revealMethod is not null, "Desktop calendar should expose its private edge transition methods to the runtime test.");
+            var dockMethod = typeof(WechatDashboard.App.Views.Todos.DesktopCalendarWindow).GetMethod(
+                "DockToNearestEdge",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            AssertTrue(retractMethod is not null && revealMethod is not null && dockMethod is not null, "Desktop calendar should expose its private edge transition methods to the runtime test.");
+
+            // Emulate Windows Aero Snap changing the window to a half-size layout at
+            // the edge. Application docking must restore the pre-drag dimensions.
+            var preservedSize = new System.Windows.Size(initialWidth, initialHeight);
+            window.Width = initialWidth / 2;
+            window.Height = initialHeight / 2;
+            window.UpdateLayout();
+            dockMethod!.Invoke(window, new object?[] { true, preservedSize });
+            window.UpdateLayout();
+            AssertEqual(initialWidth, window.ActualWidth, "Docking should restore the width that existed before Windows edge snap.");
+            AssertEqual(initialHeight, window.ActualHeight, "Docking should restore the height that existed before Windows edge snap.");
+
             retractMethod!.Invoke(window, null);
             window.UpdateLayout();
             var calendarSurface = window.FindName("CalendarSurface") as System.Windows.Controls.Border;
@@ -1714,6 +1975,8 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             window.UpdateLayout();
             AssertEqual(System.Windows.Visibility.Visible, calendarSurface.Visibility, "Click restoration should show the full calendar surface.");
             AssertEqual(System.Windows.Visibility.Collapsed, revealHandle.Visibility, "Click restoration should hide the edge handle.");
+            AssertEqual(initialWidth, window.ActualWidth, "Revealing should preserve the docked calendar width.");
+            AssertEqual(initialHeight, window.ActualHeight, "Revealing should preserve the docked calendar height.");
             window.Shutdown();
         }
         catch (Exception ex)
@@ -2417,6 +2680,13 @@ static async Task TestCapturePipelineAsync()
     var initializer = new SqliteDatabaseInitializer(databasePath);
     await initializer.InitializeAsync(CancellationToken.None);
 
+    var followedProjectRepository = new SqliteFollowedProjectRepository(databasePath);
+    await followedProjectRepository.SaveAsync("占位项目", ProjectColorPolicy.DefaultColor, CancellationToken.None);
+    var managedCrmProject = await followedProjectRepository.SaveAsync("CRM升级", ProjectColorPolicy.Red, CancellationToken.None);
+    var followedKeywordRepository = new SqliteFollowedProjectKeywordRepository(databasePath);
+    await followedKeywordRepository.SaveAsync(managedCrmProject.Id, "CRM项目群", CancellationToken.None);
+    var managedKeywords = await followedKeywordRepository.GetAllAsync(CancellationToken.None);
+
     var messageRepository = new SqliteMessageRepository(databasePath);
     var todoRepository = new SqliteTodoRepository(databasePath);
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
@@ -2430,7 +2700,8 @@ static async Task TestCapturePipelineAsync()
             new ProjectRule(1, "CRM升级", ProjectRuleType.ChatName, "CRM项目群", 100),
             new ProjectRule(2, "支付平台", ProjectRuleType.Keyword, "支付", 80)
         }),
-        new UrgencyRanker(priorityContacts: new[] { "王经理" }, priorityProjectIds: new[] { 1L }));
+        new UrgencyRanker(priorityContacts: new[] { "王经理" }, priorityProjectIds: new[] { 1L }),
+        message => FollowedProjectMatcher.Match(message, managedKeywords)?.ProjectId);
 
     var firstRun = await pipeline.RunOnceAsync(CancellationToken.None);
     var secondRun = await pipeline.RunOnceAsync(CancellationToken.None);
@@ -2444,6 +2715,8 @@ static async Task TestCapturePipelineAsync()
     AssertEqual(2, recentMessages.Count, "Two messages should be persisted.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should be persisted.");
     AssertTrue(pendingTodos.Single().Title.Contains("@张三"), "Todo title should come from mention message.");
+    AssertEqual(1L, pendingTodos.Single().ProjectId, "Legacy classifier output should remain unchanged.");
+    AssertEqual(managedCrmProject.Id, pendingTodos.Single().ManagedProjectId, "Automatic Todo should use the existing followed-project keyword matcher for its managed project.");
 
     await using var resultConnection = new SqliteConnection($"Data Source={databasePath}");
     await resultConnection.OpenAsync(CancellationToken.None);
@@ -2732,7 +3005,7 @@ static async Task TestFollowedProjectKeywordRepositoryAsync()
 
     var projectRepository = new SqliteFollowedProjectRepository(databasePath);
     var keywordRepository = new SqliteFollowedProjectKeywordRepository(databasePath);
-    var project = await projectRepository.SaveAsync("智能管线", CancellationToken.None);
+    var project = await projectRepository.SaveAsync("智能管线", ProjectColorPolicy.Purple, CancellationToken.None);
     await keywordRepository.SaveAsync(project.Id, "管线提升", CancellationToken.None);
     await keywordRepository.SaveAsync(project.Id, "WMS联调", CancellationToken.None);
     await keywordRepository.SaveAsync(project.Id, "wms联调", CancellationToken.None);
@@ -2740,6 +3013,51 @@ static async Task TestFollowedProjectKeywordRepositoryAsync()
     var keywords = await keywordRepository.GetAllAsync(CancellationToken.None);
     AssertEqual(2, keywords.Count, "Duplicate keywords for the same project should not create another row.");
     AssertTrue(keywords.All(keyword => keyword.ProjectName == "智能管线"), "All keywords should retain their owning project name.");
+    AssertEqual(ProjectColorPolicy.Purple, project.Color, "A new project should retain its selected fixed-palette color.");
+
+    var duplicate = await projectRepository.SaveAsync("智能管线", ProjectColorPolicy.Red, CancellationToken.None);
+    AssertEqual(ProjectColorPolicy.Purple, duplicate.Color, "Re-saving an existing project must not silently recolor it.");
+    var rejectedUnsupportedColor = false;
+    try
+    {
+        await projectRepository.SaveAsync("不可读颜色项目", "#FFFFFF", CancellationToken.None);
+    }
+    catch (ArgumentException)
+    {
+        rejectedUnsupportedColor = true;
+    }
+    AssertTrue(rejectedUnsupportedColor, "Project colors outside the fixed readable palette must be rejected.");
+
+    AssertEqual(
+        UpdateFollowedProjectColorOutcome.Updated,
+        await projectRepository.UpdateColorAsync(project.Id, ProjectColorPolicy.Green, CancellationToken.None),
+        "An existing project's fixed-palette color should be updated by stable project id.");
+    AssertEqual(
+        ProjectColorPolicy.Green,
+        (await projectRepository.GetAllAsync(CancellationToken.None)).Single(item => item.Id == project.Id).Color,
+        "Updated project color should round-trip through a fresh repository read.");
+    AssertEqual(
+        UpdateFollowedProjectColorOutcome.Unchanged,
+        await projectRepository.UpdateColorAsync(project.Id, ProjectColorPolicy.Green, CancellationToken.None),
+        "Selecting the persisted color again should be an explicit no-op.");
+    AssertEqual(
+        UpdateFollowedProjectColorOutcome.Missing,
+        await projectRepository.UpdateColorAsync(long.MaxValue, ProjectColorPolicy.Blue, CancellationToken.None),
+        "Updating a deleted or missing project should return a recoverable business result.");
+    var rejectedInvalidUpdate = false;
+    try
+    {
+        await projectRepository.UpdateColorAsync(project.Id, "#FFFFFF", CancellationToken.None);
+    }
+    catch (ArgumentException)
+    {
+        rejectedInvalidUpdate = true;
+    }
+    AssertTrue(rejectedInvalidUpdate, "Project color updates must reject values outside the fixed palette.");
+    AssertEqual(
+        ProjectColorPolicy.Green,
+        (await projectRepository.GetAllAsync(CancellationToken.None)).Single(item => item.Id == project.Id).Color,
+        "A rejected color update must preserve the previously persisted color.");
 
     var classifier = new ProjectClassifier(keywords.Select(keyword =>
         new ProjectRule(keyword.ProjectId, keyword.ProjectName, ProjectRuleType.Keyword, keyword.Keyword, 170)));
@@ -2747,8 +3065,29 @@ static async Task TestFollowedProjectKeywordRepositoryAsync()
     AssertEqual(project.Id, result.ProjectId, "Any keyword of one project should classify the message into that project.");
     AssertEqual("智能管线", result.ProjectName, "Keyword classification should return the shared project name.");
 
+    var shorterProject = await projectRepository.SaveAsync("短关键字", ProjectColorPolicy.Blue, CancellationToken.None);
+    await keywordRepository.SaveAsync(shorterProject.Id, "WMS", CancellationToken.None);
+    keywords = await keywordRepository.GetAllAsync(CancellationToken.None);
+    var matched = FollowedProjectMatcher.Match(
+        CreateMessage(101, "实施群", "王工", "请确认 WMS联调 计划"),
+        keywords);
+    AssertEqual(project.Id, matched!.ProjectId, "Followed-project matching should preserve the existing longest-keyword-first rule.");
+
     await keywordRepository.DeleteByProjectIdAsync(project.Id, CancellationToken.None);
-    AssertEqual(0, (await keywordRepository.GetAllAsync(CancellationToken.None)).Count, "Deleting a project keyword set should remove all its keywords.");
+    var remainingKeywords = await keywordRepository.GetAllAsync(CancellationToken.None);
+    AssertFalse(remainingKeywords.Any(item => item.ProjectId == project.Id), "Deleting a project keyword set should remove all keywords owned by that project.");
+    AssertTrue(remainingKeywords.Any(item => item.ProjectId == shorterProject.Id), "Deleting one project's keywords must preserve other projects' keyword rules.");
+}
+
+static async Task TestProjectColorSettingsXamlAsync()
+{
+    var xamlPath = Path.Combine(ProjectToolPaths.ProjectRoot, "src", "WechatDashboard.App", "MainWindow.xaml");
+    var xaml = await File.ReadAllTextAsync(xamlPath, CancellationToken.None);
+    AssertTrue(xaml.Contains("x:Name=\"NewFollowedProjectColorComboBox\"", StringComparison.Ordinal), "Project creation should retain its fixed-palette color selector.");
+    AssertTrue(xaml.Contains("ItemsSource=\"{Binding DataContext.ProjectColors, RelativeSource={RelativeSource AncestorType=Window}}\"", StringComparison.Ordinal), "The project list color editor should use the shared fixed palette.");
+    AssertTrue(xaml.Contains("SelectedValue=\"{Binding Color, Mode=OneWay}\"", StringComparison.Ordinal), "The color dropdown should display the persisted row color without mutating the row before persistence succeeds.");
+    AssertTrue(xaml.Contains("SelectionChanged=\"FollowedProjectColorComboBox_SelectionChanged\"", StringComparison.Ordinal), "The project color dropdown should save selection changes immediately.");
+    AssertFalse(xaml.Contains("<TextBlock Text=\"{Binding Color}\" Foreground=\"{Binding Color}\"", StringComparison.Ordinal), "The project color column should no longer render a non-editable color code.");
 }
 
 static async Task TestNativeWeChatKeyDerivationAsync()

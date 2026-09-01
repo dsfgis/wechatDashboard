@@ -17,7 +17,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private readonly IReminderRepository _reminders;
     private readonly TodoApplicationService _todoService;
     private readonly ReminderApplicationService _reminderService;
-    private readonly TodoGroupApplicationService _groupService;
+    private readonly IFollowedProjectRepository _projectRepository;
     private readonly TodoDueBucketPolicy _bucketPolicy;
     private readonly IClock _clock;
     private readonly ITodoDialogService _dialogs;
@@ -31,7 +31,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         IReminderRepository reminders,
         TodoApplicationService todoService,
         ReminderApplicationService reminderService,
-        TodoGroupApplicationService groupService,
+        IFollowedProjectRepository projectRepository,
         TodoDueBucketPolicy bucketPolicy,
         IClock clock,
         ITodoDialogService dialogs,
@@ -43,7 +43,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         _reminders = reminders;
         _todoService = todoService;
         _reminderService = reminderService;
-        _groupService = groupService;
+        _projectRepository = projectRepository;
         _bucketPolicy = bucketPolicy;
         _clock = clock;
         _dialogs = dialogs;
@@ -89,12 +89,21 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
 
     public async Task RefreshAsync()
     {
-        var active = await _todos.GetActiveAsync(CancellationToken.None);
-        var completed = await _todos.GetCompletedAsync(CancellationToken.None);
-        var rows = await CreateRowsAsync(active.Concat(completed));
         // Refreshes rebuild the row view models. Preserve the current UI selection by
         // stable Todo id so timer/reminder refreshes do not look like a scroll reset.
         var selectedIds = ActiveRows().Where(row => row.IsSelected).Select(row => row.Id).ToHashSet();
+        var snapshot = await Task.Run(async () =>
+        {
+            var activeTask = _todos.GetActiveAsync(CancellationToken.None);
+            var completedTask = _todos.GetCompletedAsync(CancellationToken.None);
+            await Task.WhenAll(activeTask, completedTask);
+            var activeItems = activeTask.Result;
+            var completedItems = completedTask.Result;
+            var itemRows = await CreateRowsAsync(activeItems.Concat(completedItems));
+            return (Active: activeItems, Rows: itemRows);
+        });
+        var active = snapshot.Active;
+        var rows = snapshot.Rows;
         var activeIds = active.Select(item => item.Id).ToHashSet();
         var activeRows = rows.Where(row => activeIds.Contains(row.Todo.Id)).ToArray();
         foreach (var row in activeRows.Where(row => selectedIds.Contains(row.Id)))
@@ -142,14 +151,14 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         var viewModel = new TodoDetailViewModel(
             row,
             _todoService,
-            _groupService,
+            _projectRepository,
             _reminderService,
             _reminders,
             _clock,
             async () => await RefreshAsync(),
             _navigateToMessage,
             _dialogs);
-        await viewModel.LoadGroupsAsync();
+        await viewModel.LoadProjectsAsync();
         await _dialogs.ShowAsync(viewModel);
     }
 
@@ -157,11 +166,11 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     {
         var viewModel = new TodoCreateViewModel(
             _todoService,
-            _groupService,
+            _projectRepository,
             _clock,
             _dialogs,
             _onTodoCreated);
-        await viewModel.LoadGroupsAsync();
+        await viewModel.LoadProjectsAsync();
         await _dialogs.ShowCreateAsync(viewModel);
     }
 
@@ -182,7 +191,8 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
                 row.Todo.DueAt,
                 TodoStatus.Done,
                 row.Todo.UpdatedAt,
-                row.Todo.GroupId),
+                GroupId: null,
+                ManagedProjectId: row.Todo.ManagedProjectId),
             CancellationToken.None);
         if (updated is null)
         {
@@ -271,25 +281,30 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private async Task<IReadOnlyList<TodoListItemViewModel>> CreateRowsAsync(IEnumerable<TodoItem> source)
     {
         var todos = source.ToArray();
-        var groupLookup = (await _groupService.GetAllAsync(CancellationToken.None)).ToDictionary(item => item.Id);
         var messageIds = todos.Where(item => item.SourceMessageId.HasValue).Select(item => item.SourceMessageId!.Value).Distinct().ToArray();
-        var messageLookup = (await _messages.GetByIdsAsync(messageIds, CancellationToken.None)).ToDictionary(item => item.Id);
+        var projectsTask = _projectRepository.GetAllAsync(CancellationToken.None);
+        var messagesTask = _messages.GetByIdsAsync(messageIds, CancellationToken.None);
+        var remindersTask = _reminders.GetForTodosAsync(todos.Select(item => item.Id).ToArray(), CancellationToken.None);
+        await Task.WhenAll(projectsTask, messagesTask, remindersTask);
+        var projectLookup = projectsTask.Result.Where(item => item.IsActive).ToDictionary(item => item.Id);
+        var messageLookup = messagesTask.Result.ToDictionary(item => item.Id);
+        var reminderLookup = remindersTask.Result;
         var rows = new List<TodoListItemViewModel>(todos.Length);
         foreach (var todo in todos)
         {
-            var reminders = await _reminders.GetForTodoAsync(todo.Id, CancellationToken.None);
+            var reminders = reminderLookup.GetValueOrDefault(todo.Id) ?? Array.Empty<TodoReminder>();
             var currentReminder = reminders.LastOrDefault(item => item.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching or ReminderStatus.Delivered);
             messageLookup.TryGetValue(todo.SourceMessageId ?? 0, out var message);
-            var group = todo.GroupId is { } groupId && groupLookup.TryGetValue(groupId, out var resolvedGroup)
-                ? resolvedGroup
+            var project = todo.ManagedProjectId is { } projectId && projectLookup.TryGetValue(projectId, out var resolvedProject)
+                ? resolvedProject
                 : null;
             rows.Add(new TodoListItemViewModel(
                 todo,
                 message,
                 currentReminder,
                 _bucketPolicy.Classify(todo.DueAt, _clock.Now),
-                group?.Name ?? "未分组",
-                group?.Color ?? TodoGroupColorPolicy.DefaultColor,
+                project?.ProjectName ?? "未指定项目",
+                project?.Color ?? ProjectColorPolicy.DefaultColor,
                 UpdateSelectionState));
         }
 
@@ -328,16 +343,16 @@ public sealed class TodoListItemViewModel : ObservableObject
         Message? sourceMessage,
         TodoReminder? reminder,
         TodoDueBucket bucket,
-        string groupName,
-        string groupColor,
+        string projectName,
+        string projectColor,
         Action selectionChanged)
     {
         Todo = todo;
         SourceMessage = sourceMessage;
         Reminder = reminder;
         Bucket = bucket;
-        GroupName = groupName;
-        GroupColor = groupColor;
+        ProjectName = projectName;
+        ProjectColor = projectColor;
         _selectionChanged = selectionChanged;
     }
 
@@ -345,8 +360,8 @@ public sealed class TodoListItemViewModel : ObservableObject
     public Message? SourceMessage { get; }
     public TodoReminder? Reminder { get; }
     public TodoDueBucket Bucket { get; }
-    public string GroupName { get; }
-    public string GroupColor { get; }
+    public string ProjectName { get; }
+    public string ProjectColor { get; }
     public long Id => Todo.Id;
     public bool IsPinned => Todo.IsPinned;
     public string PinButtonText => IsPinned ? "取消置顶" : "置顶";

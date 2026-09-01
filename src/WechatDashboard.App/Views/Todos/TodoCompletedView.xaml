@@ -11,10 +11,10 @@
                 <DataGridTextColumn Header="完成时间" Binding="{Binding CompletedAt}" Width="145" />
                 <DataGridTextColumn Header="消息时间" Binding="{Binding SentAt}" Width="145" />
                 <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="75" />
-                <DataGridTemplateColumn Header="分组" Width="110">
+                <DataGridTemplateColumn Header="项目" Width="110">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
-                            <TextBlock Text="{Binding GroupName}" Foreground="{Binding GroupColor}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding ProjectName}" Foreground="{Binding ProjectColor}" FontWeight="SemiBold" VerticalAlignment="Center" />
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
