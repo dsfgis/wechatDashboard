@@ -81,13 +81,12 @@ public partial class DesktopCalendarWindow : Window
 
         _hasAppliedSavedState = true;
         var state = _stateStore.Load();
-        Width = state.Width;
-        Height = state.Height;
+        ApplyWindowSize(GetFixedWindowSize());
         Opacity = state.Opacity;
         EdgeSnapCheckBox.IsChecked = state.IsEdgeSnapEnabled;
         _dockEdge = state.DockEdge;
         ApplyInitialPosition(state);
-        _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetWindowSize();
+        _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetFixedWindowSize();
         SetExpandedVisualState();
         UpdateDockStatus();
     }
@@ -119,8 +118,8 @@ public partial class DesktopCalendarWindow : Window
         _dockedWindowSize = null;
         UpdateDockStatus();
         // Windows Aero Snap may resize a borderless window while DragMove is ending.
-        // Preserve the user's size before the OS sees the edge and restore it when
-        // applying our position-only calendar docking behavior.
+        // Capture the pre-drag dimensions for the docking call contract; the fixed
+        // calendar size is reapplied before calculating the docked position.
         var sizeBeforeDrag = GetWindowSize();
         try
         {
@@ -206,12 +205,16 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (!_isApplyingSize && _hasAppliedSavedState && _dockEdge != DesktopCalendarDockEdge.None)
+        if (_isApplyingSize || !_hasAppliedSavedState)
         {
-            if (!_isRetracted)
-            {
-                _dockedWindowSize = e.NewSize;
-            }
+            return;
+        }
+
+        var fixedSize = GetFixedWindowSize();
+        ApplyWindowSize(fixedSize);
+        if (_dockEdge != DesktopCalendarDockEdge.None)
+        {
+            _dockedWindowSize = fixedSize;
             ApplyCurrentDockPosition(GetWorkArea());
         }
     }
@@ -236,7 +239,8 @@ public partial class DesktopCalendarWindow : Window
         }
 
         _dockEdge = nearest.Key;
-        var size = preservedSize ?? GetWindowSize();
+        _ = preservedSize;
+        var size = GetFixedWindowSize();
         _dockedWindowSize = size;
         SetExpandedVisualState();
         ApplyWindowSize(size);
@@ -255,13 +259,13 @@ public partial class DesktopCalendarWindow : Window
         ApplyPosition(position);
     }
 
-    private void ApplyWindowSize(Size size)
+    private void ApplyWindowSize(Size _)
     {
         _isApplyingSize = true;
         try
         {
-            Width = Math.Max(MinWidth, size.Width);
-            Height = Math.Max(MinHeight, size.Height);
+            Width = DesktopCalendarStateStore.FixedWidth;
+            Height = DesktopCalendarStateStore.FixedHeight;
         }
         finally
         {
@@ -352,7 +356,7 @@ public partial class DesktopCalendarWindow : Window
         _isRetracted = false;
         CalendarSurface.Visibility = Visibility.Visible;
         EdgeRevealHandle.Visibility = Visibility.Collapsed;
-        ResizeMode = ResizeMode.CanResizeWithGrip;
+        ResizeMode = ResizeMode.NoResize;
     }
 
     private void ConfigureRevealHandle()
@@ -420,9 +424,11 @@ public partial class DesktopCalendarWindow : Window
             _dockEdge));
     }
 
-    private Size GetWindowSize() => new(
-        ActualWidth > 0 ? ActualWidth : Width,
-        ActualHeight > 0 ? ActualHeight : Height);
+    private static Size GetFixedWindowSize() => new(
+        DesktopCalendarStateStore.FixedWidth,
+        DesktopCalendarStateStore.FixedHeight);
+
+    private Size GetWindowSize() => GetFixedWindowSize();
 
     private void UpdateDockStatus()
     {

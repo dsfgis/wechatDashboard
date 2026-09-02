@@ -1933,7 +1933,7 @@ static Task TestDesktopCalendarStateStoreAsync()
 {
     var statePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}", "desktop-calendar.json");
     var store = new DesktopCalendarStateStore(statePath);
-    var expected = new DesktopCalendarWindowState(
+    var legacyState = new DesktopCalendarWindowState(
         Left: 120,
         Top: 80,
         Width: 1100,
@@ -1942,17 +1942,22 @@ static Task TestDesktopCalendarStateStoreAsync()
         IsEdgeSnapEnabled: false,
         DockEdge: DesktopCalendarDockEdge.Right);
 
-    store.Save(expected);
+    store.Save(legacyState);
     var actual = store.Load();
 
-    AssertEqual(expected, actual, "Desktop calendar position, opacity and dock preference should round-trip.");
+    var expected = legacyState with
+    {
+        Width = DesktopCalendarStateStore.FixedWidth,
+        Height = DesktopCalendarStateStore.FixedHeight
+    };
+    AssertEqual(expected, actual, "Desktop calendar preferences should round-trip while legacy dimensions migrate to the fixed size.");
     return Task.CompletedTask;
 }
 
 static Task TestDesktopCalendarDockLayoutAsync()
 {
     var area = new System.Windows.Rect(100, 50, 1920, 1040);
-    var size = new System.Windows.Size(980, 620);
+    var size = new System.Windows.Size(DesktopCalendarStateStore.FixedWidth, DesktopCalendarStateStore.FixedHeight);
     var current = new System.Windows.Point(400, 200);
 
     var leftDocked = DesktopCalendarDockLayout.GetDockedPosition(area, size, current, DesktopCalendarDockEdge.Left);
@@ -2002,6 +2007,9 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             window.UpdateLayout();
             var initialWidth = window.ActualWidth;
             var initialHeight = window.ActualHeight;
+            AssertEqual(DesktopCalendarStateStore.FixedWidth, initialWidth, "Desktop calendar should use the fixed width.");
+            AssertEqual(DesktopCalendarStateStore.FixedHeight, initialHeight, "Desktop calendar should use the fixed height.");
+            AssertEqual(System.Windows.ResizeMode.NoResize, window.ResizeMode, "Desktop calendar should keep its size fixed.");
             var retractMethod = typeof(WechatDashboard.App.Views.Todos.DesktopCalendarWindow).GetMethod(
                 "RetractToEdge",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -2039,6 +2047,7 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertEqual(System.Windows.Visibility.Collapsed, revealHandle.Visibility, "Click restoration should hide the edge handle.");
             AssertEqual(initialWidth, window.ActualWidth, "Revealing should preserve the docked calendar width.");
             AssertEqual(initialHeight, window.ActualHeight, "Revealing should preserve the docked calendar height.");
+            AssertEqual(System.Windows.ResizeMode.NoResize, window.ResizeMode, "Revealing should not make the fixed calendar resizable.");
             window.Shutdown();
         }
         catch (Exception ex)

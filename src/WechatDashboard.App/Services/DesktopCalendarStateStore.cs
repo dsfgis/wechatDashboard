@@ -15,8 +15,8 @@ public enum DesktopCalendarDockEdge
 public sealed record DesktopCalendarWindowState(
     double? Left = null,
     double? Top = null,
-    double Width = 980,
-    double Height = 620,
+    double Width = DesktopCalendarStateStore.FixedWidth,
+    double Height = DesktopCalendarStateStore.FixedHeight,
     double Opacity = 0.9,
     bool IsEdgeSnapEnabled = true,
     DesktopCalendarDockEdge DockEdge = DesktopCalendarDockEdge.None);
@@ -24,6 +24,8 @@ public sealed record DesktopCalendarWindowState(
 /// <summary>在当前用户的本地应用数据目录保存桌面日历的位置与显示偏好。</summary>
 public sealed class DesktopCalendarStateStore
 {
+    public const double FixedWidth = 980;
+    public const double FixedHeight = 620;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _path;
 
@@ -74,8 +76,8 @@ public sealed class DesktopCalendarStateStore
     {
         Left = IsFinite(state.Left) ? state.Left : null,
         Top = IsFinite(state.Top) ? state.Top : null,
-        Width = double.IsFinite(state.Width) ? Math.Clamp(state.Width, 760, 1800) : 980,
-        Height = double.IsFinite(state.Height) ? Math.Clamp(state.Height, 480, 1200) : 620,
+        Width = FixedWidth,
+        Height = FixedHeight,
         Opacity = double.IsFinite(state.Opacity) ? Math.Clamp(state.Opacity, 0.55, 1.0) : 0.9
     };
 
