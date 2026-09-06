@@ -61,7 +61,6 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBlock Text="桌面待办日历" FontSize="17" FontWeight="SemiBold" Foreground="#0F172A" />
-                            <TextBlock Text="　拖动标题栏移动；停靠后离开 2 秒自动收起" Margin="8,2,0,0" Foreground="#64748B" FontSize="12" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBlock Text="透明度" VerticalAlignment="Center" Foreground="#475569" Margin="0,0,6,0" />
@@ -71,13 +70,21 @@
                                     TickFrequency="0.05"
                                     Value="{Binding Opacity, ElementName=CalendarWindow, Mode=TwoWay}"
                                     Margin="0,0,10,0" />
+                            <CheckBox x:Name="DesktopEmbedCheckBox"
+                                      Content="嵌入桌面"
+                                      ToolTip="嵌入 Windows 桌面并锁定位置；取消勾选恢复移动"
+                                      Checked="DesktopEmbedCheckBox_Changed"
+                                      Unchecked="DesktopEmbedCheckBox_Changed"
+                                      VerticalAlignment="Center"
+                                      Foreground="#334155"
+                                      Margin="0,0,12,0" />
                             <CheckBox x:Name="EdgeSnapCheckBox"
                                       Content="自动吸附"
                                       IsChecked="True"
                                       VerticalAlignment="Center"
                                       Foreground="#334155"
                                       Margin="0,0,8,0" />
-                            <Button Content="停靠边缘" Style="{StaticResource ToolbarButtonStyle}" Click="DockButton_Click" />
+                            <Button x:Name="DockButton" Content="停靠边缘" Style="{StaticResource ToolbarButtonStyle}" Click="DockButton_Click" />
                             <Button Content="隐藏" Style="{StaticResource ToolbarButtonStyle}" Click="HideButton_Click" Margin="0" />
                         </StackPanel>
                     </Grid>

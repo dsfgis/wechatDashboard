@@ -1951,6 +1951,13 @@ static Task TestDesktopCalendarStateStoreAsync()
         Height = DesktopCalendarStateStore.FixedHeight
     };
     AssertEqual(expected, actual, "Desktop calendar preferences should round-trip while legacy dimensions migrate to the fixed size.");
+    AssertTrue(!actual.IsDesktopEmbedded, "Existing preferences should leave desktop embedding disabled.");
+    store.Save(legacyState with { IsDesktopEmbedded = true });
+    var embedded = store.Load();
+    AssertTrue(embedded.IsDesktopEmbedded, "Desktop embedding should survive a preferences reload.");
+    AssertEqual(DesktopCalendarDockEdge.None, embedded.DockEdge, "An embedded calendar must not restore edge retraction.");
+    File.WriteAllText(statePath, "{\"Left\":120,\"Top\":80,\"DockEdge\":3}");
+    AssertTrue(!store.Load().IsDesktopEmbedded, "JSON saved by an older application must default to a floating calendar.");
     return Task.CompletedTask;
 }
 
@@ -2048,7 +2055,35 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertEqual(initialWidth, window.ActualWidth, "Revealing should preserve the docked calendar width.");
             AssertEqual(initialHeight, window.ActualHeight, "Revealing should preserve the docked calendar height.");
             AssertEqual(System.Windows.ResizeMode.NoResize, window.ResizeMode, "Revealing should not make the fixed calendar resizable.");
+            var embedOption = (System.Windows.Controls.CheckBox)window.FindName("DesktopEmbedCheckBox");
+            var snapOption = (System.Windows.Controls.CheckBox)window.FindName("EdgeSnapCheckBox");
+            var dockButton = (System.Windows.Controls.Button)window.FindName("DockButton");
+            var nativeHandle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+            var originalBounds = DesktopCalendarNativeAssertions.GetBounds(nativeHandle);
+            embedOption.IsChecked = true;
+            window.UpdateLayout();
+            AssertTrue(embedOption.IsChecked == true,
+                $"Desktop embedding should succeed: {((System.Windows.Controls.TextBlock)window.FindName("DockStatusText")).Text}");
+            DesktopCalendarNativeAssertions.AssertEmbeddedAndImmovable(nativeHandle, originalBounds);
+            AssertTrue(!snapOption.IsEnabled && !dockButton.IsEnabled, "Embedding must disable snapping and manual docking.");
+            dockMethod.Invoke(window, new object?[] { true, preservedSize });
+            retractMethod.Invoke(window, null);
+            AssertEqual(System.Windows.Visibility.Visible, calendarSurface.Visibility, "Embedded calendars must never retract.");
+            AssertTrue(new DesktopCalendarStateStore(statePath).Load().IsDesktopEmbedded, "Checking embedding must save immediately.");
+            embedOption.IsChecked = false;
+            window.UpdateLayout();
+            DesktopCalendarNativeAssertions.AssertDetached(nativeHandle, originalBounds);
+            AssertTrue(snapOption.IsEnabled && dockButton.IsEnabled, "Detaching should restore movement controls.");
+            AssertTrue(!new DesktopCalendarStateStore(statePath).Load().IsDesktopEmbedded, "Unchecking must save immediately.");
+            embedOption.IsChecked = true;
             window.Shutdown();
+            AssertTrue(new DesktopCalendarStateStore(statePath).Load().IsDesktopEmbedded, "Shutdown must retain embedding preference after detaching.");
+            var restoredWindow = new WechatDashboard.App.Views.Todos.DesktopCalendarWindow(viewModel, new DesktopCalendarStateStore(statePath));
+            restoredWindow.Show();
+            restoredWindow.UpdateLayout();
+            AssertTrue(((System.Windows.Controls.CheckBox)restoredWindow.FindName("DesktopEmbedCheckBox")).IsChecked == true,
+                "Reopening must restore actual desktop embedding.");
+            restoredWindow.Shutdown();
         }
         catch (Exception ex)
         {

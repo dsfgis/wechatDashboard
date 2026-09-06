@@ -18,6 +18,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
+    <ApplicationManifest>../../src/WechatDashboard.App/app.manifest</ApplicationManifest>
   </PropertyGroup>
 
 </Project>

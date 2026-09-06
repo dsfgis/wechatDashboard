@@ -19,7 +19,8 @@ public sealed record DesktopCalendarWindowState(
     double Height = DesktopCalendarStateStore.FixedHeight,
     double Opacity = 0.9,
     bool IsEdgeSnapEnabled = true,
-    DesktopCalendarDockEdge DockEdge = DesktopCalendarDockEdge.None);
+    DesktopCalendarDockEdge DockEdge = DesktopCalendarDockEdge.None,
+    bool IsDesktopEmbedded = false);
 
 /// <summary>在当前用户的本地应用数据目录保存桌面日历的位置与显示偏好。</summary>
 public sealed class DesktopCalendarStateStore
@@ -78,6 +79,7 @@ public sealed class DesktopCalendarStateStore
         Top = IsFinite(state.Top) ? state.Top : null,
         Width = FixedWidth,
         Height = FixedHeight,
+        DockEdge = state.IsDesktopEmbedded ? DesktopCalendarDockEdge.None : state.DockEdge,
         Opacity = double.IsFinite(state.Opacity) ? Math.Clamp(state.Opacity, 0.55, 1.0) : 0.9
     };
 

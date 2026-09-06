@@ -26,6 +26,10 @@ public partial class DesktopCalendarWindow : Window
     private bool _isApplyingSize;
     private bool _hasAppliedSavedState;
     private bool _isRetracted;
+    private DesktopCalendarDesktopHost? _desktopHost;
+    private System.Windows.Point? _embeddedPosition;
+    private bool _isChangingEmbedding;
+    private bool IsDesktopEmbedded => _desktopHost?.IsEmbedded == true;
 
     public DesktopCalendarWindow(DesktopCalendarViewModel viewModel, DesktopCalendarStateStore stateStore)
     {
@@ -44,6 +48,15 @@ public partial class DesktopCalendarWindow : Window
                 RetractToEdge();
             }
         };
+        Closed += (_, _) =>
+        {
+            // Explorer may destroy its child windows when the shell restarts.
+            // MainWindow clears its reference on Closed so the next open recreates it.
+            _refreshTimer.Stop();
+            _autoHideTimer.Stop();
+            _desktopHost = null;
+            _hasAppliedSavedState = false;
+        };
     }
 
     public async Task ShowWidgetAsync()
@@ -58,7 +71,7 @@ public partial class DesktopCalendarWindow : Window
             RevealFromEdge();
         }
 
-        Activate();
+        if (!IsDesktopEmbedded) Activate();
         _refreshTimer.Start();
         await _viewModel.RefreshAsync();
     }
@@ -69,6 +82,8 @@ public partial class DesktopCalendarWindow : Window
         _refreshTimer.Stop();
         _autoHideTimer.Stop();
         SaveState();
+        if (IsDesktopEmbedded) _desktopHost!.Detach();
+        _hasAppliedSavedState = false; // Closing must not overwrite the saved embedded preference.
         Close();
     }
 
@@ -89,6 +104,7 @@ public partial class DesktopCalendarWindow : Window
         _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetFixedWindowSize();
         SetExpandedVisualState();
         UpdateDockStatus();
+        if (state.IsDesktopEmbedded) DesktopEmbedCheckBox.IsChecked = true;
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
@@ -107,7 +123,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void TitleBar_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ChangedButton != MouseButton.Left || e.ClickCount != 1 || IsInteractiveTitleBarElement(e.OriginalSource as DependencyObject))
+        if (IsDesktopEmbedded || e.ChangedButton != MouseButton.Left || e.ClickCount != 1 || IsInteractiveTitleBarElement(e.OriginalSource as DependencyObject))
         {
             return;
         }
@@ -160,6 +176,48 @@ public partial class DesktopCalendarWindow : Window
 
     private void DockButton_Click(object sender, RoutedEventArgs e) => DockToNearestEdge(force: true);
 
+    private void DesktopEmbedCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_hasAppliedSavedState || _isChangingEmbedding) return;
+        _isChangingEmbedding = true;
+        string? error = null;
+        try
+        {
+            _autoHideTimer.Stop();
+            if (DesktopEmbedCheckBox.IsChecked == true)
+            {
+                RevealFromEdge();
+                var position = new System.Windows.Point(Left, Top);
+                _desktopHost ??= new DesktopCalendarDesktopHost(new WindowInteropHelper(this).Handle);
+                _desktopHost.Embed();
+                _embeddedPosition = position;
+                _dockEdge = DesktopCalendarDockEdge.None;
+                _dockedWindowSize = null;
+                SetExpandedVisualState();
+            }
+            else if (IsDesktopEmbedded)
+            {
+                _desktopHost!.Detach();
+                if (_embeddedPosition is { } position) ApplyPosition(position);
+                _embeddedPosition = null;
+            }
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        {
+            error = $"桌面模式切换失败：{ex.Message}";
+        }
+        finally
+        {
+            DesktopEmbedCheckBox.IsChecked = IsDesktopEmbedded;
+            EdgeSnapCheckBox.IsEnabled = !IsDesktopEmbedded;
+            DockButton.IsEnabled = !IsDesktopEmbedded;
+            _isChangingEmbedding = false;
+            UpdateDockStatus();
+            if (error is not null) DockStatusText.Text = error;
+            SaveState();
+        }
+    }
+
     private void HideButton_Click(object sender, RoutedEventArgs e)
     {
         SaveState();
@@ -172,7 +230,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_MouseLeave(object sender, MouseEventArgs e)
     {
-        if (_dockEdge == DesktopCalendarDockEdge.None || _isRetracted)
+        if (IsDesktopEmbedded || _dockEdge == DesktopCalendarDockEdge.None || _isRetracted)
         {
             return;
         }
@@ -183,7 +241,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_LocationChanged(object? sender, EventArgs e)
     {
-        if (!_isApplyingPosition && !_isRetracted && _dockEdge != DesktopCalendarDockEdge.None)
+        if (!_isChangingEmbedding && !IsDesktopEmbedded && !_isApplyingPosition && !_isRetracted && _dockEdge != DesktopCalendarDockEdge.None)
         {
             var area = GetWorkArea();
             var remainsDocked = _dockEdge switch
@@ -205,7 +263,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (_isApplyingSize || !_hasAppliedSavedState)
+        if (_isChangingEmbedding || _isApplyingSize || !_hasAppliedSavedState)
         {
             return;
         }
@@ -221,6 +279,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void DockToNearestEdge(bool force, Size? preservedSize = null)
     {
+        if (IsDesktopEmbedded) return;
         var area = GetWorkArea();
         var distances = new Dictionary<DesktopCalendarDockEdge, double>
         {
@@ -308,7 +367,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void RetractToEdge()
     {
-        if (_dockEdge == DesktopCalendarDockEdge.None || _isRetracted || !IsVisible)
+        if (IsDesktopEmbedded || _dockEdge == DesktopCalendarDockEdge.None || _isRetracted || !IsVisible)
         {
             return;
         }
@@ -409,7 +468,7 @@ public partial class DesktopCalendarWindow : Window
         }
 
         var size = preservedSize ?? _dockedWindowSize ?? GetWindowSize();
-        var visiblePosition = DesktopCalendarDockLayout.GetDockedPosition(
+        var visiblePosition = _embeddedPosition ?? DesktopCalendarDockLayout.GetDockedPosition(
             GetWorkArea(),
             size,
             new System.Windows.Point(Left, Top),
@@ -421,7 +480,8 @@ public partial class DesktopCalendarWindow : Window
             size.Height,
             Opacity,
             EdgeSnapCheckBox.IsChecked == true,
-            _dockEdge));
+            _dockEdge,
+            IsDesktopEmbedded));
     }
 
     private static Size GetFixedWindowSize() => new(
@@ -432,13 +492,18 @@ public partial class DesktopCalendarWindow : Window
 
     private void UpdateDockStatus()
     {
+        if (IsDesktopEmbedded)
+        {
+            DockStatusText.Text = "已嵌入桌面 · 位置已锁定；取消勾选后可移动";
+            return;
+        }
         DockStatusText.Text = _dockEdge switch
         {
             DesktopCalendarDockEdge.Left => "已停靠左侧",
             DesktopCalendarDockEdge.Top => "已停靠顶部",
             DesktopCalendarDockEdge.Right => "已停靠右侧",
             DesktopCalendarDockEdge.Bottom => "已停靠底部",
-            _ => "未停靠"
+            _ => "拖动标题栏移动；停靠后离开 2 秒自动收起"
         };
     }
 }
