@@ -15,6 +15,7 @@ namespace WechatDashboard.App.Views.Todos;
 public partial class DesktopCalendarWindow : Window
 {
     private const double SnapThreshold = 32;
+    private const double InitialEmbeddedOpacity = 1.0; // Start desktop mode fully opaque.
     private readonly DesktopCalendarViewModel _viewModel;
     private readonly DesktopCalendarStateStore _stateStore;
     private readonly DispatcherTimer _refreshTimer;
@@ -96,12 +97,14 @@ public partial class DesktopCalendarWindow : Window
 
         _hasAppliedSavedState = true;
         var state = _stateStore.Load();
-        ApplyWindowSize(GetFixedWindowSize());
-        Opacity = state.Opacity;
+        ApplyWindowSize(new Size(state.Width, state.Height));
+        _desktopHost = new DesktopCalendarDesktopHost(new WindowInteropHelper(this).Handle);
+        OpacitySlider.Value = state.Opacity;
+        _desktopHost.SetOpacity(state.Opacity);
         EdgeSnapCheckBox.IsChecked = state.IsEdgeSnapEnabled;
         _dockEdge = state.DockEdge;
         ApplyInitialPosition(state);
-        _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetFixedWindowSize();
+        _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetWindowSize();
         SetExpandedVisualState();
         UpdateDockStatus();
         if (state.IsDesktopEmbedded) DesktopEmbedCheckBox.IsChecked = true;
@@ -134,8 +137,7 @@ public partial class DesktopCalendarWindow : Window
         _dockedWindowSize = null;
         UpdateDockStatus();
         // Windows Aero Snap may resize a borderless window while DragMove is ending.
-        // Capture the pre-drag dimensions for the docking call contract; the fixed
-        // calendar size is reapplied before calculating the docked position.
+        // Preserve user-selected dimensions when docking after a title drag.
         var sizeBeforeDrag = GetWindowSize();
         try
         {
@@ -176,6 +178,39 @@ public partial class DesktopCalendarWindow : Window
 
     private void DockButton_Click(object sender, RoutedEventArgs e) => DockToNearestEdge(force: true);
 
+    private void ResizeGrip_DragStarted(object sender, DragStartedEventArgs e)
+    {
+        _autoHideTimer.Stop();
+        _dockEdge = DesktopCalendarDockEdge.None;
+        _dockedWindowSize = null;
+        UpdateDockStatus();
+    }
+
+    private void ResizeGrip_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        if (_isRetracted) return;
+        var area = GetWorkArea();
+        var position = _embeddedPosition ?? new System.Windows.Point(Left, Top);
+        ApplyWindowSize(new Size(
+            Math.Clamp(Width + e.HorizontalChange, MinWidth, Math.Max(MinWidth, area.Right - position.X)),
+            Math.Clamp(Height + e.VerticalChange, MinHeight, Math.Max(MinHeight, area.Bottom - position.Y))));
+    }
+
+    private void ResizeGrip_DragCompleted(object sender, DragCompletedEventArgs e) => SaveState();
+
+    private void OpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!_hasAppliedSavedState || _desktopHost is null) return;
+        try
+        {
+            _desktopHost.SetOpacity(e.NewValue);
+        }
+        catch (Win32Exception ex)
+        {
+            DockStatusText.Text = $"透明度调整失败：{ex.Message}";
+        }
+    }
+
     private void DesktopEmbedCheckBox_Changed(object sender, RoutedEventArgs e)
     {
         if (!_hasAppliedSavedState || _isChangingEmbedding) return;
@@ -194,6 +229,9 @@ public partial class DesktopCalendarWindow : Window
                 _dockEdge = DesktopCalendarDockEdge.None;
                 _dockedWindowSize = null;
                 SetExpandedVisualState();
+                OpacitySlider.Value = InitialEmbeddedOpacity;
+                // Reapply after parenting even if the slider already has this value.
+                _desktopHost.SetOpacity(InitialEmbeddedOpacity);
             }
             else if (IsDesktopEmbedded)
             {
@@ -268,11 +306,10 @@ public partial class DesktopCalendarWindow : Window
             return;
         }
 
-        var fixedSize = GetFixedWindowSize();
-        ApplyWindowSize(fixedSize);
+        var size = GetWindowSize();
         if (_dockEdge != DesktopCalendarDockEdge.None)
         {
-            _dockedWindowSize = fixedSize;
+            _dockedWindowSize = size;
             ApplyCurrentDockPosition(GetWorkArea());
         }
     }
@@ -298,8 +335,7 @@ public partial class DesktopCalendarWindow : Window
         }
 
         _dockEdge = nearest.Key;
-        _ = preservedSize;
-        var size = GetFixedWindowSize();
+        var size = preservedSize ?? GetWindowSize();
         _dockedWindowSize = size;
         SetExpandedVisualState();
         ApplyWindowSize(size);
@@ -318,13 +354,13 @@ public partial class DesktopCalendarWindow : Window
         ApplyPosition(position);
     }
 
-    private void ApplyWindowSize(Size _)
+    private void ApplyWindowSize(Size size)
     {
         _isApplyingSize = true;
         try
         {
-            Width = DesktopCalendarStateStore.FixedWidth;
-            Height = DesktopCalendarStateStore.FixedHeight;
+            Width = Math.Max(MinWidth, size.Width);
+            Height = Math.Max(MinHeight, size.Height);
         }
         finally
         {
@@ -376,6 +412,7 @@ public partial class DesktopCalendarWindow : Window
         SaveState();
         _isRetracted = true;
         CalendarSurface.Visibility = Visibility.Hidden;
+        ResizeGrip.Visibility = Visibility.Collapsed;
         ConfigureRevealHandle();
         EdgeRevealHandle.Visibility = Visibility.Visible;
         ResizeMode = ResizeMode.NoResize;
@@ -414,6 +451,7 @@ public partial class DesktopCalendarWindow : Window
     {
         _isRetracted = false;
         CalendarSurface.Visibility = Visibility.Visible;
+        ResizeGrip.Visibility = Visibility.Visible;
         EdgeRevealHandle.Visibility = Visibility.Collapsed;
         ResizeMode = ResizeMode.NoResize;
     }
@@ -478,23 +516,19 @@ public partial class DesktopCalendarWindow : Window
             visiblePosition.Y,
             size.Width,
             size.Height,
-            Opacity,
+            OpacitySlider.Value,
             EdgeSnapCheckBox.IsChecked == true,
             _dockEdge,
             IsDesktopEmbedded));
     }
 
-    private static Size GetFixedWindowSize() => new(
-        DesktopCalendarStateStore.FixedWidth,
-        DesktopCalendarStateStore.FixedHeight);
-
-    private Size GetWindowSize() => GetFixedWindowSize();
+    private Size GetWindowSize() => new(Width, Height);
 
     private void UpdateDockStatus()
     {
         if (IsDesktopEmbedded)
         {
-            DockStatusText.Text = "已嵌入桌面 · 位置已锁定；取消勾选后可移动";
+            DockStatusText.Text = "已嵌入桌面 · 位置已锁定；拖拽右下角调整大小";
             return;
         }
         DockStatusText.Text = _dockEdge switch
@@ -503,7 +537,7 @@ public partial class DesktopCalendarWindow : Window
             DesktopCalendarDockEdge.Top => "已停靠顶部",
             DesktopCalendarDockEdge.Right => "已停靠右侧",
             DesktopCalendarDockEdge.Bottom => "已停靠底部",
-            _ => "拖动标题栏移动；停靠后离开 2 秒自动收起"
+            _ => "拖动标题栏移动；拖拽右下角调整大小；停靠后离开 2 秒自动收起"
         };
     }
 }

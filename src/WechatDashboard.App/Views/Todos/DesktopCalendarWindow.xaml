@@ -7,16 +7,13 @@
         Icon="../../Assets/AppIcon.png"
         Width="980"
         Height="620"
-        MinWidth="980"
-        MinHeight="620"
-        MaxWidth="980"
-        MaxHeight="620"
+        MinWidth="860"
+        MinHeight="520"
         WindowStyle="None"
         ResizeMode="NoResize"
-        AllowsTransparency="True"
-        Background="Transparent"
+        AllowsTransparency="False"
+        Background="#F7FAFC"
         ShowInTaskbar="False"
-        Opacity="0.9"
         Loaded="Window_Loaded"
         Closing="Window_Closing"
         LocationChanged="Window_LocationChanged"
@@ -52,23 +49,22 @@
                         Grid.Row="0"
                         Background="#E2E8F0"
                         CornerRadius="13,13,0,0"
-                        Padding="12,10"
+                        Padding="12,4"
                         PreviewMouseLeftButtonDown="TitleBar_PreviewMouseLeftButtonDown">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="桌面待办日历" FontSize="17" FontWeight="SemiBold" Foreground="#0F172A" />
-                        </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBlock Text="透明度" VerticalAlignment="Center" Foreground="#475569" Margin="0,0,6,0" />
-                            <Slider Width="86"
+                            <Slider x:Name="OpacitySlider"
+                                    Width="86"
                                     Minimum="0.55"
                                     Maximum="1"
                                     TickFrequency="0.05"
-                                    Value="{Binding Opacity, ElementName=CalendarWindow, Mode=TwoWay}"
+                                    Value="0.9"
+                                    ValueChanged="OpacitySlider_ValueChanged"
                                     Margin="0,0,10,0" />
                             <CheckBox x:Name="DesktopEmbedCheckBox"
                                       Content="嵌入桌面"
@@ -93,10 +89,25 @@
                 <todoViews:DesktopCalendarView Grid.Row="1" />
 
                 <Border Grid.Row="2" Background="#EEF2F7" CornerRadius="0,0,13,13" Padding="12,7">
-                    <TextBlock x:Name="DockStatusText" Text="未停靠" Foreground="#64748B" HorizontalAlignment="Right" />
+                    <TextBlock x:Name="DockStatusText" Text="未停靠" Foreground="#64748B" HorizontalAlignment="Right" Margin="0,0,20,0" />
                 </Border>
             </Grid>
         </Border>
+
+        <Thumb x:Name="ResizeGrip" Width="22" Height="22"
+               HorizontalAlignment="Right" VerticalAlignment="Bottom"
+               Cursor="SizeNWSE" ToolTip="拖拽调整日历大小"
+               AutomationProperties.Name="调整日历大小"
+               DragStarted="ResizeGrip_DragStarted" DragDelta="ResizeGrip_DragDelta"
+               DragCompleted="ResizeGrip_DragCompleted">
+            <Thumb.Template>
+                <ControlTemplate TargetType="Thumb">
+                    <Grid Background="Transparent">
+                        <Path Data="M 7,17 L 17,7 M 12,17 L 17,12" Stroke="#64748B" StrokeThickness="2" />
+                    </Grid>
+                </ControlTemplate>
+            </Thumb.Template>
+        </Thumb>
 
         <Border x:Name="EdgeRevealHandle"
                 Panel.ZIndex="10"
