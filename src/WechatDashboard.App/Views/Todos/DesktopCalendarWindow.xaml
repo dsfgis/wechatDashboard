@@ -12,7 +12,7 @@
         WindowStyle="None"
         ResizeMode="NoResize"
         AllowsTransparency="False"
-        Background="#F7FAFC"
+        Background="{DynamicResource CalendarCanvas}"
         ShowInTaskbar="False"
         Loaded="Window_Loaded"
         Closing="Window_Closing"
@@ -21,20 +21,50 @@
         MouseEnter="Window_MouseEnter"
         MouseLeave="Window_MouseLeave">
     <Window.Resources>
+      <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary Source="CalendarControls.xaml" />
+        </ResourceDictionary.MergedDictionaries>
         <Style x:Key="ToolbarButtonStyle" TargetType="Button">
-            <Setter Property="Background" Value="#F8FAFC" />
-            <Setter Property="BorderBrush" Value="#CBD5E1" />
+            <Setter Property="Background" Value="{DynamicResource CalendarCanvas}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CalendarBorder}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Padding" Value="10,5" />
             <Setter Property="Margin" Value="0,0,6,0" />
             <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Foreground" Value="{DynamicResource CalendarSecondaryText}" />
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonSurface" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource CalendarSelected}" />
+                                <Setter TargetName="ButtonSurface" Property="BorderBrush" Value="{DynamicResource CalendarAccentBorder}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource CalendarHover}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonSurface" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
+      </ResourceDictionary>
     </Window.Resources>
 
     <Grid>
         <Border x:Name="CalendarSurface"
-                Background="#F7FAFC"
-                BorderBrush="#94A3B8"
+                Background="{DynamicResource CalendarCanvas}"
+                BorderBrush="{DynamicResource CalendarOuterBorder}"
                 BorderThickness="1"
                 CornerRadius="14"
                 Padding="1">
@@ -47,7 +77,7 @@
 
                 <Border x:Name="TitleBar"
                         Grid.Row="0"
-                        Background="#E2E8F0"
+                        Background="{DynamicResource CalendarMutedSurface}"
                         CornerRadius="13,13,0,0"
                         Padding="12,4"
                         PreviewMouseLeftButtonDown="TitleBar_PreviewMouseLeftButtonDown">
@@ -57,39 +87,43 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="透明度" VerticalAlignment="Center" Foreground="#475569" Margin="0,0,6,0" />
+                            <Button x:Name="ThemeButton" Content="暗黑" Click="ThemeButton_Click"
+                                    Style="{StaticResource ToolbarButtonStyle}" ToolTip="切换为暗黑主题"
+                                    AutomationProperties.Name="切换日历主题" Margin="0,0,12,0" />
+                            <TextBlock Text="透明度" VerticalAlignment="Center" Foreground="{DynamicResource CalendarSecondaryText}" Margin="0,0,6,0" />
                             <Slider x:Name="OpacitySlider"
                                     Width="86"
                                     Minimum="0.55"
                                     Maximum="1"
                                     TickFrequency="0.05"
                                     Value="0.9"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="日历透明度"
                                     ValueChanged="OpacitySlider_ValueChanged"
                                     Margin="0,0,10,0" />
-                            <CheckBox x:Name="DesktopEmbedCheckBox"
+                            <CheckBox x:Name="DesktopEmbedCheckBox" Style="{StaticResource CalendarCheckBoxStyle}"
                                       Content="嵌入桌面"
                                       ToolTip="嵌入 Windows 桌面并锁定位置；取消勾选恢复移动"
                                       Checked="DesktopEmbedCheckBox_Changed"
                                       Unchecked="DesktopEmbedCheckBox_Changed"
                                       VerticalAlignment="Center"
-                                      Foreground="#334155"
+                                      Foreground="{DynamicResource CalendarText}"
                                       Margin="0,0,12,0" />
-                            <CheckBox x:Name="EdgeSnapCheckBox"
-                                      Content="自动吸附"
-                                      IsChecked="True"
-                                      VerticalAlignment="Center"
-                                      Foreground="#334155"
-                                      Margin="0,0,8,0" />
-                            <Button x:Name="DockButton" Content="停靠边缘" Style="{StaticResource ToolbarButtonStyle}" Click="DockButton_Click" />
-                            <Button Content="隐藏" Style="{StaticResource ToolbarButtonStyle}" Click="HideButton_Click" Margin="0" />
+                            <Button x:Name="CloseButton" Style="{StaticResource ToolbarButtonStyle}"
+                                    Click="CloseButton_Click" Margin="0" Width="30" Padding="0"
+                                    ToolTip="关闭日历" AutomationProperties.Name="关闭日历">
+                                <Path Data="M 1,1 L 11,11 M 11,1 L 1,11" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                      StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      Width="12" Height="12" />
+                            </Button>
                         </StackPanel>
                     </Grid>
                 </Border>
 
-                <todoViews:DesktopCalendarView Grid.Row="1" />
+                <todoViews:DesktopCalendarView x:Name="CalendarContent" Grid.Row="1" />
 
-                <Border Grid.Row="2" Background="#EEF2F7" CornerRadius="0,0,13,13" Padding="12,7">
-                    <TextBlock x:Name="DockStatusText" Text="未停靠" Foreground="#64748B" HorizontalAlignment="Right" Margin="0,0,20,0" />
+                <Border Grid.Row="2" Background="{DynamicResource CalendarCanvas}" CornerRadius="0,0,13,13" Padding="12,7">
+                    <TextBlock x:Name="DockStatusText" Text="未停靠" Foreground="{DynamicResource CalendarMutedText}" HorizontalAlignment="Right" Margin="0,0,20,0" />
                 </Border>
             </Grid>
         </Border>
@@ -103,7 +137,7 @@
             <Thumb.Template>
                 <ControlTemplate TargetType="Thumb">
                     <Grid Background="Transparent">
-                        <Path Data="M 7,17 L 17,7 M 12,17 L 17,12" Stroke="#64748B" StrokeThickness="2" />
+                        <Path Data="M 7,17 L 17,7 M 12,17 L 17,12" Stroke="{DynamicResource CalendarMutedText}" StrokeThickness="2" />
                     </Grid>
                 </ControlTemplate>
             </Thumb.Template>
@@ -112,8 +146,8 @@
         <Border x:Name="EdgeRevealHandle"
                 Panel.ZIndex="10"
                 Visibility="Collapsed"
-                Background="#2563EB"
-                BorderBrush="#BFDBFE"
+                Background="{DynamicResource CalendarAccent}"
+                BorderBrush="{DynamicResource CalendarRevealBorder}"
                 BorderThickness="1"
                 CornerRadius="9"
                 Cursor="Hand"

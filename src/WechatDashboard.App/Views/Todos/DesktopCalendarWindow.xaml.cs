@@ -30,6 +30,7 @@ public partial class DesktopCalendarWindow : Window
     private DesktopCalendarDesktopHost? _desktopHost;
     private System.Windows.Point? _embeddedPosition;
     private bool _isChangingEmbedding;
+    private bool _isDarkTheme;
     private bool IsDesktopEmbedded => _desktopHost?.IsEmbedded == true;
 
     public DesktopCalendarWindow(DesktopCalendarViewModel viewModel, DesktopCalendarStateStore stateStore)
@@ -37,6 +38,7 @@ public partial class DesktopCalendarWindow : Window
         _viewModel = viewModel;
         _stateStore = stateStore;
         InitializeComponent();
+        ApplyTheme(_stateStore.Load().IsDarkTheme);
         DataContext = viewModel;
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         _refreshTimer.Tick += async (_, _) => await _viewModel.RefreshAsync();
@@ -101,7 +103,6 @@ public partial class DesktopCalendarWindow : Window
         _desktopHost = new DesktopCalendarDesktopHost(new WindowInteropHelper(this).Handle);
         OpacitySlider.Value = state.Opacity;
         _desktopHost.SetOpacity(state.Opacity);
-        EdgeSnapCheckBox.IsChecked = state.IsEdgeSnapEnabled;
         _dockEdge = state.DockEdge;
         ApplyInitialPosition(state);
         _dockedWindowSize = _dockEdge == DesktopCalendarDockEdge.None ? null : GetWindowSize();
@@ -148,14 +149,7 @@ public partial class DesktopCalendarWindow : Window
             return;
         }
 
-        if (EdgeSnapCheckBox.IsChecked == true)
-        {
-            DockToNearestEdge(force: false, sizeBeforeDrag);
-        }
-        else
-        {
-            UpdateDockStatus();
-        }
+        DockToNearestEdge(force: false, sizeBeforeDrag);
     }
 
     private bool IsInteractiveTitleBarElement(DependencyObject? source)
@@ -175,8 +169,6 @@ public partial class DesktopCalendarWindow : Window
 
         return false;
     }
-
-    private void DockButton_Click(object sender, RoutedEventArgs e) => DockToNearestEdge(force: true);
 
     private void ResizeGrip_DragStarted(object sender, DragStartedEventArgs e)
     {
@@ -247,8 +239,6 @@ public partial class DesktopCalendarWindow : Window
         finally
         {
             DesktopEmbedCheckBox.IsChecked = IsDesktopEmbedded;
-            EdgeSnapCheckBox.IsEnabled = !IsDesktopEmbedded;
-            DockButton.IsEnabled = !IsDesktopEmbedded;
             _isChangingEmbedding = false;
             UpdateDockStatus();
             if (error is not null) DockStatusText.Text = error;
@@ -256,12 +246,21 @@ public partial class DesktopCalendarWindow : Window
         }
     }
 
-    private void HideButton_Click(object sender, RoutedEventArgs e)
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void ThemeButton_Click(object sender, RoutedEventArgs e)
     {
+        ApplyTheme(!_isDarkTheme);
         SaveState();
-        _refreshTimer.Stop();
-        _autoHideTimer.Stop();
-        Hide();
+    }
+
+    private void ApplyTheme(bool dark)
+    {
+        _isDarkTheme = dark;
+        DesktopCalendarTheme.Apply(Resources, dark);
+        CalendarContent.SetDarkTheme(dark);
+        ThemeButton.Content = dark ? "浅色" : "暗黑";
+        ThemeButton.ToolTip = dark ? "切换为浅色主题" : "切换为暗黑主题";
     }
 
     private void Window_MouseEnter(object sender, MouseEventArgs e) => _autoHideTimer.Stop();
@@ -301,6 +300,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        UpdateWindowShape();
         if (_isChangingEmbedding || _isApplyingSize || !_hasAppliedSavedState)
         {
             return;
@@ -415,6 +415,7 @@ public partial class DesktopCalendarWindow : Window
         ResizeGrip.Visibility = Visibility.Collapsed;
         ConfigureRevealHandle();
         EdgeRevealHandle.Visibility = Visibility.Visible;
+        UpdateWindowShape();
         ResizeMode = ResizeMode.NoResize;
         ApplyWindowSize(size);
         ApplyCurrentDockPosition(GetWorkArea(), size);
@@ -454,6 +455,40 @@ public partial class DesktopCalendarWindow : Window
         ResizeGrip.Visibility = Visibility.Visible;
         EdgeRevealHandle.Visibility = Visibility.Collapsed;
         ResizeMode = ResizeMode.NoResize;
+        UpdateWindowShape();
+    }
+
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        Dispatcher.BeginInvoke(new Action(UpdateWindowShape), DispatcherPriority.Loaded);
+    }
+
+    private void UpdateWindowShape()
+    {
+        if (_desktopHost is null) return;
+        var bounds = new Rect(0, 0, Width, Height);
+        var radius = CalendarSurface.CornerRadius.TopLeft;
+        if (_isRetracted)
+        {
+            var width = EdgeRevealHandle.Width;
+            var height = EdgeRevealHandle.Height;
+            var left = EdgeRevealHandle.HorizontalAlignment switch
+            {
+                HorizontalAlignment.Right => Width - width,
+                HorizontalAlignment.Center => (Width - width) / 2,
+                _ => 0
+            };
+            var top = EdgeRevealHandle.VerticalAlignment switch
+            {
+                VerticalAlignment.Bottom => Height - height,
+                VerticalAlignment.Center => (Height - height) / 2,
+                _ => 0
+            };
+            bounds = new Rect(left, top, width, height);
+            radius = EdgeRevealHandle.CornerRadius.TopLeft;
+        }
+        _desktopHost.SetShape(bounds, radius);
     }
 
     private void ConfigureRevealHandle()
@@ -517,9 +552,10 @@ public partial class DesktopCalendarWindow : Window
             size.Width,
             size.Height,
             OpacitySlider.Value,
-            EdgeSnapCheckBox.IsChecked == true,
+            IsEdgeSnapEnabled: true,
             _dockEdge,
-            IsDesktopEmbedded));
+            IsDesktopEmbedded,
+            IsDarkTheme: _isDarkTheme));
     }
 
     private Size GetWindowSize() => new(Width, Height);

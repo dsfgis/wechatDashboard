@@ -20,7 +20,8 @@ public sealed record DesktopCalendarWindowState(
     double Opacity = 0.9,
     bool IsEdgeSnapEnabled = true,
     DesktopCalendarDockEdge DockEdge = DesktopCalendarDockEdge.None,
-    bool IsDesktopEmbedded = false);
+    bool IsDesktopEmbedded = false,
+    bool IsDarkTheme = false);
 
 /// <summary>在当前用户的本地应用数据目录保存桌面日历的位置与显示偏好。</summary>
 public sealed class DesktopCalendarStateStore

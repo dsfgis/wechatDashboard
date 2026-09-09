@@ -11,6 +11,72 @@ internal static class DesktopCalendarNativeAssertions
         return result;
     }
 
+    internal static void AssertRoundedRegion(nint window)
+    {
+        var bounds = GetBounds(window);
+        var width = bounds.Right - bounds.Left;
+        var height = bounds.Bottom - bounds.Top;
+        var region = CreateRectRgn(0, 0, 0, 0);
+        try
+        {
+            if (GetWindowRgn(window, region) == 0
+                || PtInRegion(region, 0, 0) || PtInRegion(region, width - 1, 0)
+                || PtInRegion(region, 0, height - 1) || PtInRegion(region, width - 1, height - 1)
+                || !PtInRegion(region, width / 2, height / 2)
+                || !PtInRegion(region, width / 2, height - 2))
+                throw new InvalidOperationException("The native region must cut all four corners and cover the current resized surface.");
+        }
+        finally { DeleteObject(region); }
+    }
+
+    internal static void AssertRetractedRegion(nint window)
+    {
+        var region = CreateRectRgn(0, 0, 0, 0);
+        try
+        {
+            if (GetWindowRgn(window, region) == 0) throw new InvalidOperationException("Missing reveal handle region.");
+            GetRgnBox(region, out var bounds);
+            var scale = GetDpiForWindow(window) / 96.0;
+            if (bounds.Right - bounds.Left > 105 * scale || bounds.Bottom - bounds.Top > 105 * scale)
+                throw new InvalidOperationException("Retraction must expose only the small handle, not the full window background.");
+        }
+        finally { DeleteObject(region); }
+    }
+
+    internal static void AssertStaysBelowOtherWindows(nint window)
+    {
+        if ((GetWindowLong(window, -16) & 0x40000000) != 0) return;
+        var other = new System.Windows.Window
+        {
+            Title = "日历层级验证：此窗口应始终在日历上方",
+            Width = 480, Height = 220, Left = 180, Top = 180,
+            Background = System.Windows.Media.Brushes.DarkSlateBlue,
+            Content = new System.Windows.Controls.TextBlock
+            {
+                Text = "其他应用窗口\n应完整覆盖日历，点击日历也不能抢到前面",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 20, Margin = new System.Windows.Thickness(24)
+            }
+        };
+        try
+        {
+            other.Show();
+            var otherHandle = new System.Windows.Interop.WindowInteropHelper(other).Handle;
+            if (SendMessage(window, 0x0021, otherHandle, (nint)0x02010001) != 3)
+                throw new InvalidOperationException("Embedded mouse input must not activate the calendar.");
+            foreach (var target in new nint[] { 0, -1 })
+            {
+                SetWindowPos(window, target, 0, 0, 0, 0, 0x0003);
+                var foundOther = false;
+                for (var above = GetWindow(window, 3); above != 0; above = GetWindow(above, 3))
+                    if (above == otherHandle) { foundOther = true; break; }
+                if (!foundOther || (GetWindowLong(window, -20) & 0x00000008) != 0)
+                    throw new InvalidOperationException("Even a raise/topmost request must leave the embedded calendar below other applications.");
+            }
+        }
+        finally { other.Close(); }
+    }
+
     internal static void AssertEmbeddedAndImmovable(nint window, Bounds expected)
     {
         var parent = GetParent(window);
@@ -62,4 +128,12 @@ internal static class DesktopCalendarNativeAssertions
     [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out Bounds bounds);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] private static extern bool GetLayeredWindowAttributes(nint window, out uint colorKey, out byte alpha, out uint flags);
+    [DllImport("user32.dll")] private static extern int GetWindowRgn(nint window, nint region);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
+    [DllImport("user32.dll")] private static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
+    [DllImport("gdi32.dll")] private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint region);
+    [DllImport("gdi32.dll")] private static extern bool PtInRegion(nint region, int x, int y);
+    [DllImport("gdi32.dll")] private static extern int GetRgnBox(nint region, out Bounds bounds);
 }

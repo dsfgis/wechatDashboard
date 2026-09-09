@@ -15,6 +15,7 @@ public sealed class DesktopCalendarDesktopHost
     private const int PopupStyle = unchecked((int)0x80000000);
     private const int ExtendedStyleIndex = -20;
     private const int LayeredStyle = 0x00080000;
+    private const int NoActivateStyle = 0x08000000;
     private const uint NoActivate = 0x10;
     private const uint FrameChanged = 0x20;
     private readonly nint _window;
@@ -25,6 +26,24 @@ public sealed class DesktopCalendarDesktopHost
     private bool _usesRedirectedOpacity;
     private nint _desktopZOrderAfter;
     private bool _usesTopLevelDesktopOverlay;
+    private bool _originalNoActivate;
+    private nint _desktopWindow;
+
+    public void SetShape(Rect bounds, double radius)
+    {
+        var scale = GetDpiForWindow(_window) / 96.0;
+        var region = CreateRoundRectRgn(
+            (int)Math.Round(bounds.Left * scale), (int)Math.Round(bounds.Top * scale),
+            (int)Math.Round(bounds.Right * scale) + 1, (int)Math.Round(bounds.Bottom * scale) + 1,
+            (int)Math.Round(radius * 2 * scale), (int)Math.Round(radius * 2 * scale));
+        if (region == 0) throw new Win32Exception(Marshal.GetLastPInvokeError());
+        // Windows owns the region after success; only free it on failure.
+        if (SetWindowRgn(_window, region, true) == 0)
+        {
+            DeleteObject(region);
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        }
+    }
 
     public DesktopCalendarDesktopHost(nint window)
     {
@@ -69,6 +88,8 @@ public sealed class DesktopCalendarDesktopHost
         if (desktop == 0) throw new InvalidOperationException("未找到 Windows 桌面，请确认资源管理器正在运行。");
         Check(GetWindowRect(_window, out _screenBounds));
         _originalStyle = GetWindowLong(_window, StyleIndex);
+        _originalNoActivate = (GetWindowLong(_window, ExtendedStyleIndex) & NoActivateStyle) != 0;
+        _desktopWindow = desktop;
         var position = new NativePoint { X = _screenBounds.Left, Y = _screenBounds.Top };
         _usesTopLevelDesktopOverlay = _desktopZOrderAfter != 0;
         if (!_usesTopLevelDesktopOverlay) Check(ScreenToClient(desktop, ref position));
@@ -81,10 +102,12 @@ public sealed class DesktopCalendarDesktopHost
                 SetParentChecked(desktop);
             }
             IsEmbedded = true;
+            if (_usesTopLevelDesktopOverlay)
+                SetWindowLong(_window, ExtendedStyleIndex, GetWindowLong(_window, ExtendedStyleIndex) | NoActivateStyle);
             // A raised desktop has a no-redirection Progman. A normal top-level
             // WPF window placed directly above Progman composes reliably there;
             // direct child HWNDs can receive input while contributing no pixels.
-            var insertAfter = _usesTopLevelDesktopOverlay ? desktop : (nint)0;
+            var insertAfter = _usesTopLevelDesktopOverlay ? GetDesktopInsertAfter() : (nint)0;
             var x = _usesTopLevelDesktopOverlay ? _screenBounds.Left : position.X;
             var y = _usesTopLevelDesktopOverlay ? _screenBounds.Top : position.Y;
             Check(SetWindowPos(_window, insertAfter, x, y,
@@ -107,6 +130,7 @@ public sealed class DesktopCalendarDesktopHost
         }
         catch
         {
+            RestoreActivationStyle();
             if (!_usesTopLevelDesktopOverlay)
             {
                 SetParentChecked(0);
@@ -136,6 +160,7 @@ public sealed class DesktopCalendarDesktopHost
                 SetStyle(_originalStyle);
             }
             IsEmbedded = false;
+            RestoreActivationStyle();
             _usesTopLevelDesktopOverlay = false;
             _source.CompositionTarget.RenderMode = RenderMode.Default;
             _source.RemoveHook(WindowHook);
@@ -149,6 +174,11 @@ public sealed class DesktopCalendarDesktopHost
     private nint WindowHook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
         if (!IsEmbedded || _isChangingParent) return 0;
+        if (_usesTopLevelDesktopOverlay && message == 0x0021) // WM_MOUSEACTIVATE
+        {
+            handled = true;
+            return 3; // MA_NOACTIVATE: deliver the click without raising the widget.
+        }
         if (message == 0x0112 && ((long)wParam & 0xfff0) is 0xf010 or 0xf000)
         {
             // SC_MOVE / SC_SIZE, including keyboard/system-menu requests.
@@ -158,10 +188,38 @@ public sealed class DesktopCalendarDesktopHost
         {
             // WM_WINDOWPOSCHANGING: also block native movement and Aero Snap.
             var position = Marshal.PtrToStructure<WindowPosition>(lParam);
-            position.Flags |= 0x0002; // SWP_NOMOVE; visibility and z-order still work.
+            position.Flags |= 0x0002 | NoActivate;
+            if (_usesTopLevelDesktopOverlay && (position.Flags & 0x0004) == 0)
+                position.InsertAfter = GetDesktopInsertAfter();
             Marshal.StructureToPtr(position, lParam, false);
         }
         return 0;
+    }
+
+    private void RestoreActivationStyle()
+    {
+        if (!_usesTopLevelDesktopOverlay) return;
+        var style = GetWindowLong(_window, ExtendedStyleIndex);
+        SetWindowLong(_window, ExtendedStyleIndex,
+            _originalNoActivate ? style | NoActivateStyle : style & ~NoActivateStyle);
+    }
+
+    private nint GetDesktopInsertAfter()
+    {
+        // Keep the overlay below every visible application, including inactive
+        // windows. Merely using SWP_NOACTIVATE does not prevent a z-order raise.
+        nint lowestApplication = 0;
+        EnumWindows((window, _) =>
+        {
+            if (window == _window || !IsWindowVisible(window)
+                || (GetWindowLong(window, ExtendedStyleIndex) & 0x00000008) != 0) return true;
+            var className = new StringBuilder(256);
+            GetClassName(window, className, className.Capacity);
+            if (className.ToString() is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd"))
+                lowestApplication = window;
+            return true;
+        }, 0);
+        return lowestApplication != 0 ? lowestApplication : _desktopWindow;
     }
 
     private nint FindDesktopHost(out nint zOrderAfter)
@@ -266,4 +324,8 @@ public sealed class DesktopCalendarDesktopHost
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool RedrawWindow(nint window, nint updateRect, nint updateRegion, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetLayeredWindowAttributes(nint window, uint colorKey, byte alpha, uint flags);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll")] private static extern int SetWindowRgn(nint window, nint region, bool redraw);
+    [DllImport("gdi32.dll")] private static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint value);
 }

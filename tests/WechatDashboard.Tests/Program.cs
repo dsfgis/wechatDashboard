@@ -1946,6 +1946,8 @@ static Task TestDesktopCalendarStateStoreAsync()
     var actual = store.Load();
 
     AssertEqual(legacyState, actual, "User-selected calendar dimensions should round-trip.");
+    store.Save(legacyState with { IsDarkTheme = true });
+    AssertTrue(store.Load().IsDarkTheme, "Dark theme preference must survive a reload.");
     store.Save(legacyState with { Width = -1, Height = 0 });
     AssertEqual(DesktopCalendarStateStore.MinimumWidth, store.Load().Width, "Invalid width must respect the minimum.");
     AssertEqual(DesktopCalendarStateStore.MinimumHeight, store.Load().Height, "Invalid height must respect the minimum.");
@@ -1955,6 +1957,7 @@ static Task TestDesktopCalendarStateStoreAsync()
     AssertTrue(embedded.IsDesktopEmbedded, "Desktop embedding should survive a preferences reload.");
     AssertEqual(DesktopCalendarDockEdge.None, embedded.DockEdge, "An embedded calendar must not restore edge retraction.");
     File.WriteAllText(statePath, "{\"Left\":120,\"Top\":80,\"DockEdge\":3}");
+    AssertTrue(!store.Load().IsDarkTheme, "Older preference files must retain the light theme.");
     AssertTrue(!store.Load().IsDesktopEmbedded, "JSON saved by an older application must default to a floating calendar.");
     return Task.CompletedTask;
 }
@@ -2010,6 +2013,18 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
                 new DesktopCalendarStateStore(statePath));
             window.Show();
             window.UpdateLayout();
+            var themeButton = (System.Windows.Controls.Button)window.FindName("ThemeButton");
+            var calendarContent = (WechatDashboard.App.Views.Todos.DesktopCalendarView)window.FindName("CalendarContent");
+            themeButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            AssertTrue(new DesktopCalendarStateStore(statePath).Load().IsDarkTheme, "Theme changes must save immediately.");
+            AssertEqual("#FF111827", ((System.Windows.Media.SolidColorBrush)window.Background).Color.ToString(), "The native window background must switch to dark.");
+            AssertEqual("#FF111827", ((System.Windows.Media.SolidColorBrush)calendarContent.FindResource("CalendarCanvas")).Color.ToString(), "Calendar content must switch with the toolbar.");
+            themeButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            AssertEqual("#FFF8FAFC", ((System.Windows.Media.SolidColorBrush)window.Background).Color.ToString(), "Switching back must restore the light background.");
+            var standaloneCalendar = new WechatDashboard.App.Views.Todos.DesktopCalendarView();
+            AssertEqual("#FFF8FAFC", ((System.Windows.Media.SolidColorBrush)standaloneCalendar.FindResource("CalendarCanvas")).Color.ToString(), "The desktop theme must not leak into the main schedule view.");
+            themeButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            DesktopCalendarNativeAssertions.AssertRoundedRegion(new System.Windows.Interop.WindowInteropHelper(window).Handle);
             var initialWidth = window.ActualWidth;
             var initialHeight = window.ActualHeight;
             AssertEqual(DesktopCalendarStateStore.DefaultWidth, initialWidth, "Desktop calendar should use the fixed width.");
@@ -2052,6 +2067,7 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
 
             retractMethod!.Invoke(window, null);
             window.UpdateLayout();
+            DesktopCalendarNativeAssertions.AssertRetractedRegion(new System.Windows.Interop.WindowInteropHelper(window).Handle);
             var calendarSurface = window.FindName("CalendarSurface") as System.Windows.Controls.Border;
             var revealHandle = window.FindName("EdgeRevealHandle") as System.Windows.Controls.Border;
             AssertTrue(calendarSurface is not null && revealHandle is not null, "Desktop calendar should render its surface and edge reveal handle.");
@@ -2067,8 +2083,8 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertEqual(initialHeight, window.ActualHeight, "Revealing should preserve the docked calendar height.");
             AssertEqual(System.Windows.ResizeMode.NoResize, window.ResizeMode, "Revealing should keep custom grip resizing.");
             var embedOption = (System.Windows.Controls.CheckBox)window.FindName("DesktopEmbedCheckBox");
-            var snapOption = (System.Windows.Controls.CheckBox)window.FindName("EdgeSnapCheckBox");
-            var dockButton = (System.Windows.Controls.Button)window.FindName("DockButton");
+            AssertTrue(window.FindName("EdgeSnapCheckBox") is null, "Automatic snapping should not require a checkbox.");
+            AssertTrue(window.FindName("DockButton") is null, "Edge docking should not require a toolbar button.");
             var nativeHandle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
             AssertTrue(!window.AllowsTransparency, "Desktop calendars must not use WPF's invisible per-pixel layered child rendering path.");
             DesktopCalendarNativeAssertions.AssertRedirectedOpacity(nativeHandle, 0.9);
@@ -2078,6 +2094,8 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertTrue(embedOption.IsChecked == true,
                 $"Desktop embedding should succeed: {((System.Windows.Controls.TextBlock)window.FindName("DockStatusText")).Text}");
             DesktopCalendarNativeAssertions.AssertEmbeddedAndImmovable(nativeHandle, originalBounds);
+            DesktopCalendarNativeAssertions.AssertRoundedRegion(nativeHandle);
+            DesktopCalendarNativeAssertions.AssertStaysBelowOtherWindows(nativeHandle);
             resizeGrip.RaiseEvent(new System.Windows.Controls.Primitives.DragStartedEventArgs(0, 0)
                 { RoutedEvent = System.Windows.Controls.Primitives.Thumb.DragStartedEvent });
             resizeGrip.RaiseEvent(new System.Windows.Controls.Primitives.DragDeltaEventArgs(-10000, -10000)
@@ -2085,6 +2103,7 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             window.UpdateLayout();
             AssertEqual(DesktopCalendarStateStore.MinimumWidth, window.ActualWidth, "Embedded resizing must clamp width.");
             AssertEqual(DesktopCalendarStateStore.MinimumHeight, window.ActualHeight, "Embedded resizing must clamp height.");
+            DesktopCalendarNativeAssertions.AssertRoundedRegion(nativeHandle);
             var resizedBounds = DesktopCalendarNativeAssertions.GetBounds(nativeHandle);
             AssertEqual(originalBounds.Left, resizedBounds.Left, "Embedded resizing must keep the left position locked.");
             AssertEqual(originalBounds.Top, resizedBounds.Top, "Embedded resizing must keep the top position locked.");
@@ -2099,7 +2118,6 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertEqual(1.0, new DesktopCalendarStateStore(statePath).Load().Opacity, "The initial embedded opacity should save immediately.");
             opacitySlider.Value = 0.8;
             DesktopCalendarNativeAssertions.AssertRedirectedOpacity(nativeHandle, 0.8);
-            AssertTrue(!snapOption.IsEnabled && !dockButton.IsEnabled, "Embedding must disable snapping and manual docking.");
             dockMethod.Invoke(window, new object?[] { true, preservedSize });
             retractMethod.Invoke(window, null);
             AssertEqual(System.Windows.Visibility.Visible, calendarSurface.Visibility, "Embedded calendars must never retract.");
@@ -2108,8 +2126,13 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             window.UpdateLayout();
             DesktopCalendarNativeAssertions.AssertDetached(nativeHandle, originalBounds);
             DesktopCalendarNativeAssertions.AssertRedirectedOpacity(nativeHandle, 0.8);
-            AssertTrue(snapOption.IsEnabled && dockButton.IsEnabled, "Detaching should restore movement controls.");
             AssertTrue(!new DesktopCalendarStateStore(statePath).Load().IsDesktopEmbedded, "Unchecking must save immediately.");
+            ((System.Windows.Controls.Button)window.FindName("CloseButton")).RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            AssertTrue(!window.IsVisible, "The close button must dismiss the calendar.");
+            AssertEqual(0.8, new DesktopCalendarStateStore(statePath).Load().Opacity, "Closing must retain the selected opacity.");
+            AssertTrue(new DesktopCalendarStateStore(statePath).Load().IsEdgeSnapEnabled, "Snapping must remain enabled when saving.");
+            window.Show();
+            AssertTrue(window.IsVisible, "The dismissed calendar must be reopenable.");
             embedOption.IsChecked = true;
             AssertEqual(1.0, opacitySlider.Value, "Re-entering desktop mode should reset its initial transparency.");
             opacitySlider.Value = 0.7;
@@ -2118,6 +2141,7 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             var restoredWindow = new WechatDashboard.App.Views.Todos.DesktopCalendarWindow(viewModel, new DesktopCalendarStateStore(statePath));
             restoredWindow.Show();
             restoredWindow.UpdateLayout();
+            AssertEqual("#FF111827", ((System.Windows.Media.SolidColorBrush)restoredWindow.Background).Color.ToString(), "Reopening must restore the dark theme.");
             AssertEqual(DesktopCalendarStateStore.MinimumWidth, restoredWindow.ActualWidth, "Reopening must restore the resized width.");
             AssertEqual(DesktopCalendarStateStore.MinimumHeight, restoredWindow.ActualHeight, "Reopening must restore the resized height.");
             AssertTrue(((System.Windows.Controls.CheckBox)restoredWindow.FindName("DesktopEmbedCheckBox")).IsChecked == true,

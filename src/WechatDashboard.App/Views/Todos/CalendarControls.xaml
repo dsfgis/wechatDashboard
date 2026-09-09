@@ -1,0 +1,38 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Style x:Key="CalendarCheckBoxStyle" TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{DynamicResource CalendarText}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <StackPanel Orientation="Horizontal" Background="Transparent">
+                        <Border x:Name="Box" Width="14" Height="14" CornerRadius="3"
+                                BorderThickness="1" BorderBrush="{DynamicResource CalendarMutedText}"
+                                Background="{DynamicResource CalendarSurface}" VerticalAlignment="Center">
+                            <Path x:Name="Check" Visibility="Collapsed" Data="M 2,6 L 5,9 L 10,3"
+                                  Stroke="White" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                        </Border>
+                        <ContentPresenter x:Name="Label" Margin="6,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="HasContent" Value="False">
+                            <Setter TargetName="Label" Property="Visibility" Value="Collapsed" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Box" Property="Background" Value="{DynamicResource CalendarAccent}" />
+                            <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource CalendarAccent}" />
+                            <Setter TargetName="Check" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource CalendarHoverBorder}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.6" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>
