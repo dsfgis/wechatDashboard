@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using WechatDashboard.App.Services;
+using WechatDashboard.App.ViewModels.Messages;
 using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
@@ -36,12 +37,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
     ("Message context query locates the source message by stable id", TestMessageContextQueryAsync),
+    ("Message feed keeps the source context when a page refresh races with navigation", TestMessageFeedContextSurvivesRefreshAsync),
+    ("DataGrid scroll behavior skips scrolling when the selection is cleared first", TestDataGridScrollSelectionClearedAsync),
     ("SQLite repositories initialize schema and round-trip message and todo", TestSqliteRoundTripAsync),
     ("Todo group migration preserves existing todos and is idempotent", TestTodoGroupMigrationAsync),
     ("Project assignment migration maps only same-name groups and clears deleted projects", TestTodoProjectAssignmentMigrationAsync),
     ("Todo group migration rolls back when schema creation fails", TestTodoGroupMigrationRollbackAsync),
     ("Todo groups normalize names and reject duplicates", TestTodoGroupsAsync),
     ("Todo detail project choices match configured projects", TestTodoDetailProjectOptionsAsync),
+    ("Todo detail pins and unpins an active todo", TestTodoDetailPinToggleAsync),
+    ("Todo detail window renders the header pin button", TestTodoDetailWindowPinButtonRenderingAsync),
     ("Manual Todo creation persists a group and optional reminder atomically", TestManualTodoCreationAsync),
     ("Todo group changes persist through completion", TestTodoGroupLifecycleAsync),
     ("Manual Todo create view model selects a project and prevents duplicate submission", TestTodoCreateViewModelAsync),
@@ -52,6 +57,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Desktop calendar window preferences round-trip", TestDesktopCalendarStateStoreAsync),
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
+    ("Auto start service toggles the current user Run entry", TestAutoStartServiceAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
     ("Todo repository persists pinning and sorts pinned active todos first", TestTodoPinningAsync),
@@ -201,7 +207,10 @@ static Task TestTodoCreationAsync()
         id: 30,
         chatName: "支付项目群",
         senderName: "赵经理",
-        content: "@zhangsan 请今天给出支付联调问题反馈");
+        content: "@zhangsan 请今天给出支付联调问题反馈") with
+    {
+        SentAt = now.AddMinutes(-30)
+    };
     var classification = new ClassificationResult(30, 2, "支付平台", MessageCategory.Question, 0.85, "keyword rule", "Rules");
     var urgency = new UrgencyScore(30, 72, PriorityLevel.P1, "@我; 今天");
 
@@ -216,11 +225,23 @@ static Task TestTodoCreationAsync()
     AssertEqual(
         new DateTimeOffset(2026, 8, 10, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
         todo.DueAt,
-        "Automatically recognized Todo should expire at the end of the current local day.");
+        "Automatically recognized Todo should expire at the end of the message's local send day.");
     AssertEqual(
         TodoDueBucket.DueToday,
         new TodoDueBucketPolicy(timeZone).Classify(todo.DueAt, now),
-        "Automatically recognized Todo should appear in the due-today bucket.");
+        "A todo from a message sent today should appear in the due-today bucket.");
+
+    // 补采场景：消息昨天发送、今天才采集，待办应落在发送当天而非采集当天。
+    var lateCapturedMessage = message with { SentAt = now.AddDays(-1).AddHours(-2) };
+    var lateTodo = TodoService.CreateFromMention(lateCapturedMessage, classification, urgency, now, timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
+        lateTodo.DueAt,
+        "A todo from a back-filled message should expire at the end of the message's send day.");
+    AssertEqual(
+        TodoDueBucket.Overdue,
+        new TodoDueBucketPolicy(timeZone).Classify(lateTodo.DueAt, now),
+        "A back-filled todo from yesterday should appear in the overdue bucket.");
 
     return Task.CompletedTask;
 }
@@ -547,6 +568,85 @@ static async Task TestMessageContextQueryAsync()
     AssertEqual(saved[3].Id, context.Messages[0].Id, "Context should keep the normal newest-first display order.");
     AssertEqual(saved[2].Id, context.Messages[1].Id, "The anchor should remain in chronological position.");
     AssertEqual(saved[1].Id, context.Messages[2].Id, "The older context message should follow the anchor.");
+}
+
+static async Task TestMessageFeedContextSurvivesRefreshAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var todoService = new TodoApplicationService(
+        new SqliteTodoUnitOfWork(databasePath),
+        new FixedClock(new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8))));
+    var sentAt = new DateTimeOffset(2026, 8, 9, 9, 0, 0, TimeSpan.FromHours(8));
+    var saved = new List<Message>();
+    for (var index = 0; index < 5; index++)
+    {
+        saved.Add(await messageRepository.SaveAsync(
+            CreateMessage(0, "上下文群", $"成员{index}", $"消息{index}") with
+            {
+                SourceMessageKey = $"feed-context-{Guid.NewGuid():N}-{index}",
+                SentAt = sentAt.AddMinutes(index)
+            },
+            CancellationToken.None));
+    }
+
+    var feed = new MessageFeedViewModel(
+        messageRepository,
+        todoRepository,
+        todoService,
+        () => Array.Empty<string>(),
+        () => Array.Empty<string>(),
+        () => FollowedChatFilterMode.Include,
+        _ => Task.CompletedTask);
+
+    // 复现“查看原始消息”：切页触发自动刷新，随后立即定位上下文
+    var target = saved[2].Id;
+    feed.PrepareContextNavigation(target);
+    var refresh = feed.RefreshAsync();
+    await feed.ShowContextAsync(target);
+    await refresh;
+
+    AssertTrue(feed.IsContextMode, "A tab-triggered refresh must not switch the feed back to the plain list.");
+    AssertEqual(target, feed.SelectedMessage?.MessageId ?? 0, "Navigation must keep the source message selected.");
+}
+
+static Task TestDataGridScrollSelectionClearedAsync()
+{
+    Exception? threadFailure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            var items = new System.Collections.ObjectModel.ObservableCollection<string> { "第一条消息", "第二条消息" };
+            var grid = new System.Windows.Controls.DataGrid { ItemsSource = items };
+            WechatDashboard.App.Behaviors.DataGridScrollIntoViewBehavior.SetIsEnabled(grid, true);
+            grid.SelectedItem = items[0];
+            AssertTrue(grid.SelectedItem is not null, "The DataGrid should accept the programmatic selection.");
+            grid.SelectedItem = null; // 刷新清空选中，此时滚动回调尚未执行
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.Invoke(
+                System.Windows.Threading.DispatcherPriority.ContextIdle,
+                new Action(() => { }));
+        }
+        catch (Exception ex)
+        {
+            threadFailure = ex;
+        }
+        finally
+        {
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeShutdown();
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+
+    AssertTrue(thread.Join(TimeSpan.FromSeconds(10)), "The DataGrid scroll check should not hang.");
+    AssertTrue(
+        threadFailure is null,
+        $"Scrolling must be skipped after the selection is cleared: {threadFailure}");
+    return Task.CompletedTask;
 }
 
 static async Task TestSqliteRoundTripAsync()
@@ -1437,6 +1537,7 @@ static async Task TestTodoDetailProjectOptionsAsync()
     var detail = new TodoDetailViewModel(
         row,
         todoService,
+        new SqliteTodoRepository(databasePath),
         projectRepository,
         new ReminderApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
         new SqliteReminderRepository(databasePath),
@@ -1456,6 +1557,160 @@ static async Task TestTodoDetailProjectOptionsAsync()
     var added = await projectRepository.SaveAsync("学习", ProjectColorPolicy.Purple, CancellationToken.None);
     await detail.LoadProjectsAsync();
     AssertTrue(detail.ProjectOptions.Any(project => project.Id == added.Id), "A project added in settings should appear after the detail choices reload.");
+}
+
+static async Task TestTodoDetailPinToggleAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var todo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("详情置顶按钮", null, PriorityLevel.P2, null, null, null),
+        CancellationToken.None)).Todo!;
+    var row = new TodoListItemViewModel(
+        todo,
+        null,
+        null,
+        TodoDueBucket.NoDueDate,
+        "未指定项目",
+        ProjectColorPolicy.DefaultColor,
+        () => { });
+    var refreshCount = 0;
+    var dialogs = new FakeTodoDialogService();
+    var detail = new TodoDetailViewModel(
+        row,
+        todoService,
+        repository,
+        new SqliteFollowedProjectRepository(databasePath),
+        new ReminderApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
+        new SqliteReminderRepository(databasePath),
+        clock,
+        () =>
+        {
+            refreshCount++;
+            return Task.CompletedTask;
+        },
+        _ => Task.CompletedTask,
+        dialogs);
+
+    AssertTrue(!detail.IsPinned, "A new Todo detail should start unpinned.");
+    AssertEqual("置顶", detail.PinButtonText, "An unpinned Todo should offer the pin action.");
+    AssertTrue(detail.TogglePinCommand.CanExecute(null), "An active Todo should allow pinning from the detail.");
+
+    await detail.TogglePinAsync();
+
+    AssertTrue(detail.IsPinned, "Pinning from the detail should update the detail state.");
+    AssertEqual("取消置顶", detail.PinButtonText, "A pinned Todo should offer the unpin action.");
+    AssertTrue((await repository.GetByIdAsync(todo.Id, CancellationToken.None))!.IsPinned, "Detail pinning should persist.");
+    AssertEqual(1, refreshCount, "Detail pinning should refresh the shared workbench once.");
+
+    await detail.TogglePinAsync();
+
+    AssertTrue(!detail.IsPinned, "Toggling again should clear the pinned state.");
+    AssertFalse((await repository.GetByIdAsync(todo.Id, CancellationToken.None))!.IsPinned, "Unpinning from the detail should persist.");
+    AssertEqual(2, refreshCount, "Unpinning should refresh the shared workbench once.");
+
+    // 置顶会写 updated_at，详情里的后续操作不能因版本过期被并发检查拒绝。
+    await detail.TogglePinAsync();
+    await detail.CompleteAsync();
+
+    AssertEqual(0, dialogs.Errors.Count, "Completing right after pinning must not be rejected as a stale edit.");
+    AssertEqual(TodoStatus.Done, (await repository.GetByIdAsync(todo.Id, CancellationToken.None))!.Status, "Completing after pinning should persist Done status.");
+    AssertTrue(!detail.IsPinned, "Completing a pinned Todo should clear its pinned state.");
+    AssertTrue(!detail.TogglePinCommand.CanExecute(null), "A completed Todo must not be pinnable from the detail.");
+}
+
+static async Task TestTodoDetailWindowPinButtonRenderingAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var unpinned = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("未置顶详情", null, PriorityLevel.P2, null, null, null),
+        CancellationToken.None)).Todo!;
+    var pinned = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("已置顶详情", null, PriorityLevel.P2, null, null, null),
+        CancellationToken.None)).Todo!;
+    await repository.SetPinnedAsync(pinned.Id, true, now, CancellationToken.None);
+    pinned = (await repository.GetByIdAsync(pinned.Id, CancellationToken.None))!;
+    AssertTrue(pinned.IsPinned, "Test setup should persist the pinned Todo before rendering the detail.");
+
+    static TodoDetailViewModel CreateDetail(TodoItem todo, SqliteTodoRepository todos, IClock detailClock, string database)
+    {
+        var row = new TodoListItemViewModel(
+            todo,
+            null,
+            null,
+            TodoDueBucket.NoDueDate,
+            "未指定项目",
+            ProjectColorPolicy.DefaultColor,
+            () => { });
+        return new TodoDetailViewModel(
+            row,
+            new TodoApplicationService(new SqliteTodoUnitOfWork(database), detailClock),
+            todos,
+            new SqliteFollowedProjectRepository(database),
+            new ReminderApplicationService(new SqliteTodoUnitOfWork(database), detailClock),
+            new SqliteReminderRepository(database),
+            detailClock,
+            () => Task.CompletedTask,
+            _ => Task.CompletedTask,
+            new FakeTodoDialogService());
+    }
+
+    Exception? renderFailure = null;
+    var renderThread = new Thread(() =>
+    {
+        try
+        {
+            var unpinnedWindow = new WechatDashboard.App.Views.Todos.TodoDetailWindow(
+                CreateDetail(unpinned, repository, clock, databasePath));
+            unpinnedWindow.Show();
+            unpinnedWindow.UpdateLayout();
+            var pinButton = (System.Windows.Controls.Button)unpinnedWindow.FindName("PinButton");
+            var badge = (System.Windows.Controls.Border)unpinnedWindow.FindName("PinnedBadge");
+            AssertEqual("置顶", pinButton.Content, "An unpinned Todo detail should render the pin action.");
+            AssertTrue(pinButton.IsEnabled, "An active Todo detail should render an enabled pin button.");
+            AssertEqual(System.Windows.Visibility.Collapsed, badge.Visibility, "An unpinned Todo should not show the pinned badge.");
+            unpinnedWindow.Close();
+
+            var pinnedWindow = new WechatDashboard.App.Views.Todos.TodoDetailWindow(
+                CreateDetail(pinned, repository, clock, databasePath));
+            pinnedWindow.Show();
+            pinnedWindow.UpdateLayout();
+            var pinnedButton = (System.Windows.Controls.Button)pinnedWindow.FindName("PinButton");
+            var pinnedBadge = (System.Windows.Controls.Border)pinnedWindow.FindName("PinnedBadge");
+            AssertEqual("取消置顶", pinnedButton.Content, "A pinned Todo detail should render the unpin action.");
+            AssertEqual(System.Windows.Visibility.Visible, pinnedBadge.Visibility, "A pinned Todo should show the pinned badge.");
+            pinnedWindow.Close();
+        }
+        catch (Exception ex)
+        {
+            renderFailure = ex;
+        }
+        finally
+        {
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeShutdown();
+        }
+    });
+    renderThread.SetApartmentState(ApartmentState.STA);
+    renderThread.Start();
+
+    AssertTrue(renderThread.Join(TimeSpan.FromSeconds(15)), "Todo detail render thread should finish without hanging.");
+    if (renderFailure is not null)
+    {
+        throw new InvalidOperationException("Todo detail should render its header pin button.", renderFailure);
+    }
 }
 
 static async Task TestManualTodoCreationAsync()
@@ -1904,6 +2159,7 @@ static async Task TestTodoCompletionEntryPointsAsync()
     var detail = new TodoDetailViewModel(
         row,
         todoService,
+        repository,
         new SqliteFollowedProjectRepository(databasePath),
         reminderService,
         reminders,
@@ -1962,6 +2218,46 @@ static Task TestDesktopCalendarStateStoreAsync()
     return Task.CompletedTask;
 }
 
+static Task TestAutoStartServiceAsync()
+{
+    var runKey = new InMemoryStartupRunKey();
+    var service = new AutoStartService(runKey, () => @"C:\apps\WechatDashboard.App.exe");
+
+    AssertTrue(!service.IsEnabled(), "Auto start should stay disabled before any Run entry exists.");
+
+    var enabled = service.SetEnabled(true);
+    AssertTrue(enabled.Success, "Enabling auto start should succeed for a known executable.");
+    AssertTrue(enabled.IsEnabled, "A successful enable must report the enabled state.");
+    AssertTrue(service.IsEnabled(), "The enabled state should be readable back from the Run entry.");
+
+    var command = runKey.GetCommand(AutoStartService.ValueName);
+    AssertNotNull(command, "Enabling auto start must write the Run entry.");
+    AssertTrue(command!.Contains("WechatDashboard.App.exe", StringComparison.OrdinalIgnoreCase), "The Run entry must point at the application executable.");
+    AssertTrue(command.StartsWith('"'), "The Run entry must quote the executable path so paths with spaces still run.");
+
+    service.SetEnabled(true);
+    AssertTrue(service.IsEnabled(), "Re-enabling auto start should stay idempotent.");
+
+    var disabled = service.SetEnabled(false);
+    AssertTrue(disabled.Success, "Disabling auto start should succeed.");
+    AssertTrue(!disabled.IsEnabled, "A successful disable must report the disabled state.");
+    AssertTrue(runKey.GetCommand(AutoStartService.ValueName) is null, "Disabling auto start must remove the Run entry.");
+    AssertTrue(!service.IsEnabled(), "Auto start should stay disabled after the Run entry is removed.");
+
+    var withoutPath = new AutoStartService(runKey, () => null).SetEnabled(true);
+    AssertTrue(!withoutPath.Success, "Enabling auto start must fail when the executable path is unknown.");
+    AssertTrue(!withoutPath.IsEnabled, "A failed enable must not report auto start as enabled.");
+    AssertTrue(runKey.GetCommand(AutoStartService.ValueName) is null, "A failed enable must not write a Run entry.");
+
+    var blankPath = new AutoStartService(runKey, () => "   ").SetEnabled(true);
+    AssertTrue(!blankPath.Success, "Enabling auto start must fail for a blank executable path.");
+    AssertTrue(runKey.GetCommand(AutoStartService.ValueName) is null, "A blank executable path must not write a Run entry.");
+
+    runKey.SetCommand(AutoStartService.ValueName, "   ");
+    AssertTrue(!service.IsEnabled(), "A blank Run entry must be treated as disabled.");
+    return Task.CompletedTask;
+}
+
 static Task TestDesktopCalendarDockLayoutAsync()
 {
     var area = new System.Windows.Rect(100, 50, 1920, 1040);
@@ -1979,7 +2275,7 @@ static Task TestDesktopCalendarDockLayoutAsync()
     AssertEqual(area.Top + DesktopCalendarDockLayout.RevealThickness, topRetracted.Y + size.Height, "Top retraction should leave only the reveal thickness on screen.");
     AssertEqual(area.Right - DesktopCalendarDockLayout.RevealThickness, rightRetracted.X, "Right retraction should leave only the reveal thickness on screen.");
     AssertEqual(area.Bottom - DesktopCalendarDockLayout.RevealThickness, bottomRetracted.Y, "Bottom retraction should leave only the reveal thickness on screen.");
-    AssertEqual(TimeSpan.FromSeconds(2), DesktopCalendarDockLayout.AutoHideDelay, "A docked calendar should wait two seconds before retracting.");
+    AssertEqual(TimeSpan.FromSeconds(1), DesktopCalendarDockLayout.AutoHideDelay, "A docked calendar should wait one second before retracting.");
     return Task.CompletedTask;
 }
 
@@ -2066,6 +2362,14 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertEqual(initialHeight, window.ActualHeight, "Docking should restore the height that existed before Windows edge snap.");
 
             retractMethod!.Invoke(window, null);
+            AssertEqual(System.Windows.Visibility.Visible,
+                ((System.Windows.Controls.Border)window.FindName("CalendarSurface")).Visibility,
+                "The calendar must stay visible while sliding into the edge.");
+            var animationFrame = new System.Windows.Threading.DispatcherFrame();
+            var animationWait = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+            animationWait.Tick += (_, _) => { animationWait.Stop(); animationFrame.Continue = false; };
+            animationWait.Start();
+            System.Windows.Threading.Dispatcher.PushFrame(animationFrame);
             window.UpdateLayout();
             DesktopCalendarNativeAssertions.AssertRetractedRegion(new System.Windows.Interop.WindowInteropHelper(window).Handle);
             var calendarSurface = window.FindName("CalendarSurface") as System.Windows.Controls.Border;

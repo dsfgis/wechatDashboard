@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -20,6 +21,10 @@ public partial class DesktopCalendarWindow : Window
     private readonly DesktopCalendarStateStore _stateStore;
     private readonly DispatcherTimer _refreshTimer;
     private readonly DispatcherTimer _autoHideTimer;
+    private readonly DispatcherTimer _retractAnimationTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
+    private readonly Stopwatch _retractAnimationClock = new();
+    private System.Windows.Point _retractStart;
+    private System.Windows.Point _retractTarget;
     private DesktopCalendarDockEdge _dockEdge;
     private Size? _dockedWindowSize;
     private bool _allowClose;
@@ -51,12 +56,14 @@ public partial class DesktopCalendarWindow : Window
                 RetractToEdge();
             }
         };
+        _retractAnimationTimer.Tick += (_, _) => AdvanceRetraction();
         Closed += (_, _) =>
         {
             // Explorer may destroy its child windows when the shell restarts.
             // MainWindow clears its reference on Closed so the next open recreates it.
             _refreshTimer.Stop();
             _autoHideTimer.Stop();
+            _retractAnimationTimer.Stop();
             _desktopHost = null;
             _hasAppliedSavedState = false;
         };
@@ -81,6 +88,7 @@ public partial class DesktopCalendarWindow : Window
 
     public void Shutdown()
     {
+        if (_retractAnimationTimer.IsEnabled) CompleteRetraction();
         _allowClose = true;
         _refreshTimer.Stop();
         _autoHideTimer.Stop();
@@ -113,6 +121,7 @@ public partial class DesktopCalendarWindow : Window
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (_retractAnimationTimer.IsEnabled) CompleteRetraction();
         SaveState();
         _refreshTimer.Stop();
         _autoHideTimer.Stop();
@@ -133,6 +142,7 @@ public partial class DesktopCalendarWindow : Window
         }
 
         e.Handled = true;
+        RevealFromEdge();
         _autoHideTimer.Stop();
         _dockEdge = DesktopCalendarDockEdge.None;
         _dockedWindowSize = null;
@@ -342,6 +352,8 @@ public partial class DesktopCalendarWindow : Window
         ApplyCurrentDockPosition(area, size);
         UpdateDockStatus();
         SaveState(size);
+        _autoHideTimer.Stop();
+        _autoHideTimer.Start();
     }
 
     private void ApplyCurrentDockPosition(Rect area, Size? preservedSize = null)
@@ -410,15 +422,35 @@ public partial class DesktopCalendarWindow : Window
 
         var size = _dockedWindowSize ?? GetWindowSize();
         SaveState();
+        ApplyWindowSize(size);
+        _retractStart = new System.Windows.Point(Left, Top);
+        _retractTarget = DesktopCalendarDockLayout.GetRetractedPosition(GetWorkArea(), size, _retractStart, _dockEdge);
         _isRetracted = true;
-        CalendarSurface.Visibility = Visibility.Hidden;
         ResizeGrip.Visibility = Visibility.Collapsed;
+        // Keep the complete native window visible until it has slid off screen.
+        _retractAnimationClock.Restart();
+        _retractAnimationTimer.Start();
+    }
+
+    private void AdvanceRetraction()
+    {
+        var progress = Math.Clamp(_retractAnimationClock.Elapsed.TotalMilliseconds / 250, 0, 1);
+        var eased = 1 - Math.Pow(1 - progress, 3);
+        ApplyPosition(new System.Windows.Point(
+            _retractStart.X + (_retractTarget.X - _retractStart.X) * eased,
+            _retractStart.Y + (_retractTarget.Y - _retractStart.Y) * eased));
+        if (progress >= 1) CompleteRetraction();
+    }
+
+    private void CompleteRetraction()
+    {
+        _retractAnimationTimer.Stop();
+        _retractAnimationClock.Stop();
+        ApplyPosition(_retractTarget);
+        CalendarSurface.Visibility = Visibility.Hidden;
         ConfigureRevealHandle();
         EdgeRevealHandle.Visibility = Visibility.Visible;
         UpdateWindowShape();
-        ResizeMode = ResizeMode.NoResize;
-        ApplyWindowSize(size);
-        ApplyCurrentDockPosition(GetWorkArea(), size);
     }
 
     private void EdgeRevealHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -450,6 +482,8 @@ public partial class DesktopCalendarWindow : Window
 
     private void SetExpandedVisualState()
     {
+        _retractAnimationTimer.Stop();
+        _retractAnimationClock.Stop();
         _isRetracted = false;
         CalendarSurface.Visibility = Visibility.Visible;
         ResizeGrip.Visibility = Visibility.Visible;
@@ -469,7 +503,7 @@ public partial class DesktopCalendarWindow : Window
         if (_desktopHost is null) return;
         var bounds = new Rect(0, 0, Width, Height);
         var radius = CalendarSurface.CornerRadius.TopLeft;
-        if (_isRetracted)
+        if (_isRetracted && !_retractAnimationTimer.IsEnabled)
         {
             var width = EdgeRevealHandle.Width;
             var height = EdgeRevealHandle.Height;
@@ -573,7 +607,7 @@ public partial class DesktopCalendarWindow : Window
             DesktopCalendarDockEdge.Top => "已停靠顶部",
             DesktopCalendarDockEdge.Right => "已停靠右侧",
             DesktopCalendarDockEdge.Bottom => "已停靠底部",
-            _ => "拖动标题栏移动；拖拽右下角调整大小；停靠后离开 2 秒自动收起"
+            _ => "拖动标题栏移动；拖拽右下角调整大小；停靠后离开 1 秒后动画收起"
         };
     }
 }

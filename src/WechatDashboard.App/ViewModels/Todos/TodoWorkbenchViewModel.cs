@@ -151,6 +151,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         var viewModel = new TodoDetailViewModel(
             row,
             _todoService,
+            _todos,
             _projectRepository,
             _reminderService,
             _reminders,

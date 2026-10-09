@@ -3,14 +3,37 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="待办详情" Width="720" Height="680" MinWidth="620" MinHeight="560"
         WindowStartupLocation="CenterOwner" Background="#F4F6F8">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <!-- 只读信息框：外观与普通文本一致，但内容可选中、可复制 -->
+        <Style x:Key="ReadOnlyInfoTextBox" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="0,2" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="#111827" />
+            <Setter Property="CaretBrush" Value="#111827" />
+            <Setter Property="SelectionBrush" Value="#93C5FD" />
+            <Setter Property="IsReadOnlyCaretVisible" Value="False" />
+        </Style>
+    </Window.Resources>
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="20">
-            <TextBlock Text="待办详情" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16" />
-            <TextBlock Text="标题" Foreground="#6B7280" />
-            <TextBox Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8" />
-            <TextBlock Text="备注" Foreground="#6B7280" />
-            <TextBox Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,12" Padding="8"
-                     MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap" />
+            <DockPanel Margin="0,0,0,16">
+                <Button x:Name="PinButton" DockPanel.Dock="Right" Content="{Binding PinButtonText}" Command="{Binding TogglePinCommand}"
+                        Padding="16,7" VerticalAlignment="Center"
+                        ToolTip="置顶的待办始终排在待办页最上方" />
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="待办详情" FontSize="22" FontWeight="SemiBold" />
+                    <Border x:Name="PinnedBadge" Background="#FEF3C7" BorderBrush="#F59E0B" BorderThickness="1" CornerRadius="4"
+                            Padding="6,2" Margin="10,0,0,0" VerticalAlignment="Center"
+                            Visibility="{Binding IsPinned, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="已置顶" Foreground="#B45309" FontSize="12" FontWeight="SemiBold" />
+                    </Border>
+                </StackPanel>
+            </DockPanel>
             <Grid Margin="0,0,0,12">
                 <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
                 <StackPanel Margin="0,0,8,0">
@@ -61,10 +84,20 @@
 
             <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,16">
                 <StackPanel>
-                    <TextBlock Text="原始消息（只读）" FontWeight="SemiBold" Margin="0,0,0,8" />
-                    <TextBlock><Run Text="来源："/><Run Text="{Binding Source, Mode=OneWay}"/><Run Text="　群聊："/><Run Text="{Binding SourceChatName, Mode=OneWay}"/></TextBlock>
-                    <TextBlock><Run Text="发送人："/><Run Text="{Binding SenderName, Mode=OneWay}"/><Run Text="　时间："/><Run Text="{Binding SentAt, Mode=OneWay}"/></TextBlock>
-                    <TextBlock Text="{Binding OriginalContent}" TextWrapping="Wrap" Margin="0,8,0,0" />
+                    <DockPanel Margin="0,0,0,8">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="复制原文" Click="CopyOriginalButton_Click" Padding="12,5" Margin="8,0,0,0"
+                                    ToolTip="复制原始消息正文" />
+                            <Button Content="复制全部信息" Click="CopyInfoButton_Click" Padding="12,5" Margin="8,0,0,0"
+                                    ToolTip="复制待办的字段信息与原始消息" />
+                        </StackPanel>
+                        <TextBlock Text="原始消息（只读，可直接选中复制）" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <TextBox Text="{Binding SourceInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}" />
+                    <TextBox Text="{Binding SenderInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}" />
+                    <TextBox Text="{Binding OriginalContent, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
+                             AcceptsReturn="True" MaxHeight="280" VerticalScrollBarVisibility="Auto"
+                             Margin="0,8,0,0" />
                 </StackPanel>
             </Border>
 

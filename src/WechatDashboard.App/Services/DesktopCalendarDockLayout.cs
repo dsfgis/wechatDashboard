@@ -7,7 +7,7 @@ public static class DesktopCalendarDockLayout
 {
     public const double RevealThickness = 18;
     public const double RevealLength = 104;
-    public static TimeSpan AutoHideDelay { get; } = TimeSpan.FromSeconds(2);
+    public static TimeSpan AutoHideDelay { get; } = TimeSpan.FromSeconds(1);
 
     public static Point GetDockedPosition(
         Rect workArea,

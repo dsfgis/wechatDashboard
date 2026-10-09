@@ -25,6 +25,7 @@ public sealed class MessageFeedViewModel : ObservableObject
     private bool _isContextMode;
     private MessageListItemViewModel? _selectedMessage;
     private int _pageBeforeContext = 1;
+    private long? _pendingContextMessageId;
 
     public MessageFeedViewModel(
         IMessageRepository messages,
@@ -117,27 +118,47 @@ public sealed class MessageFeedViewModel : ObservableObject
 
     public int TotalCount => _totalCount;
 
-    public Task RefreshAsync() => LoadPageAsync(_pageNumber, refreshCount: true);
+    public Task RefreshAsync()
+    {
+        // 正在跳转到某条消息的上下文时，切页触发的自动刷新会覆盖上下文结果，改为重新定位该消息。
+        return _pendingContextMessageId is { } messageId
+            ? ShowContextAsync(messageId)
+            : LoadPageAsync(_pageNumber, refreshCount: true);
+    }
+
+    /// <summary>登记即将跳转到的原始消息，避免切页自动刷新覆盖跳转结果。</summary>
+    public void PrepareContextNavigation(long messageId) => _pendingContextMessageId = messageId;
 
     public async Task ShowContextAsync(long messageId)
     {
-        var context = await _messages.GetContextAsync(messageId, before: 20, after: 20, CancellationToken.None);
-        if (context is null)
+        _pendingContextMessageId = messageId;
+        try
         {
-            StatusText = "原始消息已不存在。";
-            return;
-        }
+            var context = await _messages.GetContextAsync(messageId, before: 20, after: 20, CancellationToken.None);
+            if (context is null)
+            {
+                StatusText = "原始消息已不存在。";
+                return;
+            }
 
-        if (!IsContextMode)
+            if (!IsContextMode)
+            {
+                _pageBeforeContext = _pageNumber;
+            }
+
+            IsContextMode = true;
+            await ReplaceItemsAsync(context.Messages);
+            SelectedMessage = Items.FirstOrDefault(item => item.MessageId == messageId);
+            StatusText = "正在查看原始消息上下文；当前关注群过滤已临时忽略。";
+            OnPropertyChanged(nameof(PageText));
+        }
+        finally
         {
-            _pageBeforeContext = _pageNumber;
+            if (_pendingContextMessageId == messageId)
+            {
+                _pendingContextMessageId = null;
+            }
         }
-
-        IsContextMode = true;
-        await ReplaceItemsAsync(context.Messages);
-        SelectedMessage = Items.First(item => item.MessageId == messageId);
-        StatusText = "正在查看原始消息上下文；当前关注群过滤已临时忽略。";
-        OnPropertyChanged(nameof(PageText));
     }
 
     private async Task LoadPageAsync(int pageNumber, bool refreshCount)
@@ -157,6 +178,12 @@ public sealed class MessageFeedViewModel : ObservableObject
             page = refreshCount || _totalCount == 0 || IsContextMode
                 ? await _messages.GetPageAsync(safePage, _pageSize, chats, include, CancellationToken.None)
                 : await _messages.GetPageWithKnownCountAsync(safePage, _pageSize, _totalCount, chats, include, CancellationToken.None);
+        }
+
+        // 已经登记了上下文跳转时，本次整页结果已过期，直接丢弃，避免把上下文替换成普通列表
+        if (_pendingContextMessageId is not null)
+        {
+            return;
         }
 
         _totalCount = page.TotalCount;

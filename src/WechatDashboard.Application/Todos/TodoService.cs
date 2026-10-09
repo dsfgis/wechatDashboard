@@ -21,7 +21,7 @@ public static class TodoService
         return CreateFromMention(message, classification, urgency, DateTimeOffset.Now, TimeZoneInfo.Local);
     }
 
-    /// <summary>使用指定时钟和时区创建自动识别待办，便于稳定计算“今日到期”。</summary>
+    /// <summary>使用指定时钟和时区创建自动识别待办，便于稳定计算到期日。</summary>
     public static TodoItem CreateFromMention(
         Message message,
         ClassificationResult classification,
@@ -30,7 +30,9 @@ public static class TodoService
         TimeZoneInfo timeZone,
         long? managedProjectId = null)
     {
-        var dueAt = new TodoDueBucketPolicy(timeZone).EndOfToday(now);
+        // 到期时间按消息发送日期（微信/石化通 SentAt）计算，而不是采集时刻：
+        // 补采历史消息时，待办应落在消息发送当天的日历格，而非采集当天。
+        var dueAt = new TodoDueBucketPolicy(timeZone).EndOfToday(message.SentAt);
         return TodoFactory.CreateFromMessage(
             message,
             classification.ProjectId,

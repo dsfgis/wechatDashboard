@@ -13,6 +13,7 @@ namespace WechatDashboard.App.ViewModels.Todos;
 public sealed class TodoDetailViewModel : ObservableObject
 {
     private readonly TodoApplicationService _todoService;
+    private readonly ITodoRepository _todos;
     private readonly IFollowedProjectRepository _projectRepository;
     private readonly ReminderApplicationService _reminderService;
     private readonly IReminderRepository _reminders;
@@ -34,10 +35,12 @@ public sealed class TodoDetailViewModel : ObservableObject
     private int _reminderMinute;
     private string _statusText = "";
     private TodoProjectOption _selectedProject = TodoProjectOption.Unassigned;
+    private bool _isPinned;
 
     public TodoDetailViewModel(
         TodoListItemViewModel row,
         TodoApplicationService todoService,
+        ITodoRepository todos,
         IFollowedProjectRepository projectRepository,
         ReminderApplicationService reminderService,
         IReminderRepository reminders,
@@ -49,6 +52,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         _todo = row.Todo;
         _currentReminder = row.Reminder;
         _todoService = todoService;
+        _todos = todos;
         _projectRepository = projectRepository;
         _reminderService = reminderService;
         _reminders = reminders;
@@ -74,8 +78,10 @@ public sealed class TodoDetailViewModel : ObservableObject
             : "原始消息已不存在");
         ProjectName = row.ProjectName;
         ProjectColor = row.ProjectColor;
+        _isPinned = row.Todo.IsPinned;
         SaveCommand = new AsyncRelayCommand(_ => SaveAsync());
         CompleteCommand = new AsyncRelayCommand(_ => CompleteAsync(), _ => CanComplete);
+        TogglePinCommand = new AsyncRelayCommand(_ => TogglePinAsync(), _ => CanTogglePin);
         ScheduleReminderCommand = new AsyncRelayCommand(_ => ScheduleReminderAsync());
         SnoozeTenMinutesCommand = new AsyncRelayCommand(_ => SnoozeAsync(TimeSpan.FromMinutes(10)));
         SnoozeThirtyMinutesCommand = new AsyncRelayCommand(_ => SnoozeAsync(TimeSpan.FromMinutes(30)));
@@ -94,6 +100,7 @@ public sealed class TodoDetailViewModel : ObservableObject
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
     public AsyncRelayCommand CompleteCommand { get; }
+    public AsyncRelayCommand TogglePinCommand { get; }
     public AsyncRelayCommand ScheduleReminderCommand { get; }
     public AsyncRelayCommand SnoozeTenMinutesCommand { get; }
     public AsyncRelayCommand SnoozeThirtyMinutesCommand { get; }
@@ -106,10 +113,29 @@ public sealed class TodoDetailViewModel : ObservableObject
     public string SenderName { get; }
     public string SentAt { get; }
     public string OriginalContent { get; }
+    /// <summary>来源与群聊的只读展示行，绑定到可选中复制的文本框。</summary>
+    public string SourceInfoLine => $"来源：{Source}　群聊：{SourceChatName}";
+    /// <summary>发送人与时间的只读展示行，绑定到可选中复制的文本框。</summary>
+    public string SenderInfoLine => $"发送人：{SenderName}　时间：{SentAt}";
     public string ProjectName { get; private set; }
     public string ProjectColor { get; private set; }
     public bool IsProjectEditable => Status is TodoStatus.Pending or TodoStatus.InProgress or TodoStatus.Waiting;
     public bool CanComplete => Status is TodoStatus.Pending or TodoStatus.InProgress or TodoStatus.Waiting;
+    /// <summary>只有活动待办可以置顶；已完成和已忽略的记录不能重新置顶。</summary>
+    public bool CanTogglePin => Status is TodoStatus.Pending or TodoStatus.InProgress or TodoStatus.Waiting;
+    public string PinButtonText => IsPinned ? "取消置顶" : "置顶";
+
+    public bool IsPinned
+    {
+        get => _isPinned;
+        private set
+        {
+            if (SetProperty(ref _isPinned, value))
+            {
+                OnPropertyChanged(nameof(PinButtonText));
+            }
+        }
+    }
 
     public TodoProjectOption SelectedProject
     {
@@ -145,6 +171,7 @@ public sealed class TodoDetailViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsProjectEditable));
                 OnPropertyChanged(nameof(CanComplete));
                 CompleteCommand.RaiseCanExecuteChanged();
+                TogglePinCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -193,6 +220,42 @@ public sealed class TodoDetailViewModel : ObservableObject
     {
         get => _statusText;
         private set => SetProperty(ref _statusText, value);
+    }
+
+    /// <summary>拼装待办的字段信息 + 原始消息正文，供“复制全部信息”使用。</summary>
+    public string BuildCopyText()
+    {
+        var lines = new List<string>
+        {
+            $"标题：{Title}",
+            $"项目：{ProjectName}",
+            $"置顶：{(IsPinned ? "是" : "否")}",
+            $"优先级：{Priority}",
+            $"状态：{Status}",
+            $"截止时间：{FormatDueText()}",
+            $"提醒：{CurrentReminderText}",
+            $"来源：{Source}",
+            $"群聊：{SourceChatName}",
+            $"发送人：{SenderName}",
+            $"发送时间：{SentAt}",
+            string.Empty,
+            "原始消息：",
+            OriginalContent
+        };
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>由界面层写入底部提示文本（如复制结果反馈）。</summary>
+    public void SetStatus(string text) => StatusText = text;
+
+    private string FormatDueText()
+    {
+        if (DueDate is not { } date)
+        {
+            return "无截止时间";
+        }
+
+        return $"{date:yyyy-MM-dd} {DueHour:00}:{DueMinute:00}";
     }
 
     public async Task LoadProjectsAsync()
@@ -284,9 +347,39 @@ public sealed class TodoDetailViewModel : ObservableObject
 
         _todo = updated;
         Status = updated.Status;
+        IsPinned = updated.IsPinned;
         StatusText = "待办已完成并转入已办。";
         await _refreshWorkbench();
         RequestClose?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>切换置顶：置顶的待办会排在待办页最上方。</summary>
+    public async Task TogglePinAsync()
+    {
+        if (!CanTogglePin)
+        {
+            return;
+        }
+
+        var isPinned = !IsPinned;
+        var updated = await _todos.SetPinnedAsync(_todo.Id, isPinned, _clock.Now, CancellationToken.None);
+        if (!updated)
+        {
+            _dialogs.ShowError("待办已被其他操作修改，请关闭详情并刷新后重试。", isPinned ? "置顶失败" : "取消置顶失败");
+            await _refreshWorkbench();
+            return;
+        }
+
+        IsPinned = isPinned;
+        // 置顶会写 updated_at，这里同步最新版本，避免随后的保存或完成被并发检查拒绝。
+        var reloaded = await _todos.GetByIdAsync(_todo.Id, CancellationToken.None);
+        if (reloaded is not null)
+        {
+            _todo = reloaded;
+        }
+
+        StatusText = isPinned ? "待办已置顶。" : "已取消置顶。";
+        await _refreshWorkbench();
     }
 
     private async Task ScheduleReminderAsync()

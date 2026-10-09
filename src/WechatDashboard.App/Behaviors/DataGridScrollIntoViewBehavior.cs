@@ -34,9 +34,21 @@ public static class DataGridScrollIntoViewBehavior
 
     private static void OnSelectionChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (sender is DataGrid { SelectedItem: not null } grid)
+        if (sender is not DataGrid { SelectedItem: not null } grid)
         {
-            grid.Dispatcher.BeginInvoke(() => grid.ScrollIntoView(grid.SelectedItem));
+            return;
         }
+
+        // 滚动回调被推迟执行，期间选中项可能已被刷新清空、或随列表整体替换而失效，
+        // 因此必须在回调里重新读取当前选中项并确认它仍在列表中。
+        grid.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (grid.SelectedItem is not { } current || !grid.Items.Contains(current))
+            {
+                return;
+            }
+
+            grid.ScrollIntoView(current);
+        }));
     }
 }

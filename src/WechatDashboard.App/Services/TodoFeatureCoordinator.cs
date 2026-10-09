@@ -126,6 +126,8 @@ public sealed class TodoFeatureCoordinator : IDisposable
 
     private async Task NavigateToMessageAsync(long messageId)
     {
+        // 先登记跳转目标：切页会触发消息流自动刷新，未登记时刷新结果会覆盖刚定位到的上下文
+        MessageFeed.PrepareContextNavigation(messageId);
         _selectTab(2);
         await MessageFeed.ShowContextAsync(messageId);
     }

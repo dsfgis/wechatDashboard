@@ -181,7 +181,7 @@ schema migration v4 仅向 `todo_groups` 追加 `color TEXT NOT NULL DEFAULT '#4
 
 ### D-014：自动待办到期时间由统一时区策略计算
 
-`TodoService.CreateFromMention` 接受可测试的 `now` 与 `TimeZoneInfo` 重载，通过 `TodoDueBucketPolicy.EndOfToday(now)` 计算本地日期下一天零点前一 tick。默认重载使用 `DateTimeOffset.Now` 和 `TimeZoneInfo.Local`。只有自动 `@我` 路径传入该 `DueAt`；手动待办和用户主动消息转待办不复用此默认值。（REQ-010、AC-044 至 AC-046）
+`TodoService.CreateFromMention` 接受可测试的 `now` 与 `TimeZoneInfo` 重载，通过 `TodoDueBucketPolicy.EndOfToday(message.SentAt)` 计算消息发送日（微信/石化通消息的 `SentAt`）本地日期下一天零点前一 tick，而非采集时刻——补采历史消息时待办落在发送当天。`now` 仅用于 `CreatedAt`/`UpdatedAt`。默认重载使用 `DateTimeOffset.Now` 和 `TimeZoneInfo.Local`。只有自动 `@我` 路径传入该 `DueAt`；手动待办和用户主动消息转待办不复用此默认值。（REQ-010、AC-044 至 AC-046）
 
 ### D-015：刷新选择以活动 Todo ID 为唯一恢复键
 
@@ -419,7 +419,7 @@ CREATE INDEX idx_todo_items_managed_project_id
 | 项目 ID | 可空；非空时必须存在且可用于选择 | 返回 ProjectMissing，刷新项目选项 | AC-019 至 AC-024、AC-073 至 AC-076 |
 | 项目名称 | 保持现有 Trim、重复检查和持久化规则 | 提示为空或已存在 | AC-015 至 AC-018、AC-032 |
 | 项目颜色 | 创建空值为灰色；创建和修改只允许固定七色；修改必须对应现有项目 ID | 非法值拒绝；更新失败恢复原颜色并提示 | AC-039 至 AC-043、AC-069 至 AC-072、AC-086 |
-| 自动待办 DueAt | 用户时区当天最后一刻 | 使用注入时钟/时区计算 | AC-044、AC-045 |
+| 自动待办 DueAt | 用户时区中消息发送日（SentAt）最后一刻 | 使用消息发送时间与时区计算，不用采集时刻 | AC-044、AC-045 |
 | 日历偏好 | 尺寸、透明度和坐标必须可规范化 | 损坏或越界值回退安全默认 | AC-055、NFR-008 |
 | 项目关键字 | 保持现有规则：新项目自动添加项目名关键字、每项目可多个且至少一个 | 沿用现有校验提示，不允许删空 | AC-069、AC-077 至 AC-082 |
 | ManagedProjectId | 可空；非空必须对应现有可用项目 | ProjectMissing/Persistence 分类结果 | AC-073 至 AC-076、AC-085 |
@@ -481,8 +481,8 @@ CREATE INDEX idx_todo_items_managed_project_id
 
 1. 消息被确认为 `@我` 并完成分类与紧急度计算。
 2. 项目关键字匹配器使用当前项目/关键字快照返回一个项目或未命中。
-3. `TodoService.CreateFromMention` 使用同一 `now` 和用户时区计算当天最后一刻；`TodoFactory.CreateFromMessage` 同时接收该 `DueAt` 和匹配到的 `ManagedProjectId`，既有 `SourceMessageId` 幂等持久化不变。
-4. 工作台刷新后该待办进入“今日到期”，日历显示在用户本地当天；当天具体截止时刻过去后仍保持“今日到期”，只有本地日期进入下一天才转为“已逾期”。
+3. `TodoService.CreateFromMention` 使用消息发送时间 `SentAt` 和用户时区计算发送日最后一刻；`TodoFactory.CreateFromMessage` 同时接收该 `DueAt` 和匹配到的 `ManagedProjectId`，既有 `SourceMessageId` 幂等持久化不变。
+4. 工作台刷新后，消息当天发送的待办进入“今日到期”，日历显示在发送日对应的用户本地日期；补采的历史消息待办落在发送日，若发送日已过则进入“已逾期”。用户后续在详情修改截止时间后，日历和时间桶都以持久化新值为准。
 
 ### 7.6 刷新并恢复批量选择
 

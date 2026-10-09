@@ -77,6 +77,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly Forms.NotifyIcon _trayIcon;
     private readonly Forms.ContextMenuStrip _trayMenu;
     private readonly System.Drawing.Icon? _ownedTrayIcon;
+    // 开机自动启动（当前用户 Run 注册表项）
+    private readonly AutoStartService _autoStartService;
+    private readonly Forms.ToolStripMenuItem _autoStartMenuItem;
     private DesktopCalendarWindow? _desktopCalendarWindow;
     // 从托盘恢复时保留最小化前的窗口状态
     private WindowState _windowStateBeforeMinimize = WindowState.Normal;
@@ -160,10 +163,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         showMenuItem.Click += (_, _) => ShowMainWindowFromTray();
         var exitMenuItem = new Forms.ToolStripMenuItem("退出");
         exitMenuItem.Click += (_, _) => ExitFromTray();
+        // 勾选状态以注册表为准，菜单每次打开时刷新，避免与其他方式修改后状态不一致。
+        _autoStartService = AutoStartService.CreateDefault();
+        _autoStartMenuItem = new Forms.ToolStripMenuItem("开机自动启动")
+        {
+            Checked = _autoStartService.IsEnabled()
+        };
+        _autoStartMenuItem.Click += (_, _) => ToggleAutoStart();
 
         _trayMenu = new Forms.ContextMenuStrip();
         _trayMenu.Items.Add(showMenuItem);
+        _trayMenu.Items.Add(_autoStartMenuItem);
+        _trayMenu.Items.Add(new Forms.ToolStripSeparator());
         _trayMenu.Items.Add(exitMenuItem);
+        _trayMenu.Opening += (_, _) => _autoStartMenuItem.Checked = _autoStartService.IsEnabled();
         _ownedTrayIcon = LoadApplicationIcon();
         _trayIcon = new Forms.NotifyIcon
         {
@@ -674,6 +687,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _isExitRequested = true;
         Close();
+    }
+
+    /// <summary>切换开机自动启动；失败时保持原状态并提示原因。</summary>
+    private void ToggleAutoStart()
+    {
+        var result = _autoStartService.SetEnabled(!_autoStartMenuItem.Checked);
+        _autoStartMenuItem.Checked = result.IsEnabled;
+        if (result.Success)
+        {
+            return;
+        }
+
+        // 托盘场景下主窗口处于隐藏状态，这里不使用窗口所有者，避免提示框被隐藏窗口影响。
+        MessageBox.Show(
+            result.ErrorMessage ?? "开机自动启动设置失败。",
+            "开机自动启动",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
     }
 
     /// <summary>标题栏关闭按钮隐藏到托盘；显式退出时停止监听并释放资源。</summary>
