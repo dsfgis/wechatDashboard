@@ -82,6 +82,23 @@
                 <Button Content="查看原始消息" Command="{Binding NavigateToSourceCommand}" Padding="16,7" />
             </WrapPanel>
 
+            <!-- 待办说明：可编辑备注，位于原始消息上方；点“保存说明”即可提交，也会随“保存待办”一起保存 -->
+            <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,16">
+                <StackPanel>
+                    <DockPanel Margin="0,0,0,8">
+                        <Button x:Name="SaveDescriptionButton" DockPanel.Dock="Right" Content="保存说明"
+                                Command="{Binding SaveDescriptionCommand}" Padding="12,5" Margin="8,0,0,0"
+                                ToolTip="提交当前详情（含待办说明），无需回到上方点击“保存待办”" />
+                        <TextBlock Text="待办说明（可编辑保存）" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <TextBox x:Name="DescriptionTextBox" Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
+                             AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="200"
+                             VerticalScrollBarVisibility="Auto" Padding="8" />
+                    <TextBlock Text="说明保存在本地数据库中，也会随上方“保存待办”一起提交；清空后保存表示删除说明。"
+                               Foreground="#9CA3AF" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
             <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,16">
                 <StackPanel>
                     <DockPanel Margin="0,0,0,8">
@@ -95,7 +112,7 @@
                     </DockPanel>
                     <TextBox Text="{Binding SourceInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}" />
                     <TextBox Text="{Binding SenderInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}" />
-                    <TextBox Text="{Binding OriginalContent, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
+                    <TextBox x:Name="OriginalContentTextBox" Text="{Binding OriginalContent, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
                              AcceptsReturn="True" MaxHeight="280" VerticalScrollBarVisibility="Auto"
                              Margin="0,8,0,0" />
                 </StackPanel>

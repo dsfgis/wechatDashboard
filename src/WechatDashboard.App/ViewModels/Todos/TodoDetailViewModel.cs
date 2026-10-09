@@ -80,6 +80,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         ProjectColor = row.ProjectColor;
         _isPinned = row.Todo.IsPinned;
         SaveCommand = new AsyncRelayCommand(_ => SaveAsync());
+        SaveDescriptionCommand = new AsyncRelayCommand(_ => SaveDescriptionAsync());
         CompleteCommand = new AsyncRelayCommand(_ => CompleteAsync(), _ => CanComplete);
         TogglePinCommand = new AsyncRelayCommand(_ => TogglePinAsync(), _ => CanTogglePin);
         ScheduleReminderCommand = new AsyncRelayCommand(_ => ScheduleReminderAsync());
@@ -99,6 +100,8 @@ public sealed class TodoDetailViewModel : ObservableObject
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> ReminderMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public AsyncRelayCommand SaveCommand { get; }
+    /// <summary>只提交“待办说明”字段，复用保存流程以保证并发版本检查一致。</summary>
+    public AsyncRelayCommand SaveDescriptionCommand { get; }
     public AsyncRelayCommand CompleteCommand { get; }
     public AsyncRelayCommand TogglePinCommand { get; }
     public AsyncRelayCommand ScheduleReminderCommand { get; }
@@ -234,6 +237,7 @@ public sealed class TodoDetailViewModel : ObservableObject
             $"状态：{Status}",
             $"截止时间：{FormatDueText()}",
             $"提醒：{CurrentReminderText}",
+            $"说明：{(string.IsNullOrWhiteSpace(Description) ? "无" : Description)}",
             $"来源：{Source}",
             $"群聊：{SourceChatName}",
             $"发送人：{SenderName}",
@@ -281,7 +285,10 @@ public sealed class TodoDetailViewModel : ObservableObject
         }
     }
 
-    private async Task SaveAsync()
+    /// <summary>只保存“待办说明”字段；与“保存待办”共用同一条保存与并发检查路径。</summary>
+    public Task SaveDescriptionAsync() => SaveAsync("待办说明已保存。");
+
+    private async Task SaveAsync(string successMessage = "待办已保存。")
     {
         if (!TryGetOptionalDueTime(out var dueAt))
         {
@@ -293,7 +300,7 @@ public sealed class TodoDetailViewModel : ObservableObject
             new UpdateTodoRequest(
                 _todo.Id,
                 Title,
-                Description,
+                NormalizeDescription(),
                 _todo.ProjectId,
                 Priority,
                 dueAt,
@@ -315,9 +322,15 @@ public sealed class TodoDetailViewModel : ObservableObject
         OnPropertyChanged(nameof(ProjectName));
         OnPropertyChanged(nameof(ProjectColor));
         SetDueSelection(updated.DueAt);
-        StatusText = "待办已保存。";
+        // 回写规范化后的说明（空白说明按“无说明”处理），保持界面与数据库一致。
+        Description = updated.Description;
+        StatusText = successMessage;
         await _refreshWorkbench();
     }
+
+    /// <summary>把空白说明归一为 null，避免把空串写入数据库。</summary>
+    private string? NormalizeDescription()
+        => string.IsNullOrWhiteSpace(Description) ? null : Description.Trim();
 
     public async Task CompleteAsync()
     {

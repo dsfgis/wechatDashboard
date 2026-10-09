@@ -47,6 +47,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo detail project choices match configured projects", TestTodoDetailProjectOptionsAsync),
     ("Todo detail pins and unpins an active todo", TestTodoDetailPinToggleAsync),
     ("Todo detail window renders the header pin button", TestTodoDetailWindowPinButtonRenderingAsync),
+    ("Todo detail saves an editable description above the source message", TestTodoDetailDescriptionAsync),
+    ("Todo detail renders the description editor above the original message", TestTodoDetailDescriptionSectionRenderingAsync),
     ("Manual Todo creation persists a group and optional reminder atomically", TestManualTodoCreationAsync),
     ("Todo group changes persist through completion", TestTodoGroupLifecycleAsync),
     ("Manual Todo create view model selects a project and prevents duplicate submission", TestTodoCreateViewModelAsync),
@@ -1710,6 +1712,147 @@ static async Task TestTodoDetailWindowPinButtonRenderingAsync()
     if (renderFailure is not null)
     {
         throw new InvalidOperationException("Todo detail should render its header pin button.", renderFailure);
+    }
+}
+
+static async Task TestTodoDetailDescriptionAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var todo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("带说明的待办", "初始说明", PriorityLevel.P2, null, null, null),
+        CancellationToken.None)).Todo!;
+    var row = new TodoListItemViewModel(
+        todo,
+        null,
+        null,
+        TodoDueBucket.NoDueDate,
+        "未指定项目",
+        ProjectColorPolicy.DefaultColor,
+        () => { });
+    var refreshCount = 0;
+    var dialogs = new FakeTodoDialogService();
+    var detail = new TodoDetailViewModel(
+        row,
+        todoService,
+        repository,
+        new SqliteFollowedProjectRepository(databasePath),
+        new ReminderApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
+        new SqliteReminderRepository(databasePath),
+        clock,
+        () =>
+        {
+            refreshCount++;
+            return Task.CompletedTask;
+        },
+        _ => Task.CompletedTask,
+        dialogs);
+
+    AssertEqual("初始说明", detail.Description, "Opening the detail should load the persisted description for editing.");
+    AssertTrue(detail.BuildCopyText().Contains("说明：初始说明", StringComparison.Ordinal), "Copying all info should include the description.");
+    AssertTrue(detail.SaveDescriptionCommand.CanExecute(null), "The detail should expose an executable save-description command.");
+    AssertTrue(!dialogs.Errors.Any(), "Loading a description should not raise a dialog error.");
+
+    detail.Description = "  补充后的说明  ";
+    await detail.SaveDescriptionAsync();
+
+    AssertEqual("待办说明已保存。", detail.StatusText, "Saving only the description should report its own feedback message.");
+    AssertFalse(dialogs.Errors.Any(), "Saving a valid description must not raise a dialog error.");
+    AssertEqual(1, refreshCount, "Saving the description should refresh the shared workbench once.");
+    AssertEqual("补充后的说明", detail.Description, "Saving should write the trimmed description back to the view model.");
+    AssertEqual("补充后的说明", (await repository.GetByIdAsync(todo.Id, CancellationToken.None))!.Description, "The description should persist through the repository.");
+
+    detail.Description = "   ";
+    await detail.SaveDescriptionAsync();
+
+    AssertEqual<string?>(null, detail.Description, "Clearing the editor should store no description rather than whitespace.");
+    AssertEqual<string?>(null, (await repository.GetByIdAsync(todo.Id, CancellationToken.None))!.Description, "A whitespace-only description should persist as no description.");
+    AssertTrue(detail.BuildCopyText().Contains("说明：无", StringComparison.Ordinal), "A missing description should be copied as an explicit empty value.");
+}
+
+static async Task TestTodoDetailDescriptionSectionRenderingAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var todo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("详情说明渲染", "渲染用的说明文本", PriorityLevel.P2, null, null, null),
+        CancellationToken.None)).Todo!;
+
+    Exception? renderFailure = null;
+    var renderThread = new Thread(() =>
+    {
+        try
+        {
+            var row = new TodoListItemViewModel(
+                todo,
+                null,
+                null,
+                TodoDueBucket.NoDueDate,
+                "未指定项目",
+                ProjectColorPolicy.DefaultColor,
+                () => { });
+            var detail = new TodoDetailViewModel(
+                row,
+                new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
+                repository,
+                new SqliteFollowedProjectRepository(databasePath),
+                new ReminderApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
+                new SqliteReminderRepository(databasePath),
+                clock,
+                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                new FakeTodoDialogService());
+            var window = new WechatDashboard.App.Views.Todos.TodoDetailWindow(detail);
+            window.Show();
+            window.UpdateLayout();
+
+            var descriptionBox = (System.Windows.Controls.TextBox)window.FindName("DescriptionTextBox");
+            var originalBox = (System.Windows.Controls.TextBox)window.FindName("OriginalContentTextBox");
+            var saveDescriptionButton = (System.Windows.Controls.Button)window.FindName("SaveDescriptionButton");
+
+            AssertNotNull(descriptionBox, "The detail should render an editable description box.");
+            AssertNotNull(originalBox, "The detail should keep rendering the original message box.");
+            AssertNotNull(saveDescriptionButton, "The detail should render a save-description button.");
+            AssertEqual("渲染用的说明文本", descriptionBox.Text, "The rendered description box should show the persisted description.");
+            AssertFalse(descriptionBox.IsReadOnly, "The description box must stay editable.");
+            AssertTrue(saveDescriptionButton.IsEnabled, "The save-description button should be enabled for an active Todo.");
+
+            var descriptionTop = descriptionBox.TranslatePoint(new System.Windows.Point(0, 0), window).Y;
+            var originalTop = originalBox.TranslatePoint(new System.Windows.Point(0, 0), window).Y;
+            AssertTrue(
+                descriptionTop < originalTop,
+                $"The description editor should render above the original message (description Y={descriptionTop}, original Y={originalTop}).");
+
+            window.Close();
+        }
+        catch (Exception ex)
+        {
+            renderFailure = ex;
+        }
+        finally
+        {
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeShutdown();
+        }
+    });
+    renderThread.SetApartmentState(ApartmentState.STA);
+    renderThread.Start();
+
+    AssertTrue(renderThread.Join(TimeSpan.FromSeconds(15)), "Todo detail description render thread should finish without hanging.");
+    if (renderFailure is not null)
+    {
+        throw new InvalidOperationException("Todo detail should render an editable description above the original message.", renderFailure);
     }
 }
 
