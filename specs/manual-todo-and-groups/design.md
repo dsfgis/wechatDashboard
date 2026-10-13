@@ -279,6 +279,10 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 
 迁移和项目/待办写入使用现有事务边界；初始化失败不进入可写状态。若旧二进制无法理解新事实源，发布回滚必须恢复迁移前数据库副本，或只读诊断当前数据库，不能让两个版本交替写入后再合并。
 
+### D-030：桌面日历滚动条由日历主题驱动，不使用系统默认样式
+
+`DesktopCalendarView` 的当日日程列表启用溢出滚动时，系统默认 `ScrollBar` 会固定绘制浅色轨道与箭头按钮，在暗色主题下形成一条与面板割裂的亮带。因此 `CalendarControls.xaml` 提供隐式 `ScrollBar` 样式：轨道透明、滑块为 6 DIP 圆角胶囊、无增减箭头按钮，垂直方向宽 8 DIP、水平方向高 8 DIP；滑块颜色由 `DesktopCalendarTheme` 的 `CalendarScrollThumb`/`CalendarScrollThumbHover`/`CalendarScrollThumbPressed` 三组明暗色值驱动，随主题切换即时更新。该样式只作用于合并 `CalendarControls.xaml` 的日历视图（桌面日历窗口与主窗口“日程概览”），不改变主窗口其他页面的滚动条外观。（REQ-012、REQ-014）
+
 ### D-029：待办说明沿用现有 `description` 字段和同一条保存路径
 
 详情窗口新增的“待办说明”不引入新列，直接编辑既有 `todo_items.description`。`TodoDetailViewModel` 新增 `SaveDescriptionAsync`，与“保存待办”共用同一次 `UpdateTodoRequest` 提交和 `ExpectedUpdatedAt` 乐观并发检查，只是反馈文案不同；空白说明在 ViewModel 内规范化为 `null` 后再落库，保存成功后回写界面。（REQ-007、REQ-013）
@@ -301,7 +305,8 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 | `TodoWorkbenchViewModel` | App | 添加命令、批量解析项目名/颜色、列表刷新和选择恢复 | REQ-001、REQ-006、REQ-011 |
 | `TodoFeatureCoordinator` | App | 组装服务并通知外层聚合刷新 | REQ-007 |
 | `DesktopCalendarViewModel` | App | 月视图、日期分组、排序、详情跳转和刷新 | REQ-012 |
-| `DesktopCalendarView` | App | 内嵌页与桌面窗口共享的月历视觉和命令绑定 | REQ-014 |
+| `DesktopCalendarView` | App | 内嵌页与桌面窗口共享的月历视觉和命令绑定；当日日程列表使用主题化滚动条 | REQ-014 |
+| `CalendarControls.xaml` / `DesktopCalendarTheme` | App | 日历共用样式与明暗色值，含 `CalendarScrollThumb` 系列滚动条颜色 | REQ-012、REQ-014 |
 | `DesktopCalendarWindow` | App | 唯一桌面窗口、停靠/缩进状态机和计时器生命周期 | REQ-012 |
 | `DesktopCalendarStateStore` / `DesktopCalendarDockLayout` | App | 临时文件替换保存偏好和纯几何计算 | REQ-012 |
 | `FollowedProject` | Domain | 在现有稳定 ID、名称和活动状态上增加固定色板颜色 | REQ-009、REQ-015、REQ-016 |
@@ -532,6 +537,13 @@ CREATE INDEX idx_todo_items_managed_project_id
 3. 两条路径共用同一次保存：`TodoDetailViewModel` 把说明规范化（`Trim`，全空白视为无说明）后放入 `UpdateTodoRequest`，仍使用 `ExpectedUpdatedAt` 做乐观并发更新；冲突时给出与“保存待办”一致的提示。
 4. 保存成功后把规范化结果回写界面，保证清空说明后编辑框为空且数据库存储 `NULL` 而不是空串；同时刷新一次共享工作台。
 5. “复制全部信息”包含说明行；无说明时显示“无”，不因空值省略该行。
+
+### 7.12 滚动当日日程列表
+
+1. 当日待办超出列表高度时，右侧出现 8 DIP 宽的主题化滚动条；内容未溢出时不出现。
+2. 滑块使用当前主题的 `CalendarScrollThumb` 颜色，悬停变亮、拖动加深；轨道透明，直接透出面板背景。
+3. 点击轨道空白区域按页滚动，拖动滑块连续滚动；滚动条不改变卡片宽度以外的任何布局，也不引入增减箭头按钮。
+4. 点击“暗黑/浅色”切换主题时，滑块颜色在同一帧内切换到目标主题色值，不出现浅色残留。
 
 ## 8. 错误分类、恢复与用户可见行为
 

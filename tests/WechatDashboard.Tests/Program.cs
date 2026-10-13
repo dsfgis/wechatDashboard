@@ -59,6 +59,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Desktop calendar window preferences round-trip", TestDesktopCalendarStateStoreAsync),
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
+    ("Desktop calendar list uses a theme-aware scrollbar in both themes", TestDesktopCalendarScrollBarThemeAsync),
     ("Auto start service toggles the current user Run entry", TestAutoStartServiceAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
@@ -2615,6 +2616,274 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
     }
 }
 
+static async Task TestDesktopCalendarScrollBarThemeAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 10, 13, 9, 0, 0, TimeSpan.FromHours(8));
+    var repository = new SqliteTodoRepository(databasePath);
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    for (var index = 0; index < 8; index++)
+    {
+        await service.CreateManualAsync(
+            new CreateManualTodoRequest($"当日日程滚动校验 {index}", null, PriorityLevel.P2, now.AddHours(1), null, null),
+            CancellationToken.None);
+    }
+
+    var viewModel = new DesktopCalendarViewModel(repository, new FixedClock(now), timeZone, _ => Task.CompletedTask);
+    await viewModel.RefreshAsync();
+    AssertEqual(8, viewModel.SelectedTodos.Count, "The selected day must expose every created Todo before checking the overflow scrollbar.");
+
+    var statePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}", "desktop-calendar.json");
+    new DesktopCalendarStateStore(statePath).Save(new DesktopCalendarWindowState(Left: 100, Top: 100, IsDarkTheme: true));
+    // 可选：设置 WECHAT_DASHBOARD_CAPTURE_DIR 时导出明暗两套日历效果图，便于人工核对滚动条观感。
+    var captureDirectory = Environment.GetEnvironmentVariable("WECHAT_DASHBOARD_CAPTURE_DIR") ?? string.Empty;
+
+    Exception? renderFailure = null;
+    var renderThread = new Thread(() =>
+    {
+        try
+        {
+            var window = new WechatDashboard.App.Views.Todos.DesktopCalendarWindow(viewModel, new DesktopCalendarStateStore(statePath));
+            window.Show();
+            window.UpdateLayout();
+            var themeButton = (System.Windows.Controls.Button)window.FindName("ThemeButton");
+            var calendarContent = (WechatDashboard.App.Views.Todos.DesktopCalendarView)window.FindName("CalendarContent");
+            var list = (System.Windows.Controls.ListBox)calendarContent.FindName("SelectedTodosList");
+            AssertNotNull(list, "The day detail list must be addressable for scrollbar verification.");
+            window.UpdateLayout();
+
+            var verticalScrollBar = FindVisualDescendant<System.Windows.Controls.Primitives.ScrollBar>(
+                list,
+                candidate => candidate.Orientation == System.Windows.Controls.Orientation.Vertical);
+            AssertNotNull(verticalScrollBar, "The overflowing day detail list must create a vertical scrollbar.");
+            AssertEqual(System.Windows.Visibility.Visible, verticalScrollBar!.Visibility, "Eight day Todos must overflow the detail list.");
+            AssertTrue(Math.Abs(verticalScrollBar.ActualWidth - 8) <= 0.5,
+                $"The calendar scrollbar must use the slim themed width instead of the system default, got {verticalScrollBar.ActualWidth}.");
+            AssertTrue(verticalScrollBar.ActualHeight > 100,
+                $"The vertical scrollbar must keep the full list height, got {verticalScrollBar.ActualHeight}.");
+            AssertTrue(verticalScrollBar.Template.FindName("PART_Track", verticalScrollBar) is System.Windows.Controls.Primitives.Track,
+                "The calendar scrollbar must use the themed template with a track.");
+            AssertEqual(0, CountVisualDescendants<System.Windows.Shapes.Path>(verticalScrollBar),
+                "The themed scrollbar must not render the system arrow buttons.");
+            AssertEqual(0.0, ((System.Windows.Media.SolidColorBrush)verticalScrollBar.Background).Color.A,
+                "The themed scrollbar track must be transparent so the panel background shows through.");
+
+            var darkThumb = (System.Windows.Media.SolidColorBrush)calendarContent.FindResource("CalendarScrollThumb");
+            var windowContent = (System.Windows.FrameworkElement)window.Content;
+            var darkSample = SampleScrollBarRegion(windowContent, verticalScrollBar, darkThumb.Color);
+            AssertTrue(darkSample.OpaquePixels > 0,
+                $"The dark scrollbar must render a visible thumb: {DescribeSample(darkSample)}");
+            AssertEqual(0, darkSample.SystemChromePixels,
+                "The dark theme must not paint the system light scrollbar chrome (RGB 240,240,240).");
+            AssertTrue(darkSample.ThemePixels > 0,
+                $"The dark scrollbar thumb must use CalendarScrollThumb, found {darkSample.ThemePixels} matching pixels.");
+            AssertTrue(darkSample.MaxLuminance < 160,
+                $"The dark theme must not draw a bright scrollbar band, measured luminance {darkSample.MaxLuminance:0.0}.");
+            CaptureCalendarSnapshot(windowContent, Path.Combine(captureDirectory, "desktop-calendar-dark.png"));
+
+            themeButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            window.UpdateLayout();
+            var lightThumb = (System.Windows.Media.SolidColorBrush)calendarContent.FindResource("CalendarScrollThumb");
+            AssertEqual("#FFC2CAD6", lightThumb.Color.ToString(), "Switching to the light theme must restore the light scrollbar thumb color.");
+            var lightSample = SampleScrollBarRegion(windowContent, verticalScrollBar, lightThumb.Color);
+            AssertTrue(lightSample.ThemePixels > 0,
+                $"The light scrollbar thumb must use CalendarScrollThumb, found {lightSample.ThemePixels} matching pixels.");
+            AssertEqual(0, lightSample.SystemChromePixels,
+                "The light theme must not fall back to the system scrollbar chrome (RGB 240,240,240).");
+            // 浅色主题轨道透明，会露出白色面板背景，因此用最暗像素判断滑块是否可辨识。
+            AssertTrue(lightSample.MinLuminance <= 215,
+                $"The light scrollbar thumb must stay discernible on the white panel, darkest measured luminance {lightSample.MinLuminance:0.0}.");
+            CaptureCalendarSnapshot(windowContent, Path.Combine(captureDirectory, "desktop-calendar-light.png"));
+            window.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            renderFailure = ex;
+        }
+        finally
+        {
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeShutdown();
+        }
+    });
+    renderThread.SetApartmentState(ApartmentState.STA);
+    renderThread.Start();
+
+    AssertTrue(renderThread.Join(TimeSpan.FromSeconds(15)), "Desktop calendar scrollbar render thread should finish without hanging.");
+    if (renderFailure is not null)
+    {
+        throw new InvalidOperationException("The desktop calendar scrollbar must stay theme-consistent in both themes.", renderFailure);
+    }
+}
+
+static void CaptureCalendarSnapshot(System.Windows.FrameworkElement element, string path)
+{
+    var directory = Path.GetDirectoryName(path);
+    if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(directory))
+    {
+        return;
+    }
+
+    const double scale = 1.5;
+    var pixelWidth = Math.Max(1, (int)Math.Ceiling(element.ActualWidth * scale));
+    var pixelHeight = Math.Max(1, (int)Math.Ceiling(element.ActualHeight * scale));
+    var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(
+        pixelWidth,
+        pixelHeight,
+        96 * scale,
+        96 * scale,
+        System.Windows.Media.PixelFormats.Pbgra32);
+    bitmap.Render(element);
+    var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+    encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+    Directory.CreateDirectory(directory);
+    using var stream = File.Create(path);
+    encoder.Save(stream);
+}
+
+static string DescribeSample(RenderedPixelSample sample) =>
+    $"opaque={sample.OpaquePixels} anyAlpha={sample.AlphaPixels} theme={sample.ThemePixels} chrome={sample.SystemChromePixels} minLuma={sample.MinLuminance:0.0} maxLuma={sample.MaxLuminance:0.0} maxAlpha={sample.MaxAlpha}";
+
+static T? FindVisualDescendant<T>(
+    System.Windows.DependencyObject root,
+    Func<T, bool>? predicate = null)
+    where T : System.Windows.DependencyObject
+{
+    var queue = new Queue<System.Windows.DependencyObject>();
+    queue.Enqueue(root);
+    while (queue.Count > 0)
+    {
+        var current = queue.Dequeue();
+        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(current);
+        for (var index = 0; index < count; index++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(current, index);
+            if (child is T match && (predicate is null || predicate(match)))
+            {
+                return match;
+            }
+
+            queue.Enqueue(child);
+        }
+    }
+
+    return null;
+}
+
+static int CountVisualDescendants<T>(System.Windows.DependencyObject root)
+    where T : System.Windows.DependencyObject
+{
+    var total = 0;
+    var queue = new Queue<System.Windows.DependencyObject>();
+    queue.Enqueue(root);
+    while (queue.Count > 0)
+    {
+        var current = queue.Dequeue();
+        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(current);
+        for (var index = 0; index < count; index++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(current, index);
+            if (child is T)
+            {
+                total++;
+            }
+
+            queue.Enqueue(child);
+        }
+    }
+
+    return total;
+}
+
+static RenderedPixelSample SampleScrollBarRegion(
+    System.Windows.FrameworkElement root,
+    System.Windows.FrameworkElement scrollBar,
+    System.Windows.Media.Color expectedColor)
+{
+    var origin = scrollBar.TransformToAncestor(root).Transform(new System.Windows.Point(0, 0));
+    var region = new System.Windows.Rect(origin, new System.Windows.Size(scrollBar.ActualWidth, scrollBar.ActualHeight));
+    return SampleRenderedRegion(root, region, expectedColor);
+}
+
+static RenderedPixelSample SampleRenderedRegion(
+    System.Windows.FrameworkElement root,
+    System.Windows.Rect region,
+    System.Windows.Media.Color expectedColor)
+{
+    var width = Math.Max(1, (int)Math.Ceiling(root.ActualWidth));
+    var height = Math.Max(1, (int)Math.Ceiling(root.ActualHeight));
+    var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(
+        width,
+        height,
+        96,
+        96,
+        System.Windows.Media.PixelFormats.Pbgra32);
+    bitmap.Render(root);
+    var stride = bitmap.PixelWidth * 4;
+    var pixels = new byte[stride * bitmap.PixelHeight];
+    bitmap.CopyPixels(pixels, stride, 0);
+
+    var opaque = 0;
+    var alphaPixels = 0;
+    var themePixels = 0;
+    var systemChromePixels = 0;
+    var maxLuminance = 0.0;
+    var minLuminance = double.MaxValue;
+    var maxAlpha = 0;
+    var left = Math.Max(0, (int)Math.Floor(region.Left));
+    var top = Math.Max(0, (int)Math.Floor(region.Top));
+    var right = Math.Min(bitmap.PixelWidth, (int)Math.Ceiling(region.Right));
+    var bottom = Math.Min(bitmap.PixelHeight, (int)Math.Ceiling(region.Bottom));
+    for (var y = top; y < bottom; y++)
+    {
+        for (var x = left; x < right; x++)
+        {
+            var offset = (y * stride) + (x * 4);
+            var alpha = pixels[offset + 3];
+            if (alpha > 0)
+            {
+                alphaPixels++;
+            }
+
+            maxAlpha = Math.Max(maxAlpha, alpha);
+            if (alpha < 200)
+            {
+                continue;
+            }
+
+            opaque++;
+            var blue = pixels[offset];
+            var green = pixels[offset + 1];
+            var red = pixels[offset + 2];
+            var luminance = (0.299 * red) + (0.587 * green) + (0.114 * blue);
+            maxLuminance = Math.Max(maxLuminance, luminance);
+            minLuminance = Math.Min(minLuminance, luminance);
+            if (Math.Abs(red - expectedColor.R) <= 6 && Math.Abs(green - expectedColor.G) <= 6 && Math.Abs(blue - expectedColor.B) <= 6)
+            {
+                themePixels++;
+            }
+
+            // 系统默认滚动条滑块/轨道固定为 #F0F0F0，出现即说明自定义模板没有生效。
+            if (Math.Abs(red - 240) <= 4 && Math.Abs(green - 240) <= 4 && Math.Abs(blue - 240) <= 4)
+            {
+                systemChromePixels++;
+            }
+        }
+    }
+
+    return new RenderedPixelSample(
+        opaque,
+        alphaPixels,
+        themePixels,
+        systemChromePixels,
+        maxLuminance,
+        opaque == 0 ? 0 : minLuminance,
+        maxAlpha);
+}
+
 static Task TestShihuatongMessageContentDecoderAsync()
 {
     var text = "石化通本地消息";
@@ -4181,6 +4450,16 @@ static void AssertNotNull<T>(T? value, string message) where T : class
         throw new InvalidOperationException(message);
     }
 }
+
+/// <summary>离屏渲染一块区域后的像素统计，用于断言滚动条是否与主题一致。</summary>
+public sealed record RenderedPixelSample(
+    int OpaquePixels,
+    int AlphaPixels,
+    int ThemePixels,
+    int SystemChromePixels,
+    double MaxLuminance,
+    double MinLuminance,
+    int MaxAlpha);
 
 public sealed class StaticWindowTextSnapshotProvider : IWindowTextSnapshotProvider
 {

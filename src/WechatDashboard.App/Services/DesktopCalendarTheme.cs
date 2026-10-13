@@ -30,7 +30,10 @@ public static class DesktopCalendarTheme
             ("Accent", "#2563EB", "#2563EB"),
             ("AccentText", "#2563EB", "#93C5FD"),
             ("Weekend", "#B45309", "#FBBF77"),
-            ("RevealBorder", "#BFDBFE", "#60A5FA")
+            ("RevealBorder", "#BFDBFE", "#60A5FA"),
+            ("ScrollThumb", "#C2CAD6", "#4A5872"),
+            ("ScrollThumbHover", "#9BA6B6", "#63728F"),
+            ("ScrollThumbPressed", "#7D8998", "#8291AC")
         ];
         foreach (var (key, light, night) in colors)
         {

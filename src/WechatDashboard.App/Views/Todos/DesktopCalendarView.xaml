@@ -290,7 +290,7 @@
                                     </Style>
                                 </TextBlock.Style>
                             </TextBlock>
-                            <ListBox ItemsSource="{Binding SelectedTodos}" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox x:Name="SelectedTodosList" ItemsSource="{Binding SelectedTodos}" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListBox.ItemContainerStyle>
                                     <Style TargetType="ListBoxItem">
                                         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
