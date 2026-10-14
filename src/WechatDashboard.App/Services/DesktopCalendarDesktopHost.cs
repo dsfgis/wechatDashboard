@@ -28,6 +28,8 @@ public sealed class DesktopCalendarDesktopHost
     private bool _usesTopLevelDesktopOverlay;
     private bool _originalNoActivate;
     private nint _desktopWindow;
+    private System.Windows.Threading.DispatcherTimer? _desktopOrderTimer;
+    private bool _isRestoringDesktopOrder;
 
     public void SetShape(Rect bounds, double radius)
     {
@@ -127,9 +129,11 @@ public sealed class DesktopCalendarDesktopHost
             UpdateWindow(_window);
             RedrawWindow(_window, 0, 0, 0x0100 | 0x0200 | 0x0400 | 0x0800);
             _source.AddHook(WindowHook);
+            if (_usesTopLevelDesktopOverlay) StartDesktopOrderGuard();
         }
         catch
         {
+            StopDesktopOrderGuard();
             RestoreActivationStyle();
             if (!_usesTopLevelDesktopOverlay)
             {
@@ -149,6 +153,7 @@ public sealed class DesktopCalendarDesktopHost
     public void Detach()
     {
         if (!IsEmbedded) return;
+        StopDesktopOrderGuard();
         // Resizing while embedded must survive the return to a floating window.
         Check(GetWindowRect(_window, out _screenBounds));
         _isChangingParent = true;
@@ -179,9 +184,11 @@ public sealed class DesktopCalendarDesktopHost
             handled = true;
             return 3; // MA_NOACTIVATE: deliver the click without raising the widget.
         }
-        if (message == 0x0112 && ((long)wParam & 0xfff0) is 0xf010 or 0xf000)
+        if (message == 0x0112 && ((long)wParam & 0xfff0) is 0xf010 or 0xf000 or 0xf020)
         {
-            // SC_MOVE / SC_SIZE, including keyboard/system-menu requests.
+            // SC_MOVE / SC_SIZE / SC_MINIMIZE, including keyboard/system-menu requests.
+            // Win+D 与「显示桌面」通过向全部顶层窗口投递 SC_MINIMIZE 最小化应用窗口；
+            // 已嵌入桌面的日历必须像桌面图标一样忽略该请求，否则会随显示桌面一起消失。
             handled = true;
         }
         else if (message == 0x0046)
@@ -189,11 +196,62 @@ public sealed class DesktopCalendarDesktopHost
             // WM_WINDOWPOSCHANGING: also block native movement and Aero Snap.
             var position = Marshal.PtrToStructure<WindowPosition>(lParam);
             position.Flags |= 0x0002 | NoActivate;
-            if (_usesTopLevelDesktopOverlay && (position.Flags & 0x0004) == 0)
+            if (_usesTopLevelDesktopOverlay && !_isRestoringDesktopOrder && (position.Flags & 0x0004) == 0)
                 position.InsertAfter = GetDesktopInsertAfter();
             Marshal.StructureToPtr(position, lParam, false);
         }
         return 0;
+    }
+
+    /// <summary>
+    /// 「显示桌面」/Win+D 不是最小化窗口，而是把桌面图标层（Progman）整体抬到所有窗口之上；
+    /// 顶层覆盖模式的日历会被盖住。周期检查 Z 序并在被抬高时复位到图标层上方，
+    /// 使日历像桌面图标一样在显示桌面时保持可见。
+    /// </summary>
+    private void StartDesktopOrderGuard()
+    {
+        if (_desktopOrderTimer == null)
+        {
+            _desktopOrderTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(300)
+            };
+            _desktopOrderTimer.Tick += (_, _) => RestoreOverlayAboveDesktop();
+        }
+        if (!_desktopOrderTimer.IsEnabled) _desktopOrderTimer.Start();
+    }
+
+    private void StopDesktopOrderGuard() => _desktopOrderTimer?.Stop();
+
+    private void RestoreOverlayAboveDesktop()
+    {
+        if (!IsEmbedded || !_usesTopLevelDesktopOverlay || _isChangingParent) return;
+        // 沿 Z 序向上查找图标层窗口（Progman / 承载 SHELLDLL_DefView 的 WorkerW）；
+        // 壁纸程序产生的普通 WorkerW 不会遮挡日历，忽略。记录最靠上的一个以便整体越过图标层。
+        nint topmostIconWindow = 0;
+        for (var above = GetWindow(_window, 3); above != 0; above = GetWindow(above, 3))
+        {
+            if (!IsIconLayerWindow(above)) continue;
+            topmostIconWindow = above;
+        }
+        if (topmostIconWindow == 0) return; // 图标层在日历之下，属于正常嵌入状态。
+        // 把日历插到图标层最顶端窗口的上方，与桌面图标一起显示在「显示桌面」后的桌面上。
+        _isRestoringDesktopOrder = true;
+        try
+        {
+            SetWindowPos(_window, GetWindow(topmostIconWindow, 3), 0, 0, 0, 0,
+                0x0001 | 0x0002 | NoActivate); // NOSIZE | NOMOVE | NOACTIVATE
+        }
+        finally { _isRestoringDesktopOrder = false; }
+    }
+
+    private bool IsIconLayerWindow(nint window)
+    {
+        var name = new StringBuilder(256);
+        GetClassName(window, name, name.Capacity);
+        var className = name.ToString();
+        return className == "Progman"
+            || (className == "WorkerW" && FindWindowEx(window, 0, "SHELLDLL_DefView", null) != 0);
     }
 
     private void RestoreActivationStyle()
@@ -313,6 +371,7 @@ public sealed class DesktopCalendarDesktopHost
     [DllImport("user32.dll", SetLastError = true)] private static extern nint SendMessageTimeout(nint window, uint message, nint wParam, nint lParam, uint flags, uint timeout, out nint result);
     [DllImport("user32.dll", SetLastError = true)] private static extern nint SetParent(nint child, nint parent);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
+    [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
     [DllImport("user32.dll")] private static extern nint GetDesktopWindow();
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);

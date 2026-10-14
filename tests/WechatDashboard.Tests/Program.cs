@@ -60,6 +60,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
     ("Desktop calendar list uses a theme-aware scrollbar in both themes", TestDesktopCalendarScrollBarThemeAsync),
+    ("Embedded desktop calendar stays above the raised desktop through Win+D", TestDesktopCalendarShowDesktopSurvivalAsync),
     ("Auto start service toggles the current user Run entry", TestAutoStartServiceAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
@@ -2561,9 +2562,9 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             resizeGrip.RaiseEvent(new System.Windows.Controls.Primitives.DragCompletedEventArgs(0, 0, false)
                 { RoutedEvent = System.Windows.Controls.Primitives.Thumb.DragCompletedEvent });
             var opacitySlider = (System.Windows.Controls.Slider)window.FindName("OpacitySlider");
-            AssertEqual(1.0, opacitySlider.Value, "Entering desktop mode should start fully opaque.");
-            DesktopCalendarNativeAssertions.AssertRedirectedOpacity(nativeHandle, 1.0);
-            AssertEqual(1.0, new DesktopCalendarStateStore(statePath).Load().Opacity, "The initial embedded opacity should save immediately.");
+            AssertEqual(0.9, opacitySlider.Value, "Entering desktop mode must preserve the chosen opacity.");
+            DesktopCalendarNativeAssertions.AssertRedirectedOpacity(nativeHandle, 0.9);
+            AssertEqual(0.9, new DesktopCalendarStateStore(statePath).Load().Opacity, "Embedding must save the preserved opacity.");
             opacitySlider.Value = 0.8;
             DesktopCalendarNativeAssertions.AssertRedirectedOpacity(nativeHandle, 0.8);
             dockMethod.Invoke(window, new object?[] { true, preservedSize });
@@ -2582,7 +2583,7 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             window.Show();
             AssertTrue(window.IsVisible, "The dismissed calendar must be reopenable.");
             embedOption.IsChecked = true;
-            AssertEqual(1.0, opacitySlider.Value, "Re-entering desktop mode should reset its initial transparency.");
+            AssertEqual(0.8, opacitySlider.Value, "Re-entering desktop mode must preserve the chosen opacity.");
             opacitySlider.Value = 0.7;
             window.Shutdown();
             AssertTrue(new DesktopCalendarStateStore(statePath).Load().IsDesktopEmbedded, "Shutdown must retain embedding preference after detaching.");
@@ -2594,7 +2595,7 @@ static async Task TestDesktopCalendarWindowRenderingAsync()
             AssertEqual(DesktopCalendarStateStore.MinimumHeight, restoredWindow.ActualHeight, "Reopening must restore the resized height.");
             AssertTrue(((System.Windows.Controls.CheckBox)restoredWindow.FindName("DesktopEmbedCheckBox")).IsChecked == true,
                 "Reopening must restore actual desktop embedding.");
-            DesktopCalendarNativeAssertions.AssertRedirectedOpacity(new System.Windows.Interop.WindowInteropHelper(restoredWindow).Handle, 1.0);
+            DesktopCalendarNativeAssertions.AssertRedirectedOpacity(new System.Windows.Interop.WindowInteropHelper(restoredWindow).Handle, 0.7);
             restoredWindow.Shutdown();
         }
         catch (Exception ex)
@@ -2882,6 +2883,107 @@ static RenderedPixelSample SampleRenderedRegion(
         maxLuminance,
         opaque == 0 ? 0 : minLuminance,
         maxAlpha);
+}
+
+static async Task TestDesktopCalendarShowDesktopSurvivalAsync()
+{
+    // 在当前 STA 线程泵消息指定时长：Explorer 投递 SC_MINIMIZE/SC_RESTORE 依赖窗口消息循环，
+    // 直接 Thread.Sleep 会让窗口收不到命令，导致「显示桌面」场景验证失效。
+    void PumpMessages(int milliseconds)
+    {
+        var frame = new System.Windows.Threading.DispatcherFrame();
+        var timer = new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(milliseconds)
+        };
+        timer.Tick += (_, _) => { timer.Stop(); frame.Continue = false; };
+        timer.Start();
+        System.Windows.Threading.Dispatcher.PushFrame(frame);
+    }
+
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 10, 13, 9, 30, 0, TimeSpan.FromHours(8));
+    var repository = new SqliteTodoRepository(databasePath);
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    await service.CreateManualAsync(
+        new CreateManualTodoRequest("显示桌面校验待办", null, PriorityLevel.P2, now.AddHours(1), null, null),
+        CancellationToken.None);
+    var viewModel = new DesktopCalendarViewModel(repository, new FixedClock(now), timeZone, _ => Task.CompletedTask);
+    await viewModel.RefreshAsync();
+    var statePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}", "desktop-calendar.json");
+    Directory.CreateDirectory(Path.GetDirectoryName(statePath)!);
+    new DesktopCalendarStateStore(statePath).Save(new DesktopCalendarWindowState(Left: 120, Top: 120));
+
+    Exception? renderFailure = null;
+    var renderThread = new Thread(() =>
+    {
+        var toggledDesktop = false;
+        try
+        {
+            var window = new WechatDashboard.App.Views.Todos.DesktopCalendarWindow(
+                viewModel, new DesktopCalendarStateStore(statePath));
+            window.Show();
+            window.UpdateLayout();
+            var nativeHandle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+
+            var embedOption = (System.Windows.Controls.CheckBox)window.FindName("DesktopEmbedCheckBox");
+            embedOption.IsChecked = true;
+            window.UpdateLayout();
+            AssertTrue(embedOption.IsChecked == true,
+                $"Embedding must succeed for the Show Desktop scenario: {((System.Windows.Controls.TextBlock)window.FindName("DockStatusText")).Text}");
+            var embeddedBounds = DesktopCalendarNativeAssertions.GetBounds(nativeHandle);
+            AssertTrue(!DesktopCalendarNativeAssertions.HasIconLayerAbove(nativeHandle),
+                "A freshly embedded calendar must start above the desktop icon layer.");
+
+            // 端到端：注入真实 Win+D（与任务栏「显示桌面」按钮同一壳层路径）。
+            // 守卫定时器在泵消息期间应把日历复位到被抬高的图标层之上。
+            DesktopCalendarNativeAssertions.SendWinD();
+            toggledDesktop = true;
+            PumpMessages(1200);
+            AssertTrue(!DesktopCalendarNativeAssertions.HasIconLayerAbove(nativeHandle),
+                "An embedded calendar must stay above the raised desktop icon layer after Win+D / Show Desktop.");
+            AssertTrue(DesktopCalendarNativeAssertions.IsWindowVisible(nativeHandle) && !DesktopCalendarNativeAssertions.IsIconic(nativeHandle),
+                "An embedded calendar must remain visible and unminimized after Win+D / Show Desktop.");
+            AssertEqual(embeddedBounds, DesktopCalendarNativeAssertions.GetBounds(nativeHandle),
+                "Surviving Show Desktop must not move or resize the embedded calendar.");
+
+            // 切回用户桌面状态并确认嵌入状态不受影响。
+            DesktopCalendarNativeAssertions.SendWinD();
+            toggledDesktop = false;
+            PumpMessages(600);
+            AssertTrue(!DesktopCalendarNativeAssertions.HasIconLayerAbove(nativeHandle),
+                "Toggling the desktop back must leave the embedded calendar above the icon layer.");
+
+            window.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            renderFailure = ex;
+        }
+        finally
+        {
+            // 异常退出时也要把用户的桌面切换回原状态。
+            if (toggledDesktop)
+            {
+                try { DesktopCalendarNativeAssertions.SendWinD(); }
+                catch { /* 恢复失败不影响测试结论，用户可手动再按一次 Win+D。 */ }
+            }
+            System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeShutdown();
+        }
+    });
+    renderThread.SetApartmentState(ApartmentState.STA);
+    renderThread.Start();
+
+    AssertTrue(renderThread.Join(TimeSpan.FromSeconds(30)), "Show Desktop survival thread should finish without hanging.");
+    if (renderFailure is not null)
+    {
+        throw new InvalidOperationException("The embedded calendar must survive Show Desktop without minimizing.", renderFailure);
+    }
 }
 
 static Task TestShihuatongMessageContentDecoderAsync()

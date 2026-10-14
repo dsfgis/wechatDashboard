@@ -16,7 +16,6 @@ namespace WechatDashboard.App.Views.Todos;
 public partial class DesktopCalendarWindow : Window
 {
     private const double SnapThreshold = 32;
-    private const double InitialEmbeddedOpacity = 1.0; // Start desktop mode fully opaque.
     private readonly DesktopCalendarViewModel _viewModel;
     private readonly DesktopCalendarStateStore _stateStore;
     private readonly DispatcherTimer _refreshTimer;
@@ -231,9 +230,8 @@ public partial class DesktopCalendarWindow : Window
                 _dockEdge = DesktopCalendarDockEdge.None;
                 _dockedWindowSize = null;
                 SetExpandedVisualState();
-                OpacitySlider.Value = InitialEmbeddedOpacity;
-                // Reapply after parenting even if the slider already has this value.
-                _desktopHost.SetOpacity(InitialEmbeddedOpacity);
+                // 嵌入桌面后重新应用当前透明度：挂载父窗口可能重置分层属性，但保持用户设置的值不变。
+                _desktopHost.SetOpacity(OpacitySlider.Value);
             }
             else if (IsDesktopEmbedded)
             {

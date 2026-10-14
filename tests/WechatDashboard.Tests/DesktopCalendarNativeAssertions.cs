@@ -114,6 +114,52 @@ internal static class DesktopCalendarNativeAssertions
         if (GetBounds(window).Left != expected.Left + 10) throw new InvalidOperationException("Movement was not restored.");
     }
 
+    /// <summary>窗口当前是否处于最小化（iconic）状态。</summary>
+    internal static bool IsIconic(nint window) => IsIconicNative(window);
+
+    /// <summary>窗口当前是否可见（未被最小化/隐藏）。</summary>
+    internal static bool IsWindowVisible(nint window) => IsWindowVisibleNative(window);
+
+    /// <summary>
+    /// 图标层窗口（Progman / 承载 SHELLDLL_DefView 的 WorkerW）是否位于指定窗口之上。
+    /// 「显示桌面」/Win+D 的真实机制是把图标层抬高到所有窗口之上，而非最小化窗口。
+    /// </summary>
+    internal static bool HasIconLayerAbove(nint window)
+    {
+        for (var above = GetWindow(window, 3); above != 0; above = GetWindow(above, 3))
+        {
+            var name = new System.Text.StringBuilder(256);
+            GetClassName(above, name, name.Capacity);
+            var className = name.ToString();
+            if (className == "Progman"
+                || (className == "WorkerW" && FindWindowEx(above, 0, "SHELLDLL_DefView", null) != 0))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>注入真实的 Win+D 按键序列（与用户手按/任务栏「显示桌面」按钮走同一条壳层路径）。</summary>
+    internal static void SendWinD()
+    {
+        var inputs = new INPUT[4];
+        inputs[0].type = 1; inputs[0].u.ki.wVk = 0x5B;                                  // LWIN down
+        inputs[1].type = 1; inputs[1].u.ki.wVk = 0x44;                                 // D down
+        inputs[2].type = 1; inputs[2].u.ki.wVk = 0x44; inputs[2].u.ki.dwFlags = 0x0002; // D up
+        inputs[3].type = 1; inputs[3].u.ki.wVk = 0x5B; inputs[3].u.ki.dwFlags = 0x0002; // LWIN up
+        if (SendInput((uint)inputs.Length, inputs, System.Runtime.InteropServices.Marshal.SizeOf<INPUT>()) != 4)
+            throw new InvalidOperationException("Failed to inject the Win+D key sequence.");
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public nint dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public nint dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT { public uint type; public INPUTUNION u; }
+    [DllImport("user32.dll")] private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
     [DllImport("user32.dll")] private static extern nint GetParent(nint window);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(nint window, int index);
@@ -131,6 +177,8 @@ internal static class DesktopCalendarNativeAssertions
     [DllImport("user32.dll")] private static extern int GetWindowRgn(nint window, nint region);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
     [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
+    [DllImport("user32.dll", EntryPoint = "IsIconic")] private static extern bool IsIconicNative(nint window);
+    [DllImport("user32.dll", EntryPoint = "IsWindowVisible")] private static extern bool IsWindowVisibleNative(nint window);
     [DllImport("user32.dll")] private static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
     [DllImport("gdi32.dll")] private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(nint region);
