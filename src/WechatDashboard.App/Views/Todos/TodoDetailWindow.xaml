@@ -78,7 +78,7 @@
             </Grid>
             <WrapPanel Margin="0,0,0,16">
                 <Button Content="保存待办" Command="{Binding SaveCommand}" Padding="16,7" Margin="0,0,8,0" />
-                <Button Content="完成并转入已办" Command="{Binding CompleteCommand}" Padding="16,7" Margin="0,0,8,0" />
+                <Button Content="完成" Command="{Binding CompleteCommand}" Padding="16,7" Margin="0,0,8,0" />
                 <Button Content="查看原始消息" Command="{Binding NavigateToSourceCommand}" Padding="16,7" />
             </WrapPanel>
 

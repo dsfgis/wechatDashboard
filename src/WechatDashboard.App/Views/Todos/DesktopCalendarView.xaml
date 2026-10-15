@@ -70,7 +70,7 @@
             <Setter Property="VerticalAlignment" Value="Center" />
             <Setter Property="Margin" Value="0,0,6,0" />
             <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="ToolTip" Value="勾选后完成并转入已办" />
+            <Setter Property="ToolTip" Value="勾选后完成" />
             <Style.Triggers>
                 <DataTrigger Binding="{Binding IsCompleted}" Value="True">
                     <Setter Property="IsEnabled" Value="False" />

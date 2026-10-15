@@ -361,7 +361,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         _todo = updated;
         Status = updated.Status;
         IsPinned = updated.IsPinned;
-        StatusText = "待办已完成并转入已办。";
+        StatusText = "待办已完成。";
         await _refreshWorkbench();
         RequestClose?.Invoke(this, EventArgs.Empty);
     }

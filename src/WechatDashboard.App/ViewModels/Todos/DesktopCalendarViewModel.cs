@@ -95,8 +95,11 @@ public sealed class DesktopCalendarViewModel : ObservableObject
                     group => group.Key,
                     group => (IReadOnlyList<DesktopCalendarTodoItemViewModel>)group
                         .Select(entry => entry.Item)
-                        .OrderBy(item => item.IsCompleted)
-                        .ThenBy(item => item.Priority)
+                        // 待办与已办只通过复选框勾选状态区分，不再把已办排到末尾：
+                        // 否则完成当天有多条待办时，刚完成的待办会被挤出日历格子的
+                        // 两行预览（PreviewTodos 只取前两条），看起来就像“消失”了。
+                        // 按优先级 + 截止时间排序在完成前后保持不变，位置稳定。
+                        .OrderBy(item => item.Priority)
                         .ThenBy(item => item.DueAt)
                         .ToArray());
             return (AllCount: allItems.Length, ByDate: byDate);
@@ -154,7 +157,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
             CancellationToken.None);
         await Task.WhenAll(RefreshAsync(), _onTodoCompleted());
         StatusText = updated == 1
-            ? "待办已完成并转入已办。"
+            ? "待办已完成。"
             : "待办已被办理或不存在，日历已刷新。";
     }
 

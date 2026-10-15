@@ -56,6 +56,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo workbench preserves checked rows across background refresh", TestTodoWorkbenchSelectionRefreshAsync),
     ("Desktop calendar groups scheduled Todos by local due date", TestDesktopCalendarViewModelAsync),
     ("Calendar checkbox and detail button persist Todo completion", TestTodoCompletionEntryPointsAsync),
+    ("Detail completion keeps the finished Todo visible in the calendar", TestDetailCompletionKeepsTodoVisibleInCalendarAsync),
     ("Desktop calendar window preferences round-trip", TestDesktopCalendarStateStoreAsync),
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
@@ -2210,7 +2211,7 @@ static async Task TestDesktopCalendarViewModelAsync()
         new CreateManualTodoRequest("今天活动待办", null, PriorityLevel.P1, now.AddHours(5), null, null),
         CancellationToken.None)).Todo!;
     var todayCompleted = (await service.CreateManualAsync(
-        new CreateManualTodoRequest("今天已办理待办", null, PriorityLevel.P2, now.AddHours(7), null, null),
+        new CreateManualTodoRequest("今天已办理待办", null, PriorityLevel.P0, now.AddHours(7), null, null),
         CancellationToken.None)).Todo!;
     var tomorrow = (await service.CreateManualAsync(
         new CreateManualTodoRequest("明天待办", null, PriorityLevel.P2, now.AddDays(1), null, null),
@@ -2235,8 +2236,10 @@ static async Task TestDesktopCalendarViewModelAsync()
     AssertEqual(42, viewModel.Days.Count, "A desktop calendar month should always render six complete weeks.");
     AssertEqual(new DateTime(2026, 7, 27), viewModel.Days.First().Date, "The August 2026 grid should begin on the preceding Monday.");
     AssertEqual(2, viewModel.SelectedTodos.Count, "The selected day should show active and completed scheduled Todos.");
-    AssertEqual(todayActive.Id, viewModel.SelectedTodos.First().Id, "Active Todo should sort before a completed Todo on the same day.");
-    AssertTrue(viewModel.SelectedTodos.Last().IsCompleted, "Completed daily Todo should remain visible with completed state.");
+    AssertEqual(todayCompleted.Id, viewModel.SelectedTodos.First().Id,
+        "A completed Todo should keep its priority-based position instead of being demoted to the end of the day.");
+    AssertTrue(viewModel.SelectedTodos.First().IsCompleted, "Completed daily Todo should remain visible with completed state.");
+    AssertEqual(todayActive.Id, viewModel.SelectedTodos.Last().Id, "Active Todo should follow the higher-priority completed Todo on the same day.");
     AssertTrue(viewModel.StatusText.Contains("另有 1 条未设置截止日期"), "Calendar status should report unscheduled Todos honestly.");
 
     viewModel.SelectDate(new DateTime(2026, 8, 30));
@@ -2328,6 +2331,87 @@ static async Task TestTodoCompletionEntryPointsAsync()
     AssertEqual(TodoStatus.Done, persistedDetailTodo.Status, "Detail completion should persist Done status.");
     AssertEqual(detailTodo.Title, persistedDetailTodo.Title, "Completing from detail should not silently persist unsaved field edits.");
     AssertTrue(!detail.CanComplete, "The detail completion button should become disabled after success.");
+}
+
+/// <summary>
+/// 复刻用户操作路径的回归测试：在待办详情里点击"完成"后，
+/// 这条待办必须仍然显示在日历组件里，只是复选框变为勾选状态（已办）。
+/// </summary>
+static async Task TestDetailCompletionKeepsTodoVisibleInCalendarAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 10, 14, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var todoService = new TodoApplicationService(unitOfWork, clock);
+    var reminderService = new ReminderApplicationService(unitOfWork, clock);
+    var completedTodo = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("详情完成必须保留在日历", null, PriorityLevel.P1, now.AddHours(3), null, null),
+        CancellationToken.None)).Todo!;
+
+    // 与 MainWindow 相同的接线：日历通过工作台打开详情，详情完成后日历自行刷新。
+    var workbenchRefreshCount = 0;
+    var calendar = new DesktopCalendarViewModel(
+        repository,
+        clock,
+        timeZone,
+        _ => Task.CompletedTask,
+        () =>
+        {
+            workbenchRefreshCount++;
+            return Task.CompletedTask;
+        });
+
+    await calendar.RefreshAsync();
+    var beforeCompletion = calendar.SelectedTodos.Single(item => item.Id == completedTodo.Id);
+    AssertTrue(!beforeCompletion.IsCompleted, "刚创建的日历待办不应显示为已完成。");
+    var indexBeforeCompletion = calendar.SelectedTodos.IndexOf(beforeCompletion);
+
+    // 走待办详情的完成路径（用户点击"完成"按钮）。
+    var row = new TodoListItemViewModel(
+        completedTodo,
+        null,
+        null,
+        TodoDueBucket.DueToday,
+        "未指定项目",
+        ProjectColorPolicy.DefaultColor,
+        () => { });
+    var detail = new TodoDetailViewModel(
+        row,
+        todoService,
+        repository,
+        new SqliteFollowedProjectRepository(databasePath),
+        reminderService,
+        new SqliteReminderRepository(databasePath),
+        clock,
+        () =>
+        {
+            workbenchRefreshCount++;
+            return Task.CompletedTask;
+        },
+        _ => Task.CompletedTask,
+        new FakeTodoDialogService());
+    await detail.CompleteAsync();
+
+    AssertEqual(TodoStatus.Done, (await repository.GetByIdAsync(completedTodo.Id, CancellationToken.None))!.Status,
+        "详情完成应把待办状态写入数据库。");
+
+    // 详情关闭后日历会刷新（同 DesktopCalendarViewModel.OpenTodoAsync 的行为）。
+    await calendar.RefreshAsync();
+    var afterCompletion = calendar.SelectedTodos.SingleOrDefault(item => item.Id == completedTodo.Id);
+    AssertTrue(afterCompletion is not null, "详情完成后的待办必须仍出现在日历当天列表中，不能消失。");
+    AssertTrue(afterCompletion!.IsCompleted, "日历中的已完成待办应通过勾选复选框区分，而不是从日历移除。");
+    AssertEqual(indexBeforeCompletion, calendar.SelectedTodos.IndexOf(afterCompletion),
+        "完成前后待办在日历中的位置应保持不变，复选框勾选状态是唯一区别。");
+
+    // 数据库中的截止时间必须保留——这是日历分组的依据。
+    var persisted = (await repository.GetByIdAsync(completedTodo.Id, CancellationToken.None))!;
+    AssertTrue(persisted.DueAt.HasValue, "完成待办不得丢失截止时间，否则日历无法按日期分组显示。");
 }
 
 static Task TestDesktopCalendarStateStoreAsync()
