@@ -152,7 +152,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             TimeZoneInfo.Local,
             TodoFeature.Workbench.OpenTodoAsync,
             TodoFeature.RefreshAsync,
-            _followedProjectRepository);
+            _followedProjectRepository,
+            _messageRepository);
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;

@@ -17,6 +17,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
     private readonly Func<long, Task> _openTodo;
     private readonly Func<Task> _onTodoCompleted;
     private readonly IFollowedProjectRepository? _projects;
+    private readonly IMessageRepository? _messages;
     private IReadOnlyDictionary<DateTime, IReadOnlyList<DesktopCalendarTodoItemViewModel>> _todosByDate =
         new Dictionary<DateTime, IReadOnlyList<DesktopCalendarTodoItemViewModel>>();
     private DateTime _displayMonth;
@@ -29,7 +30,8 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         TimeZoneInfo timeZone,
         Func<long, Task> openTodo,
         Func<Task>? onTodoCompleted = null,
-        IFollowedProjectRepository? projects = null)
+        IFollowedProjectRepository? projects = null,
+        IMessageRepository? messages = null)
     {
         _todos = todos;
         _clock = clock;
@@ -37,6 +39,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         _openTodo = openTodo;
         _onTodoCompleted = onTodoCompleted ?? (() => Task.CompletedTask);
         _projects = projects;
+        _messages = messages;
         var today = LocalDate(clock.Now);
         _displayMonth = new DateTime(today.Year, today.Month, 1);
         _selectedDate = today;
@@ -83,12 +86,15 @@ public sealed class DesktopCalendarViewModel : ObservableObject
             await Task.WhenAll(activeTask, completedTask, projectsTask);
             var allItems = activeTask.Result.Concat(completedTask.Result).ToArray();
             var projectLookup = projectsTask.Result.Where(item => item.IsActive).ToDictionary(item => item.Id);
+            // 展示时间取消息发送时间（SentAt），而不是待办的到期时间；
+            // 手动创建、无来源消息的待办才回退到 DueAt。
+            var sentAtByMessageId = await LoadSentAtLookupAsync(allItems);
             var byDate = allItems
                 .Where(todo => todo.DueAt.HasValue)
                 .Select(todo => new
                 {
                     Date = LocalDate(todo.DueAt!.Value),
-                    Item = CreateTodoItem(todo, projectLookup)
+                    Item = CreateTodoItem(todo, projectLookup, sentAtByMessageId)
                 })
                 .GroupBy(entry => entry.Date)
                 .ToDictionary(
@@ -232,11 +238,39 @@ public sealed class DesktopCalendarViewModel : ObservableObject
 
     private DateTime LocalDate(DateTimeOffset value) => TimeZoneInfo.ConvertTime(value, _timeZone).Date;
 
+    private async Task<IReadOnlyDictionary<long, DateTimeOffset>> LoadSentAtLookupAsync(
+        IReadOnlyCollection<TodoItem> todoItems)
+    {
+        if (_messages is null)
+        {
+            return new Dictionary<long, DateTimeOffset>();
+        }
+
+        var messageIds = todoItems
+            .Where(todo => todo.SourceMessageId is > 0)
+            .Select(todo => todo.SourceMessageId!.Value)
+            .Distinct()
+            .ToArray();
+        if (messageIds.Length == 0)
+        {
+            return new Dictionary<long, DateTimeOffset>();
+        }
+
+        var messages = await _messages.GetByIdsAsync(messageIds, CancellationToken.None);
+        return messages.ToDictionary(message => message.Id, message => message.SentAt);
+    }
+
     private DesktopCalendarTodoItemViewModel CreateTodoItem(
         TodoItem todo,
-        IReadOnlyDictionary<long, FollowedProject> projectLookup)
+        IReadOnlyDictionary<long, FollowedProject> projectLookup,
+        IReadOnlyDictionary<long, DateTimeOffset>? sentAtLookup = null)
     {
         var localDueAt = TimeZoneInfo.ConvertTime(todo.DueAt!.Value, _timeZone);
+        var displayAt = todo.SourceMessageId is { } messageId
+            && sentAtLookup is not null
+            && sentAtLookup.TryGetValue(messageId, out var sentAt)
+            ? TimeZoneInfo.ConvertTime(sentAt, _timeZone)
+            : localDueAt;
         var project = todo.ManagedProjectId is { } projectId && projectLookup.TryGetValue(projectId, out var resolved)
             ? resolved
             : null;
@@ -245,6 +279,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
             todo.Title,
             todo.Priority,
             localDueAt,
+            displayAt,
             todo.Status is TodoStatus.Done or TodoStatus.Ignored,
             project?.ProjectName ?? "未指定项目",
             project?.Color ?? ProjectColorPolicy.DefaultColor);
@@ -256,11 +291,14 @@ public sealed record DesktopCalendarTodoItemViewModel(
     string Title,
     PriorityLevel Priority,
     DateTimeOffset DueAt,
+    DateTimeOffset DisplayAt,
     bool IsCompleted,
     string ProjectName,
     string ProjectColor)
 {
-    public string TimeText => DueAt.ToString("HH:mm");
+    /// <summary>优先展示消息发送时间；无来源消息时回退到到期时间。</summary>
+    public string TimeText => DisplayAt.ToString("HH:mm");
+
     public string StatusText => IsCompleted ? "已办理" : Priority.ToString();
 }
 
