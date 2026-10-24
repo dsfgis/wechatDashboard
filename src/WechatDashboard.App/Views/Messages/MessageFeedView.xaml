@@ -27,11 +27,33 @@
                     <TextBlock Text="{Binding PageText}" VerticalAlignment="Center" Margin="4,0,0,8" Foreground="#4B5563" />
                 </WrapPanel>
             </DockPanel>
+            <Border Visibility="{Binding SuggestionVisibility}" Background="#F8FAFC" BorderBrush="#CBD5E1"
+                    BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,0,0,8">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="采纳并加入待办" Command="{Binding ApplySuggestionCommand}" Margin="0,0,6,0" />
+                        <Button Content="忽略建议" Command="{Binding DismissSuggestionCommand}" />
+                    </StackPanel>
+                    <StackPanel>
+                        <TextBlock Text="{Binding SuggestionTitle}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <ScrollViewer MaxHeight="90" VerticalScrollBarVisibility="Auto">
+                            <TextBlock Text="{Binding SuggestionDescription}" TextWrapping="Wrap" />
+                        </ScrollViewer>
+                        <TextBlock Text="{Binding SuggestionDetails}" Foreground="#475467" TextWrapping="Wrap" />
+                        <StackPanel Visibility="{Binding ClarificationVisibility}" Orientation="Horizontal" Margin="0,7,0,0">
+                            <TextBox Text="{Binding ClarificationAnswer, UpdateSourceTrigger=PropertyChanged}"
+                                     Width="380" MaxLength="1000" ToolTip="补充这条消息要求完成的具体事项" />
+                            <Button Content="提交回答并重新判断" Command="{Binding SubmitClarificationCommand}" Margin="6,0,0,0" />
+                        </StackPanel>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
         </StackPanel>
         <DataGrid ItemsSource="{Binding Items}" SelectedItem="{Binding SelectedMessage, Mode=TwoWay}"
                   behaviors:DataGridScrollIntoViewBehavior.IsEnabled="True">
             <DataGrid.RowStyle>
                 <Style TargetType="DataGridRow">
+                    <Setter Property="Foreground" Value="{Binding PriorityColor}" />
                     <Style.Triggers>
                         <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#FEF3C7" /></Trigger>
                     </Style.Triggers>
@@ -43,19 +65,26 @@
                 <DataGridTextColumn Header="群聊" Binding="{Binding ChatName}" Width="145" />
                 <DataGridTextColumn Header="发送人" Binding="{Binding SenderName}" Width="105" />
                 <DataGridTextColumn Header="@我" Binding="{Binding IsMentionMe}" Width="55" />
+                <DataGridTextColumn Header="优先级" Binding="{Binding Priority}" Width="65" />
                 <DataGridTemplateColumn Header="内容" Width="*">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
-                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}" TextWrapping="Wrap" />
+                            <local:HighlightTextBlock ContentSegments="{Binding ContentSegments}" Foreground="{Binding PriorityColor}" TextWrapping="Wrap" />
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
-                <DataGridTemplateColumn Header="操作" Width="115">
+                <DataGridTemplateColumn Header="操作" Width="205">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
-                            <Button Content="{Binding TodoActionText}" ToolTip="{Binding TodoActionToolTip}" Padding="9,4"
-                                    Command="{Binding DataContext.ConvertToTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                    CommandParameter="{Binding MessageId}" />
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="AI 建议" ToolTip="分析行动要求与优先级；首次调用会发送该消息到已配置的模型"
+                                        Padding="7,4" Margin="0,0,4,0"
+                                        Command="{Binding DataContext.AnalyzeMessageCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                        CommandParameter="{Binding MessageId}" />
+                                <Button Content="{Binding TodoActionText}" ToolTip="{Binding TodoActionToolTip}" Padding="7,4"
+                                        Command="{Binding DataContext.ConvertToTodoCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                        CommandParameter="{Binding MessageId}" />
+                            </StackPanel>
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>

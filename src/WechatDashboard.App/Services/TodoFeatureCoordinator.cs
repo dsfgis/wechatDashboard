@@ -2,10 +2,12 @@ using System.Windows.Threading;
 using WechatDashboard.App.ViewModels.Messages;
 using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.Application.Capture;
+using WechatDashboard.Application.Agent;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Infrastructure.Background;
+using WechatDashboard.Infrastructure.Agent;
 using WechatDashboard.Infrastructure.Persistence;
 
 namespace WechatDashboard.App.Services;
@@ -31,6 +33,9 @@ public sealed class TodoFeatureCoordinator : IDisposable
         var clock = SystemClock.Instance;
         var todoRepository = new SqliteTodoRepository(databasePath);
         var messageRepository = new SqliteMessageRepository(databasePath);
+        var suggestionRepository = new SqliteTodoSuggestionRepository(databasePath);
+        var suggestionAgent = new TodoSuggestionAgent(messageRepository, suggestionRepository,
+            OpenAiCompatibleMessageActionModel.FromEnvironment(), clock);
         var reminderRepository = new SqliteReminderRepository(databasePath);
         var projectRepository = new SqliteFollowedProjectRepository(databasePath);
         var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
@@ -53,6 +58,8 @@ public sealed class TodoFeatureCoordinator : IDisposable
             messageRepository,
             todoRepository,
             todoService,
+            suggestionRepository,
+            suggestionAgent,
             aliases,
             followedChats,
             filterMode,

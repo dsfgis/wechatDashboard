@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using WechatDashboard.App.Presentation;
+using WechatDashboard.Application.Agent;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
@@ -13,6 +14,8 @@ public sealed class MessageFeedViewModel : ObservableObject
     private readonly IMessageRepository _messages;
     private readonly ITodoRepository _todoRepository;
     private readonly TodoApplicationService _todos;
+    private readonly ITodoSuggestionRepository _suggestions;
+    private readonly TodoSuggestionAgent _agent;
     private readonly Func<IReadOnlyList<string>> _aliases;
     private readonly Func<IReadOnlyList<string>> _followedChats;
     private readonly Func<FollowedChatFilterMode> _filterMode;
@@ -24,6 +27,8 @@ public sealed class MessageFeedViewModel : ObservableObject
     private string _statusText = "正在加载消息流...";
     private bool _isContextMode;
     private MessageListItemViewModel? _selectedMessage;
+    private TodoSuggestion? _selectedSuggestion;
+    private string _clarificationAnswer = string.Empty;
     private int _pageBeforeContext = 1;
     private long? _pendingContextMessageId;
 
@@ -31,6 +36,8 @@ public sealed class MessageFeedViewModel : ObservableObject
         IMessageRepository messages,
         ITodoRepository todoRepository,
         TodoApplicationService todos,
+        ITodoSuggestionRepository suggestions,
+        TodoSuggestionAgent agent,
         Func<IReadOnlyList<string>> aliases,
         Func<IReadOnlyList<string>> followedChats,
         Func<FollowedChatFilterMode> filterMode,
@@ -39,6 +46,8 @@ public sealed class MessageFeedViewModel : ObservableObject
         _messages = messages;
         _todoRepository = todoRepository;
         _todos = todos;
+        _suggestions = suggestions;
+        _agent = agent;
         _aliases = aliases;
         _followedChats = followedChats;
         _filterMode = filterMode;
@@ -50,6 +59,10 @@ public sealed class MessageFeedViewModel : ObservableObject
         GoToPageCommand = new AsyncRelayCommand(_ => GoToPageAsync(), _ => !_isContextMode);
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync());
         ConvertToTodoCommand = new AsyncRelayCommand(ConvertToTodoAsync, parameter => parameter is long id && id > 0);
+        AnalyzeMessageCommand = new AsyncRelayCommand(AnalyzeMessageAsync, parameter => parameter is long id && id > 0);
+        ApplySuggestionCommand = new AsyncRelayCommand(_ => ApplySuggestionAsync(), _ => CanApplySuggestion);
+        DismissSuggestionCommand = new AsyncRelayCommand(_ => DismissSuggestionAsync(), _ => CanDismissSuggestion);
+        SubmitClarificationCommand = new AsyncRelayCommand(_ => SubmitClarificationAsync(), _ => CanClarifySuggestion);
         ReturnToListCommand = new AsyncRelayCommand(_ => LoadPageAsync(_pageBeforeContext, true), _ => _isContextMode);
     }
 
@@ -62,6 +75,10 @@ public sealed class MessageFeedViewModel : ObservableObject
     public AsyncRelayCommand GoToPageCommand { get; }
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand ConvertToTodoCommand { get; }
+    public AsyncRelayCommand AnalyzeMessageCommand { get; }
+    public AsyncRelayCommand ApplySuggestionCommand { get; }
+    public AsyncRelayCommand DismissSuggestionCommand { get; }
+    public AsyncRelayCommand SubmitClarificationCommand { get; }
     public AsyncRelayCommand ReturnToListCommand { get; }
 
     public int PageSize
@@ -113,8 +130,60 @@ public sealed class MessageFeedViewModel : ObservableObject
     public MessageListItemViewModel? SelectedMessage
     {
         get => _selectedMessage;
-        set => SetProperty(ref _selectedMessage, value);
+        set
+        {
+            if (SetProperty(ref _selectedMessage, value)) SelectedSuggestion = value?.Suggestion;
+        }
     }
+
+    public TodoSuggestion? SelectedSuggestion
+    {
+        get => _selectedSuggestion;
+        private set
+        {
+            if (!SetProperty(ref _selectedSuggestion, value)) return;
+            OnPropertyChanged(nameof(SuggestionVisibility));
+            OnPropertyChanged(nameof(SuggestionTitle));
+            OnPropertyChanged(nameof(SuggestionDescription));
+            OnPropertyChanged(nameof(SuggestionDetails));
+            OnPropertyChanged(nameof(CanApplySuggestion));
+            OnPropertyChanged(nameof(CanDismissSuggestion));
+            OnPropertyChanged(nameof(ClarificationVisibility));
+            OnPropertyChanged(nameof(CanClarifySuggestion));
+            ApplySuggestionCommand.RaiseCanExecuteChanged();
+            DismissSuggestionCommand.RaiseCanExecuteChanged();
+            SubmitClarificationCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public System.Windows.Visibility SuggestionVisibility => SelectedSuggestion is null
+        ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+    public string SuggestionTitle => SelectedSuggestion is null ? string.Empty : SelectedSuggestion.Decision switch
+    {
+        MessageActionDecision.SuggestTodo => $"待办建议 · {SelectedSuggestion.Title}",
+        MessageActionDecision.AskUser => $"需要确认 · {SelectedSuggestion.Question}",
+        _ => "模型判断：无需新建待办"
+    };
+    public string SuggestionDescription => SelectedSuggestion?.Description ?? string.Empty;
+    public string SuggestionDetails => SelectedSuggestion is null ? string.Empty
+        : $"优先级 {SelectedSuggestion.Priority} · {SelectedSuggestion.Reason}"
+          + (SelectedSuggestion.DueAt is { } due ? $" · 截止 {due.LocalDateTime:yyyy-MM-dd HH:mm}" : "")
+          + $" · {SelectedSuggestion.ReviewStatus switch { TodoSuggestionReviewStatus.Pending => "待确认", TodoSuggestionReviewStatus.Accepted => "已采纳", _ => "已忽略" }}";
+    public bool CanApplySuggestion => SelectedSuggestion is { Decision: MessageActionDecision.SuggestTodo, ReviewStatus: TodoSuggestionReviewStatus.Pending };
+    public bool CanDismissSuggestion => SelectedSuggestion is { ReviewStatus: TodoSuggestionReviewStatus.Pending };
+    public System.Windows.Visibility ClarificationVisibility => SelectedSuggestion is
+        { Decision: MessageActionDecision.AskUser, ReviewStatus: TodoSuggestionReviewStatus.Pending }
+        ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+    public string ClarificationAnswer
+    {
+        get => _clarificationAnswer;
+        set
+        {
+            if (SetProperty(ref _clarificationAnswer, value)) SubmitClarificationCommand.RaiseCanExecuteChanged();
+        }
+    }
+    public bool CanClarifySuggestion => ClarificationVisibility == System.Windows.Visibility.Visible
+        && !string.IsNullOrWhiteSpace(ClarificationAnswer);
 
     public int TotalCount => _totalCount;
 
@@ -231,6 +300,124 @@ public sealed class MessageFeedViewModel : ObservableObject
         }
     }
 
+    private async Task AnalyzeMessageAsync(object? parameter)
+    {
+        if (parameter is not long messageId || messageId <= 0) return;
+        try
+        {
+            StatusText = "正在分析消息的行动要求和优先级...";
+            var suggestion = await _agent.AnalyzeAsync(messageId, CancellationToken.None);
+            await RefreshAsync();
+            SelectedMessage = Items.FirstOrDefault(item => item.MessageId == messageId);
+            SelectedSuggestion = suggestion;
+            StatusText = suggestion.Decision switch
+            {
+                MessageActionDecision.SuggestTodo => "建议已生成。核对内容后可加入待办。",
+                MessageActionDecision.AskUser => "行动要求尚不明确，请查看建议中的澄清问题。",
+                _ => "已完成分析，当前消息无需新建待办。"
+            };
+        }
+        catch (InvalidOperationException exception)
+        {
+            StatusText = exception.Message;
+        }
+        catch (Exception)
+        {
+            StatusText = "消息分析失败，未保存建议；请检查模型配置后重试。";
+        }
+    }
+
+    private async Task ApplySuggestionAsync()
+    {
+        var suggestion = SelectedSuggestion;
+        if (suggestion is not { Decision: MessageActionDecision.SuggestTodo, ReviewStatus: TodoSuggestionReviewStatus.Pending }) return;
+        try
+        {
+            var result = await _todos.CreateFromMessageAsync(new CreateTodoFromMessageRequest(
+                suggestion.MessageId, suggestion.Title, suggestion.Description, null, suggestion.Priority,
+                suggestion.DueAt, null), CancellationToken.None);
+            var applied = result.Outcome == CreateTodoOutcome.Created
+                || result is { Outcome: CreateTodoOutcome.ExistingTodo, Todo: { } existing }
+                   && existing.Title == suggestion.Title
+                   && existing.Description == suggestion.Description
+                   && existing.Priority == suggestion.Priority
+                   && existing.DueAt == suggestion.DueAt;
+            if (applied)
+            {
+                await _suggestions.SetReviewStatusAsync(suggestion.MessageId, TodoSuggestionReviewStatus.Accepted, CancellationToken.None);
+                SelectedSuggestion = suggestion with { ReviewStatus = TodoSuggestionReviewStatus.Accepted };
+                StatusText = result.Outcome == CreateTodoOutcome.Created
+                    ? "建议已采纳并创建待办。" : "建议已采纳；现有待办内容与建议一致。";
+                await RefreshAsync();
+            }
+            else StatusText = result.Outcome == CreateTodoOutcome.ExistingTodo
+                ? "该消息已有待办，请核对现有待办是否包含建议内容。"
+                : "原始消息已不存在，无法创建待办。";
+            if (result.Todo is not null) await _showTodo(result);
+        }
+        catch (InvalidOperationException exception)
+        {
+            StatusText = exception.Message;
+        }
+        catch (Exception)
+        {
+            StatusText = "采纳建议失败，请检查待办和建议状态后重试。";
+        }
+    }
+
+    private async Task DismissSuggestionAsync()
+    {
+        var suggestion = SelectedSuggestion;
+        if (suggestion is not { ReviewStatus: TodoSuggestionReviewStatus.Pending }) return;
+        try
+        {
+            await _suggestions.SetReviewStatusAsync(suggestion.MessageId, TodoSuggestionReviewStatus.Dismissed, CancellationToken.None);
+            SelectedSuggestion = suggestion with { ReviewStatus = TodoSuggestionReviewStatus.Dismissed };
+            StatusText = "已忽略这条建议。";
+        }
+        catch (InvalidOperationException exception)
+        {
+            StatusText = exception.Message;
+        }
+        catch (Exception)
+        {
+            StatusText = "处理建议失败，请稍后重试。";
+        }
+    }
+
+    private async Task SubmitClarificationAsync()
+    {
+        var suggestion = SelectedSuggestion;
+        if (suggestion is not { Decision: MessageActionDecision.AskUser, ReviewStatus: TodoSuggestionReviewStatus.Pending }) return;
+        try
+        {
+            StatusText = "正在根据回答重新判断...";
+            var revised = await _agent.ClarifyAsync(suggestion.MessageId, ClarificationAnswer, CancellationToken.None);
+            ClarificationAnswer = string.Empty;
+            await RefreshAsync();
+            SelectedMessage = Items.FirstOrDefault(item => item.MessageId == suggestion.MessageId);
+            SelectedSuggestion = revised;
+            StatusText = revised.Decision switch
+            {
+                MessageActionDecision.SuggestTodo => "已生成更新后的待办建议，请核对后采纳。",
+                MessageActionDecision.NoAction => "根据回答，这条消息无需新建待办。",
+                _ => "仍需澄清；请查看更新后的问题。"
+            };
+        }
+        catch (ArgumentException exception)
+        {
+            StatusText = exception.Message;
+        }
+        catch (InvalidOperationException exception)
+        {
+            StatusText = exception.Message;
+        }
+        catch (Exception)
+        {
+            StatusText = "重新判断失败；原建议仍保留。";
+        }
+    }
+
     private Task GoToPageAsync()
     {
         if (!int.TryParse(PageNumberInput, out var page))
@@ -250,14 +437,19 @@ public sealed class MessageFeedViewModel : ObservableObject
         var aliases = _aliases().ToArray();
         var itemRows = await Task.Run(async () =>
         {
+            var ids = messageList.Select(message => message.Id).ToArray();
             var todosByMessageId = await _todoRepository.GetBySourceMessageIdsAsync(
-                messageList.Select(message => message.Id).ToArray(),
+                ids,
                 CancellationToken.None);
+            var suggestionsByMessageId = await _suggestions.GetByMessageIdsAsync(ids, CancellationToken.None);
+            var prioritiesByMessageId = await _suggestions.GetEffectivePrioritiesAsync(ids, CancellationToken.None);
             var detector = new MentionDetector(aliases);
             return messageList.Select(message =>
             {
                 todosByMessageId.TryGetValue(message.Id, out var todo);
                 var todoAction = FormatTodoAction(todo);
+                suggestionsByMessageId.TryGetValue(message.Id, out var suggestion);
+                var priority = prioritiesByMessageId.GetValueOrDefault(message.Id, PriorityLevel.P3);
                 return new MessageListItemViewModel(
                     message.Id,
                     message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
@@ -268,7 +460,10 @@ public sealed class MessageFeedViewModel : ObservableObject
                     message.Content,
                     MessageHighlighter.HighlightMentions(message.Content, detector.ExtractMentionedAliases(message.Content)),
                     todoAction.Text,
-                    todoAction.ToolTip);
+                    todoAction.ToolTip,
+                    priority.ToString(),
+                    PriorityColor(priority),
+                    suggestion);
             }).ToArray();
         });
 
@@ -278,6 +473,14 @@ public sealed class MessageFeedViewModel : ObservableObject
             Items.Add(item);
         }
     }
+
+    public static string PriorityColor(PriorityLevel priority) => priority switch
+    {
+        PriorityLevel.P0 => "#D92D20",
+        PriorityLevel.P1 => "#B54708",
+        PriorityLevel.P2 => "#3B5998",
+        _ => "#475467"
+    };
 
     private static (string Text, string ToolTip) FormatTodoAction(TodoItem? todo)
     {
@@ -327,4 +530,7 @@ public sealed record MessageListItemViewModel(
     string RawContent,
     IEnumerable<MessageHighlighter.TextSegment> ContentSegments,
     string TodoActionText,
-    string TodoActionToolTip);
+    string TodoActionToolTip,
+    string Priority,
+    string PriorityColor,
+    TodoSuggestion? Suggestion);

@@ -14,6 +14,7 @@ using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
+using WechatDashboard.Application.Agent;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
@@ -33,6 +34,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo workbench summary matches its mutually exclusive visible groups", TestTodoWorkbenchBucketSummaryAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
+    ("Todo suggestion agent asks for context and persists a reviewed proposal", TestTodoSuggestionAgentAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
     ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
@@ -433,6 +435,76 @@ static async Task TestMessageTodoStateLookupAsync()
     AssertFalse(states.ContainsKey(noTodoMessage.Id), "A message without a Todo must remain convertible.");
 }
 
+static async Task TestTodoSuggestionAgentAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var messages = new SqliteMessageRepository(databasePath);
+    var earlier = await messages.SaveAsync(CreateMessage(0, "验收群", "王工", "验收材料还差附件") with
+    {
+        SourceMessageKey = $"suggestion-context-{Guid.NewGuid():N}"
+    }, CancellationToken.None);
+    var unrelated = await messages.SaveAsync(CreateMessage(0, "另一群", "李工", "无关的敏感讨论") with
+    {
+        SourceMessageKey = $"suggestion-unrelated-{Guid.NewGuid():N}",
+        ChatSessionId = earlier.ChatSessionId + 100,
+        SentAt = earlier.SentAt.AddSeconds(30)
+    }, CancellationToken.None);
+    var anchor = await messages.SaveAsync(CreateMessage(0, "验收群", "王工", "周三前把材料提交给我") with
+    {
+        SourceMessageKey = $"suggestion-anchor-{Guid.NewGuid():N}",
+        ChatSessionId = earlier.ChatSessionId,
+        SentAt = earlier.SentAt.AddMinutes(1)
+    }, CancellationToken.None);
+    var dueAt = new DateTimeOffset(2026, 8, 26, 18, 0, 0, TimeSpan.FromHours(8));
+    var model = new FakeMessageActionModel(
+        new MessageActionDraft(MessageActionDecision.NeedContext, PriorityLevel.P2, null, null, null, "需要前文", null),
+        new MessageActionDraft(MessageActionDecision.SuggestTodo, PriorityLevel.P1, "提交验收材料", "补齐附件后提交", dueAt, "前后文明确了附件", null));
+    var suggestions = new SqliteTodoSuggestionRepository(databasePath);
+    var agent = new TodoSuggestionAgent(messages, suggestions, model, new FixedClock(dueAt.AddDays(-2)));
+    var suggestion = await agent.AnalyzeAsync(anchor.Id, CancellationToken.None);
+    AssertEqual(2, model.Calls.Count, "The agent should fetch context only after the model requests it.");
+    AssertEqual(0, model.Calls[0].Context.Count, "The first call should use the anchor only.");
+    AssertTrue(model.Calls[1].Context.Any(message => message.Id == earlier.Id), "The second call should include adjacent messages.");
+    AssertFalse(model.Calls[1].Context.Any(message => message.Id == unrelated.Id),
+        "The agent must not disclose an unrelated conversation as context.");
+    AssertEqual("提交验收材料", suggestion.Title, "The actionable title should come from the model proposal.");
+    AssertEqual(PriorityLevel.P1, suggestion.Priority, "The model's priority should be persisted.");
+    AssertEqual(PriorityLevel.P1, (await suggestions.GetEffectivePrioritiesAsync(new[] { anchor.Id }, CancellationToken.None))[anchor.Id],
+        "Message-feed priority should use the saved agent decision.");
+    var cached = await agent.AnalyzeAsync(anchor.Id, CancellationToken.None);
+    AssertEqual(2, model.Calls.Count, "Reopening a saved suggestion should not send message text again.");
+    AssertEqual(suggestion.Title, cached.Title, "Cached suggestions should remain available.");
+    var todo = await new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(dueAt.AddDays(-2)))
+        .CreateFromMessageAsync(new CreateTodoFromMessageRequest(anchor.Id, suggestion.Title, suggestion.Description,
+            null, suggestion.Priority, suggestion.DueAt, null), CancellationToken.None);
+    AssertEqual(CreateTodoOutcome.Created, todo.Outcome, "A confirmed suggestion should use the existing Todo use case.");
+    await suggestions.SetReviewStatusAsync(anchor.Id, TodoSuggestionReviewStatus.Accepted, CancellationToken.None);
+    AssertEqual(TodoSuggestionReviewStatus.Accepted, (await suggestions.GetAsync(anchor.Id, CancellationToken.None))!.ReviewStatus,
+        "Review state should survive a refresh.");
+
+    var ambiguous = await messages.SaveAsync(CreateMessage(0, "验收群", "王工", "那个也处理一下") with
+    {
+        SourceMessageKey = $"suggestion-ambiguous-{Guid.NewGuid():N}",
+        ChatSessionId = earlier.ChatSessionId,
+        SentAt = anchor.SentAt.AddMinutes(1)
+    }, CancellationToken.None);
+    var clarifyingModel = new FakeMessageActionModel(
+        new MessageActionDraft(MessageActionDecision.AskUser, PriorityLevel.P2, null, null, null,
+            "缺少具体对象", "需要处理哪份材料？"),
+        new MessageActionDraft(MessageActionDecision.SuggestTodo, PriorityLevel.P2, "补齐验收附件", null, null,
+            "用户确认了具体对象", null));
+    var clarifyingAgent = new TodoSuggestionAgent(messages, suggestions, clarifyingModel, new FixedClock(dueAt));
+    var question = await clarifyingAgent.AnalyzeAsync(ambiguous.Id, CancellationToken.None);
+    AssertEqual(MessageActionDecision.AskUser, question.Decision, "Ambiguous input should ask the user before making a Todo.");
+    var revised = await clarifyingAgent.ClarifyAsync(ambiguous.Id, "验收附件", CancellationToken.None);
+    AssertEqual("验收附件", clarifyingModel.Calls[1].UserAnswer, "Clarification must reach the model.");
+    AssertEqual("补齐验收附件", revised.Title, "A reply should replace the pending question with a concrete proposal.");
+    AssertEqual(MessageActionDecision.SuggestTodo, (await suggestions.GetAsync(ambiguous.Id, CancellationToken.None))!.Decision,
+        "The revised proposal should survive refresh.");
+}
+
 static async Task TestReminderSnoozeAsync()
 {
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
@@ -582,6 +654,7 @@ static async Task TestMessageFeedContextSurvivesRefreshAsync()
     await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
     var messageRepository = new SqliteMessageRepository(databasePath);
     var todoRepository = new SqliteTodoRepository(databasePath);
+    var suggestionRepository = new SqliteTodoSuggestionRepository(databasePath);
     var todoService = new TodoApplicationService(
         new SqliteTodoUnitOfWork(databasePath),
         new FixedClock(new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8))));
@@ -602,6 +675,9 @@ static async Task TestMessageFeedContextSurvivesRefreshAsync()
         messageRepository,
         todoRepository,
         todoService,
+        suggestionRepository,
+        new TodoSuggestionAgent(messageRepository, suggestionRepository, new FakeMessageActionModel(),
+            new FixedClock(sentAt)),
         () => Array.Empty<string>(),
         () => Array.Empty<string>(),
         () => FollowedChatFilterMode.Include,
@@ -4866,6 +4942,19 @@ public sealed class FakeTodoDialogService : ITodoDialogService
 public sealed class FixedClock(DateTimeOffset now) : IClock
 {
     public DateTimeOffset Now { get; } = now;
+}
+
+public sealed class FakeMessageActionModel(params MessageActionDraft[] responses) : IMessageActionModel
+{
+    private readonly Queue<MessageActionDraft> _responses = new(responses);
+    public List<MessageActionRequest> Calls { get; } = new();
+
+    public Task<MessageActionDraft> EvaluateAsync(MessageActionRequest request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Calls.Add(request);
+        return Task.FromResult(_responses.Dequeue());
+    }
 }
 
 public sealed class RecordingNotificationPublisher : IUserNotificationPublisher
