@@ -2,13 +2,33 @@
 
 ## Project
 
-WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
+WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
-## Current Snapshot (2026-08-09)
+## Agent and Automatic Todo Analysis (2026-10-25)
 
-The active branch is `main` at `7a00f4d` (`fix: persist message processing results atomically`) and matched `origin/main` at the 2026-08-09 inspection. Unrelated untracked files exist in the workspace; preserve them and stage only files intentionally changed for the current task.
+Current implemented behavior:
 
-Current verified state:
+- The `模型配置` page configures the built-in DeepSeek endpoint and `deepseek-flash` model. The API Key is encrypted with Windows DPAPI `CurrentUser` and stored at `%LocalAppData%\WechatDashboard\Agent\protected-deepseek-api-key.bin`; saving or clearing the Key still requires an application restart.
+- The `分析消息内容` checkbox is independent of Key loading. It persists as `model_analyze_message_content` in SQLite `app_settings` and takes effect immediately for subsequently processed messages.
+- `MentionDetector` recognizes configured aliases, `@我`, `@你`, and `@所有人`. Automatic Todo creation also covers `@所有人`, including WeChat's U+2005 separator after the mention.
+- Message-feed refresh and automatic capture do not use an LLM to rerank the message list. The existing manual `AI 建议` action remains an explicit, reviewed operation; automatic message priority continues to come from local `urgency_scores` rules unless a manual suggestion already exists.
+- When analysis is enabled, a newly ingested `@我` or `@所有人` message triggers one `AnalyzeMentionAsync` JSON request. The Agent returns a P0-P3 priority and a concise Chinese description for the automatic Todo.
+- Agent output overrides only `TodoItem.Priority` and `TodoItem.Description`. Title, project, managed project, due time, and automatic-creation status remain rule-driven. Local urgency scores are not overwritten.
+- Analysis runs before `IMessageProcessingUnitOfWork.TryProcessAsync`, so no network wait occurs inside the SQLite transaction. An existing `(source, source_message_key)` skips the model call and still uses the transactional deduplication path.
+- With the switch off, no model call is made and the original local priority/default description behavior is preserved. Missing configuration, request failure, timeout, or invalid JSON falls back to that same behavior. A blank description falls back to the default text without discarding a valid Agent priority. External cancellation is propagated.
+- Existing messages and Todos are not backfilled or recalculated. Automated model tests use fake HTTP handlers and do not consume real API quota.
+
+Verification at this checkpoint:
+
+- Release and Debug solution builds succeeded after the Agent priority-and-summary change.
+- The focused DeepSeek protocol test and real-SQLite automatic-Todo analysis test passed, including local message-feed priority isolation and failure fallback.
+- The complete .NET runner reported 81/82 passing tests; the remaining failure is the pre-existing `MessageFeedViewModel` concurrent refresh/context-navigation race. Do not describe the full suite as all green until that unrelated race is fixed.
+
+## Historical Snapshot (2026-08-09)
+
+At that inspection, the active branch was `main` at `7a00f4d` (`fix: persist message processing results atomically`) and matched `origin/main`. Unrelated untracked files exist in the workspace; preserve them and stage only files intentionally changed for the current task.
+
+Verified state at that historical checkpoint:
 
 - WPF can call the project-local `wx_key` helper through `tools\wx-key-tools\run-wx-key-probe.ps1` to write a DB Key file under `tools\result\wechat-local-reader`.
 - WPF can initialize the local reader with a DB Key file and read local WeChat messages through `tools\wechat-local-reader\wechat_local_reader.py`.
