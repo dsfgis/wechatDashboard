@@ -24,6 +24,12 @@ public static class ProjectToolPaths
         WeChatNativeReaderDirectory,
         "protected-wechat-key.bin");
 
+    /// <summary>当前 Windows 用户可解密的 DeepSeek API Key 密文文件。</summary>
+    public static string DeepSeekProtectedApiKeyPath => Path.Combine(
+        UserDataRoot,
+        "Agent",
+        "protected-deepseek-api-key.bin");
+
     /// <summary>原生微信读取器的稳定快照目录。</summary>
     public static string WeChatNativeSnapshotDirectory => Path.Combine(
         WeChatNativeReaderDirectory,

@@ -3,8 +3,14 @@ using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.Domain.Entities;
+using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Application.Capture;
+
+/// <summary>Agent 对 @我 消息的分析结果，只覆盖自动待办的优先级和说明。</summary>
+public sealed record MentionMessageAnalysis(
+    PriorityLevel Priority,
+    string? Description);
 
 /// <summary>
 /// 消息采集管线：协调多个适配器完成"采集 -> 去重 -> 持久化 -> 分类 -> 紧急度评分 -> 自动建待办"的完整流程。
@@ -20,6 +26,10 @@ public sealed class MessageCapturePipeline
     private readonly ProjectClassifier _projectClassifier;
     private readonly UrgencyRanker _urgencyRanker;
     private readonly Func<Message, long?> _managedProjectMatcher;
+    // Agent 分析依赖均为可选，未装配时完整保留原自动待办行为。
+    private readonly IMessageRepository? _messageRepository;
+    private readonly Func<bool> _analyzeMessageContent;
+    private readonly Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? _analyzeMentionAsync;
 
     public MessageCapturePipeline(
         IEnumerable<IMessageCaptureAdapter> adapters,
@@ -28,7 +38,10 @@ public sealed class MessageCapturePipeline
         MentionDetector mentionDetector,
         ProjectClassifier projectClassifier,
         UrgencyRanker urgencyRanker,
-        Func<Message, long?>? managedProjectMatcher = null)
+        Func<Message, long?>? managedProjectMatcher = null,
+        IMessageRepository? messageRepository = null,
+        Func<bool>? analyzeMessageContent = null,
+        Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? analyzeMentionAsync = null)
     {
         _adapters = adapters.ToArray();
         _messageProcessingUnitOfWork = messageProcessingUnitOfWork;
@@ -37,6 +50,9 @@ public sealed class MessageCapturePipeline
         _projectClassifier = projectClassifier;
         _urgencyRanker = urgencyRanker;
         _managedProjectMatcher = managedProjectMatcher ?? (_ => null);
+        _messageRepository = messageRepository;
+        _analyzeMessageContent = analyzeMessageContent ?? (() => false);
+        _analyzeMentionAsync = analyzeMentionAsync;
     }
 
     /// <summary>
@@ -135,6 +151,8 @@ public sealed class MessageCapturePipeline
             // 判断是否 @我
             var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
             var message = ToMessage(capturedMessage, isMentionMe);
+            // 网络分析必须在数据库事务之前完成，失败时以 null 回退本地优先级和默认说明。
+            var mentionAnalysis = await PrepareMentionAnalysisAsync(message, isMentionMe, cancellationToken);
             var writeResult = await _messageProcessingUnitOfWork.TryProcessAsync(
                 message,
                 savedMessage =>
@@ -149,7 +167,10 @@ public sealed class MessageCapturePipeline
                             urgency,
                             DateTimeOffset.Now,
                             TimeZoneInfo.Local,
-                            _managedProjectMatcher(savedMessage))
+                            managedProjectId: _managedProjectMatcher(savedMessage),
+                            description: mentionAnalysis?.Description,
+                            // 模型优先级只进入自动待办，不改写消息流使用的本地评分。
+                            priority: mentionAnalysis?.Priority)
                         : null;
                     return new MessageProcessingArtifacts(classification, urgency, todo);
                 },
@@ -169,6 +190,52 @@ public sealed class MessageCapturePipeline
         }
 
         return new CaptureRunResult(captured, persisted, duplicates, createdTodos);
+    }
+
+    /// <summary>为新的 @我 消息准备 Agent 分析；任何模型故障都回退本地规则，不阻断自动待办。</summary>
+    private async Task<MentionMessageAnalysis?> PrepareMentionAnalysisAsync(
+        Message message,
+        bool isMentionMe,
+        CancellationToken cancellationToken)
+    {
+        if (!isMentionMe
+            || !_analyzeMessageContent()
+            || _messageRepository is null
+            || _analyzeMentionAsync is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            // 重复消息仍走原工作单元去重，但不再产生一次模型调用费用。
+            var exists = await _messageRepository.ExistsAsync(
+                message.Source,
+                message.SourceMessageKey,
+                cancellationToken);
+            if (exists)
+            {
+                return null;
+            }
+
+            var analysis = await _analyzeMentionAsync(message, cancellationToken);
+            // 空白说明只回退说明文本，模型已经返回的有效优先级仍然保留。
+            return string.IsNullOrWhiteSpace(analysis.Description)
+                ? analysis with { Description = null }
+                : analysis with { Description = analysis.Description.Trim() };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 调用方主动停止采集时必须继续传播，不能伪装成模型失败。
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // 包括模型未配置、超时、网络错误和分析前去重失败，均保留原待办路径。
+            System.Diagnostics.Debug.WriteLine(
+                $"Mention analysis failed: {CaptureErrorSanitizer.Sanitize(exception.Message)}");
+            return null;
+        }
     }
 
     /// <summary>

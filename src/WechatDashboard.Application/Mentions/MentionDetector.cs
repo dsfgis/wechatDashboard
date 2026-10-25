@@ -41,9 +41,11 @@ public sealed class MentionDetector
             return false;
         }
 
-        // 兼容 "@我" / "@你" 这类泛指形式
+        // 兼容 "@我" / "@你" / "@所有人" 这类泛指形式。
+        // 群聊中的 @所有人 也包含当前用户，应与个人别名一样触发自动待办。
         if (content.Contains("@我", StringComparison.OrdinalIgnoreCase) ||
-            content.Contains("@你", StringComparison.OrdinalIgnoreCase))
+            content.Contains("@你", StringComparison.OrdinalIgnoreCase) ||
+            content.Contains("@所有人", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -66,7 +68,7 @@ public sealed class MentionDetector
 
         var mentioned = new List<string>();
 
-        // 处理 "@我" / "@你" 泛指
+        // 处理 "@我" / "@你" / "@所有人" 泛指，保持检测与消息展示的提取结果一致。
         if (content.Contains("@我", StringComparison.OrdinalIgnoreCase))
         {
             mentioned.Add("我");
@@ -74,6 +76,10 @@ public sealed class MentionDetector
         if (content.Contains("@你", StringComparison.OrdinalIgnoreCase))
         {
             mentioned.Add("你");
+        }
+        if (content.Contains("@所有人", StringComparison.OrdinalIgnoreCase))
+        {
+            mentioned.Add("所有人");
         }
 
         // 匹配配置的别名

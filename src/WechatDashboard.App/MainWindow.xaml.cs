@@ -16,6 +16,7 @@ using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.App.Views.Todos;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
+using WechatDashboard.Infrastructure.Agent;
 using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Persistence;
 
@@ -39,6 +40,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteTodoRepository _todoRepository;
     private readonly SqliteProcessingOffsetRepository _offsetRepository;
     private readonly SqliteCaptureSourceSettingsRepository _settingsRepository;
+    private readonly SqliteModelSettingsRepository _modelSettingsRepository;
     private readonly SqliteUserAliasRepository _aliasRepository;
     private readonly SqliteFollowedChatRepository _followedChatRepository;
     private readonly SqliteFollowedProjectRepository _followedProjectRepository;
@@ -56,6 +58,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private IReadOnlyList<FollowedProjectKeyword> _currentFollowedProjectKeywords = Array.Empty<FollowedProjectKeyword>();
     // 微信本地读取器服务
     private readonly WeChatLocalReaderService _readerService;
+    // DeepSeek 密钥仅在启动时读取，界面保存后于下次重启生效。
+    private readonly ProtectedDeepSeekApiKeyStore _deepSeekApiKeyStore;
+    private readonly OpenAiCompatibleMessageActionModel _messageActionModel;
+    // 后台采集直接读取该内存开关，复选框无需等待重启或重建管线。
+    private volatile bool _analyzeMessageContent;
     // 采集并发控制信号量，避免实时循环与手动采集重叠
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
     // 监听空闲时自动降频；托盘后台只做低频增量检查，恢复窗口时立即唤醒。
@@ -111,6 +118,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _wechatMessageStatusText = "默认读取当天微信消息。请先提取 DB Key 并初始化本地库。";
     private string _dashboardStatusText = "按项目统计最近消息。";
     private string _dashboardChartType = "bar";
+    // 模型配置状态只描述保存情况，不包含或回显 API Key。
+    private string _modelConfigStatusText = "尚未保存本机 DeepSeek API Key。";
     public TodoFeatureCoordinator TodoFeature { get; }
     public DesktopCalendarViewModel ScheduleOverview { get; }
 
@@ -127,14 +136,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _todoRepository = new SqliteTodoRepository(_databasePath);
         _offsetRepository = new SqliteProcessingOffsetRepository(_databasePath);
         _settingsRepository = new SqliteCaptureSourceSettingsRepository(_databasePath);
+        _modelSettingsRepository = new SqliteModelSettingsRepository(_databasePath);
         _aliasRepository = new SqliteUserAliasRepository(_databasePath);
         _followedChatRepository = new SqliteFollowedChatRepository(_databasePath);
         _followedProjectRepository = new SqliteFollowedProjectRepository(_databasePath);
         _followedProjectKeywordRepository = new SqliteFollowedProjectKeywordRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
+
+        // 必须先读取启动配置，再创建消息建议 Agent，确保重启后使用新密钥。
+        _deepSeekApiKeyStore = new ProtectedDeepSeekApiKeyStore();
+        string? savedDeepSeekApiKey = null;
+        try
+        {
+            savedDeepSeekApiKey = _deepSeekApiKeyStore.Load();
+            _modelConfigStatusText = savedDeepSeekApiKey is null
+                ? "尚未保存本机 DeepSeek API Key。"
+                : "已加载本机 DeepSeek API Key；密钥不会回显。";
+        }
+        catch (InvalidOperationException exception)
+        {
+            // 密钥读取失败不影响其他页面，本次仍保留原环境变量配置能力。
+            _modelConfigStatusText = $"{exception.Message} 本次将尝试使用环境变量配置。";
+        }
+
+        _messageActionModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment(savedDeepSeekApiKey);
         TodoFeature = new TodoFeatureCoordinator(
             _databasePath,
+            _messageActionModel,
             () => _currentAliases,
             () => _currentFollowedChats,
             () => _followedChatFilterMode,
@@ -324,6 +353,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         private set => SetField(ref _dashboardChartType, value);
     }
 
+    /// <summary>模型密钥保存状态，不承载任何敏感内容。</summary>
+    public string ModelConfigStatusText
+    {
+        get => _modelConfigStatusText;
+        private set => SetField(ref _modelConfigStatusText, value);
+    }
+
 
     // 微信原生消息列表（UI 绑定）
     public ObservableCollection<WeChatMessageRow> WeChatMessages { get; } = new();
@@ -374,6 +410,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await System.Windows.Threading.Dispatcher.Yield(
             System.Windows.Threading.DispatcherPriority.Background);
         await InitializeAndRefreshAsync(seedIfEmpty: true);
+        // 必须在实时监听启动前恢复开关，避免首批消息使用错误状态。
+        await LoadModelSettingsAsync();
         await TodoFeature.StartAsync();
         ApplyBootstrapRange();
         await Task.Run(() => _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None));
@@ -1633,6 +1671,95 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return match?.ProjectName ?? "";
     }
 
+    /// <summary>在监听启动前读取模型分析开关，读取失败时安全保持关闭。</summary>
+    private async Task LoadModelSettingsAsync()
+    {
+        try
+        {
+            _analyzeMessageContent = await _modelSettingsRepository.GetAnalyzeMessageContentAsync(
+                CancellationToken.None);
+            AnalyzeMessageContentCheckBox.IsChecked = _analyzeMessageContent;
+        }
+        catch (Exception exception)
+        {
+            _analyzeMessageContent = false;
+            AnalyzeMessageContentCheckBox.IsChecked = false;
+            ModelConfigStatusText = "模型分析开关读取失败，本次保持关闭。";
+            System.Diagnostics.Debug.WriteLine(
+                $"Model settings load failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>勾选后立即更新内存开关并异步持久化，保存失败时恢复之前的状态。</summary>
+    private async void AnalyzeMessageContentCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        var previousEnabled = _analyzeMessageContent;
+        var enabled = AnalyzeMessageContentCheckBox.IsChecked == true;
+        // 先更新内存，后续消息从这一刻起按新状态处理。
+        _analyzeMessageContent = enabled;
+        AnalyzeMessageContentCheckBox.IsEnabled = false;
+        try
+        {
+            await _modelSettingsRepository.SetAnalyzeMessageContentAsync(
+                enabled,
+                CancellationToken.None);
+            ModelConfigStatusText = enabled
+                ? "分析消息内容已开启并保存，立即生效；仅处理之后新入库的 @我 消息。"
+                : "分析消息内容已关闭并保存，立即生效；@我 消息仍按原逻辑自动创建待办。";
+        }
+        catch (Exception exception)
+        {
+            // UI 与后台采集同时回滚，避免界面状态和实际行为不一致。
+            _analyzeMessageContent = previousEnabled;
+            AnalyzeMessageContentCheckBox.IsChecked = previousEnabled;
+            ModelConfigStatusText =
+                $"分析开关保存失败，已恢复原状态：{exception.Message}";
+        }
+        finally
+        {
+            AnalyzeMessageContentCheckBox.IsEnabled = true;
+        }
+    }
+
+    /// <summary>加密保存 DeepSeek API Key；当前进程继续使用启动时配置。</summary>
+    private void SaveModelConfigButton_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = DeepSeekApiKeyPasswordBox.Password;
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            ModelConfigStatusText = "请输入 DeepSeek API Key；空内容不会覆盖已保存密钥。";
+            return;
+        }
+
+        try
+        {
+            _deepSeekApiKeyStore.Save(apiKey);
+            // 保存后立刻清除掩码输入，避免密钥继续停留在界面控件中。
+            DeepSeekApiKeyPasswordBox.Clear();
+            ModelConfigStatusText = "DeepSeek API Key 已加密保存，重启应用后生效。";
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            // 存储错误信息不包含密钥；保存失败时保留输入以便用户重试。
+            ModelConfigStatusText = exception.Message;
+        }
+    }
+
+    /// <summary>清除本机密钥，重启后回退到环境变量配置（如有）。</summary>
+    private void ClearModelConfigButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _deepSeekApiKeyStore.Clear();
+            DeepSeekApiKeyPasswordBox.Clear();
+            ModelConfigStatusText = "本机 DeepSeek API Key 已清除，重启后生效；届时将使用环境变量配置（如有）。";
+        }
+        catch (InvalidOperationException exception)
+        {
+            ModelConfigStatusText = exception.Message;
+        }
+    }
+
     /// <summary>保存采集源设置：清空旧设置后批量写入当前 UI 列表中的设置项。</summary>
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -1714,7 +1841,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             new UrgencyRanker(
                 priorityContacts: new[] { "王经理", "赵经理" },
                 priorityProjectIds: new[] { 1L, 2L }),
-            message => FollowedProjectMatcher.Match(message, _currentFollowedProjectKeywords)?.ProjectId);
+            managedProjectMatcher: message => FollowedProjectMatcher.Match(
+                message,
+                _currentFollowedProjectKeywords)?.ProjectId,
+            messageRepository: _messageRepository,
+            analyzeMessageContent: () => _analyzeMessageContent,
+            // 单次 Agent 调用同时生成自动待办优先级和说明，不影响消息流评分。
+            analyzeMentionAsync: _messageActionModel.AnalyzeMentionAsync);
     }
 
     /// <summary>

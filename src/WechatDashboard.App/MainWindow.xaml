@@ -130,6 +130,8 @@
                     <ListBoxItem Content="&#x5173;&#x6CE8;&#x8BBE;&#x7F6E;" Tag="5" />
                     <ListBoxItem Content="&#x91C7;&#x96C6;&#x6E90;&#x8BBE;&#x7F6E;" Tag="6" />
                     <ListBoxItem Content="&#x91C7;&#x96C6;&#x8BCA;&#x65AD;" Tag="7" />
+                    <!-- 模型配置固定使用 DeepSeek，页面只维护 API Key。 -->
+                    <ListBoxItem Content="模型配置" Tag="9" />
                 </ListBox>
                 <Button DockPanel.Dock="Top"
                         Content="桌面日历"
@@ -207,6 +209,9 @@
                                         <Setter Property="Visibility" Value="Collapsed" />
                                     </DataTrigger>
                                     <DataTrigger Binding="{Binding SelectedIndex, ElementName=MainContentTabs}" Value="7">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding SelectedIndex, ElementName=MainContentTabs}" Value="9">
                                         <Setter Property="Visibility" Value="Collapsed" />
                                     </DataTrigger>
                                 </Style.Triggers>
@@ -555,6 +560,44 @@
                 </TabItem>
                 <TabItem Header="日程概览">
                     <todoViews:DesktopCalendarView DataContext="{Binding ScheduleOverview}" />
+                </TabItem>
+                <TabItem Header="模型配置">
+                    <Border Background="White" Padding="24">
+                        <StackPanel MaxWidth="680" HorizontalAlignment="Left">
+                            <!-- 固定服务商和模型，避免要求用户填写技术参数。 -->
+                            <TextBlock Text="DeepSeek 模型" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,8" />
+                            <TextBlock Text="接口：https://api.deepseek.com/chat/completions    模型：deepseek-flash"
+                                       Foreground="#6B7280" TextWrapping="Wrap" Margin="0,0,0,20" />
+                            <!-- 已保存密钥不会回填到此控件，始终只显示掩码输入。 -->
+                            <TextBlock Text="API Key" Style="{StaticResource FieldLabelTextStyle}" />
+                            <PasswordBox x:Name="DeepSeekApiKeyPasswordBox"
+                                         Width="420"
+                                         HorizontalAlignment="Left"
+                                         Margin="0,0,0,12"
+                                         ToolTip="填写 DeepSeek 平台的 API Key" />
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                <Button Content="保存配置" Click="SaveModelConfigButton_Click" />
+                                <Button Content="清除本机密钥" Click="ClearModelConfigButton_Click" />
+                            </StackPanel>
+                            <!-- 开关与 API Key 分开生效：开关立即应用，密钥仍在重启后加载。 -->
+                            <CheckBox x:Name="AnalyzeMessageContentCheckBox"
+                                      Content="分析消息内容"
+                                      Click="AnalyzeMessageContentCheckBox_Click"
+                                      Margin="0,8,0,4" />
+                            <TextBlock Text="开启后仅总结之后新入库的 @我 消息，并写入待办说明；模型失败时仍按原逻辑自动创建待办。"
+                                       Foreground="#6B7280"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,8" />
+                            <!-- 状态只说明保存结果和生效时间，不宣称连接或鉴权成功。 -->
+                            <TextBlock Text="{Binding ModelConfigStatusText}"
+                                       Foreground="#2563EB"
+                                       TextWrapping="Wrap"
+                                       Margin="0,4,0,12" />
+                            <TextBlock Text="API Key 使用当前 Windows 用户加密保存，不写入 SQLite。保存或清除后需重启应用。"
+                                       Foreground="#6B7280"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
                 </TabItem>
             </TabControl>
         </Grid>

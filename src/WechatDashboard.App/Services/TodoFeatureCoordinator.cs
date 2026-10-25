@@ -7,7 +7,6 @@ using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Infrastructure.Background;
-using WechatDashboard.Infrastructure.Agent;
 using WechatDashboard.Infrastructure.Persistence;
 
 namespace WechatDashboard.App.Services;
@@ -23,6 +22,7 @@ public sealed class TodoFeatureCoordinator : IDisposable
 
     public TodoFeatureCoordinator(
         string databasePath,
+        IMessageActionModel messageActionModel,
         Func<IReadOnlyList<string>> aliases,
         Func<IReadOnlyList<string>> followedChats,
         Func<FollowedChatFilterMode> filterMode,
@@ -34,8 +34,9 @@ public sealed class TodoFeatureCoordinator : IDisposable
         var todoRepository = new SqliteTodoRepository(databasePath);
         var messageRepository = new SqliteMessageRepository(databasePath);
         var suggestionRepository = new SqliteTodoSuggestionRepository(databasePath);
+        // 模型在启动时完成配置，保存新密钥不会更改当前进程使用的实例。
         var suggestionAgent = new TodoSuggestionAgent(messageRepository, suggestionRepository,
-            OpenAiCompatibleMessageActionModel.FromEnvironment(), clock);
+            messageActionModel, clock);
         var reminderRepository = new SqliteReminderRepository(databasePath);
         var projectRepository = new SqliteFollowedProjectRepository(databasePath);
         var unitOfWork = new SqliteTodoUnitOfWork(databasePath);

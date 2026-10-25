@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +20,7 @@ using WechatDashboard.Application.Agent;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
+using WechatDashboard.Infrastructure.Agent;
 using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Background;
 using WechatDashboard.Infrastructure.Persistence;
@@ -35,6 +38,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
     ("Todo suggestion agent asks for context and persists a reviewed proposal", TestTodoSuggestionAgentAsync),
+    ("DeepSeek model uses saved API key and preserves environment fallback", TestDeepSeekMessageActionModelAsync),
+    ("DeepSeek mention analysis returns bounded priority and summary JSON", TestDeepSeekMentionAnalysisAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
     ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
@@ -91,14 +96,17 @@ var tests = new (string Name, Func<Task> Run)[]
     ("WeChat local reader service initializes through the native C# reader", TestWeChatLocalReaderServiceExtractsNativeDatabaseKeyAsync),
     ("WeChat local reader service reads native pages without a command runner", TestWeChatLocalReaderServiceReadsPagedMessagesAsync),
     ("Protected WeChat key store uses DPAPI CurrentUser and rejects corrupt files", TestProtectedWeChatDatabaseKeyStoreAsync),
+    ("Protected DeepSeek API key store round-trips and rejects corrupt files", TestProtectedDeepSeekApiKeyStoreAsync),
     ("Native WeChat reader restores a validated key without KeyProbe", TestNativeWeChatReaderRestoresProtectedKeyAsync),
     ("Native WeChat key derivation validates SQLCipher V4 databases", TestNativeWeChatKeyDerivationAsync),
     ("Native WeChat reader queries V4 shards and adapter offsets", TestNativeWeChatReaderAsync),
     ("Native WeChat reader matches the frozen Python oracle field by field", TestNativeWeChatReaderMatchesPythonOracleAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
+    ("Capture pipeline applies immediate Agent priorities and summaries with safe fallback", TestCapturePipelineMentionAnalysisAsync),
     ("Capture pipeline reports one source failure and continues healthy sources", TestCapturePipelineReportsIndividualSourceFailuresAsync),
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
+    ("Model settings repository persists the message analysis switch", TestModelSettingsRepositoryAsync),
     ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync),
     ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync),
     ("Project keyword repository supports multiple keywords per project", TestFollowedProjectKeywordRepositoryAsync),
@@ -143,6 +151,10 @@ static Task TestMentionDetectorAsync()
 
     AssertTrue(detector.IsMentioned("@张三 今天下班前处理线上故障"), "Chinese alias should be detected.");
     AssertTrue(detector.IsMentioned("有人@我 请确认接口变更", hasWechatMentionHint: true), "WeChat mention hint should be detected.");
+    // 使用微信消息中的 U+2005 空白，验证特殊空白不会影响 @所有人 的文本识别。
+    const string mentionAllContent = "@所有人\u2005 ai agent 开发测试";
+    AssertTrue(detector.IsMentioned(mentionAllContent), "A group mention-all message should be detected.");
+    AssertTrue(detector.ExtractMentionedAliases(mentionAllContent).Contains("所有人"), "Mention-all should be extracted for consistent message presentation.");
     AssertFalse(detector.IsMentioned("@李四 帮忙看一下"), "Other people's mentions should not match.");
 
     return Task.CompletedTask;
@@ -237,6 +249,26 @@ static Task TestTodoCreationAsync()
         TodoDueBucket.DueToday,
         new TodoDueBucketPolicy(timeZone).Classify(todo.DueAt, now),
         "A todo from a message sent today should appear in the due-today bucket.");
+    AssertEqual(
+        "支付项目群 / 赵经理: @zhangsan 请今天给出支付联调问题反馈",
+        todo.Description,
+        "A null summary must preserve the original default description.");
+
+    // 自定义摘要只能覆盖说明，其他自动待办字段必须逐项保持一致。
+    var summarizedTodo = TodoService.CreateFromMention(
+        message,
+        classification,
+        urgency,
+        now,
+        timeZone,
+        description: "请今天反馈支付联调问题");
+    AssertEqual("请今天反馈支付联调问题", summarizedTodo.Description,
+        "A model summary should be written to the Todo description.");
+    AssertEqual(todo.Title, summarizedTodo.Title, "A summary must not change the Todo title.");
+    AssertEqual(todo.Priority, summarizedTodo.Priority, "A summary must not change the Todo priority.");
+    AssertEqual(todo.ProjectId, summarizedTodo.ProjectId, "A summary must not change the Todo project.");
+    AssertEqual(todo.DueAt, summarizedTodo.DueAt, "A summary must not change the Todo due time.");
+    AssertTrue(summarizedTodo.IsAutoCreated, "A summarized Todo must remain automatically created.");
 
     // 补采场景：消息昨天发送、今天才采集，待办应落在发送当天而非采集当天。
     var lateCapturedMessage = message with { SentAt = now.AddDays(-1).AddHours(-2) };
@@ -503,6 +535,140 @@ static async Task TestTodoSuggestionAgentAsync()
     AssertEqual("补齐验收附件", revised.Title, "A reply should replace the pending question with a concrete proposal.");
     AssertEqual(MessageActionDecision.SuggestTodo, (await suggestions.GetAsync(ambiguous.Id, CancellationToken.None))!.Decision,
         "The revised proposal should survive refresh.");
+}
+
+static async Task TestDeepSeekMessageActionModelAsync()
+{
+    // 保存并恢复原环境，避免测试影响开发者已有的模型配置。
+    var variableNames = new[]
+    {
+        "WECHATDASHBOARD_AGENT_ENDPOINT",
+        "WECHATDASHBOARD_AGENT_MODEL",
+        "WECHATDASHBOARD_AGENT_API_KEY"
+    };
+    var originalValues = variableNames.ToDictionary(name => name, name => Environment.GetEnvironmentVariable(name));
+    var modelResult = JsonSerializer.Serialize(new
+    {
+        decision = "NO_ACTION",
+        priority = "P3",
+        title = (string?)null,
+        description = (string?)null,
+        dueAt = (DateTimeOffset?)null,
+        reason = "无需行动",
+        question = (string?)null
+    });
+    var responseBody = JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { finish_reason = "stop", message = new { content = modelResult } }
+        }
+    });
+
+    try
+    {
+        // 即使存在环境变量，本机已保存密钥也必须优先使用固定 DeepSeek 配置。
+        Environment.SetEnvironmentVariable(variableNames[0], "https://fallback.example/v1/chat/completions");
+        Environment.SetEnvironmentVariable(variableNames[1], "fallback-model");
+        Environment.SetEnvironmentVariable(variableNames[2], "fallback-key");
+        var request = new MessageActionRequest(
+            CreateMessage(9001, "验收群", "王工", "请确认验收时间"),
+            Array.Empty<Message>(),
+            DateTimeOffset.Now);
+        var savedHandler = new RecordingModelHttpMessageHandler(responseBody);
+        using var savedHttp = new HttpClient(savedHandler);
+        var savedModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-saved-test", savedHttp);
+        var savedDraft = await savedModel.EvaluateAsync(request, CancellationToken.None);
+
+        AssertEqual(MessageActionDecision.NoAction, savedDraft.Decision, "DeepSeek response should use the existing parser.");
+        AssertEqual("https://api.deepseek.com/chat/completions", savedHandler.RequestUri?.ToString(),
+            "A saved API key must select the fixed DeepSeek endpoint.");
+        AssertEqual("sk-saved-test", savedHandler.AuthorizationParameter, "The saved API key must be used for Bearer auth.");
+        using var savedBody = JsonDocument.Parse(savedHandler.RequestBody
+            ?? throw new InvalidOperationException("DeepSeek request body was not recorded."));
+        AssertEqual("deepseek-flash", savedBody.RootElement.GetProperty("model").GetString(),
+            "The built-in DeepSeek model should be used.");
+        AssertEqual("json_object", savedBody.RootElement.GetProperty("response_format").GetProperty("type").GetString(),
+            "DeepSeek must keep JSON output enabled.");
+        AssertEqual("disabled", savedBody.RootElement.GetProperty("thinking").GetProperty("type").GetString(),
+            "DeepSeek thinking should be disabled for bounded JSON suggestions.");
+
+        // 没有本机密钥时，原有环境变量配置和通用请求格式保持不变。
+        var fallbackHandler = new RecordingModelHttpMessageHandler(responseBody);
+        using var fallbackHttp = new HttpClient(fallbackHandler);
+        var fallbackModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment(null, fallbackHttp);
+        await fallbackModel.EvaluateAsync(request, CancellationToken.None);
+        AssertEqual("https://fallback.example/v1/chat/completions", fallbackHandler.RequestUri?.ToString(),
+            "Missing saved key should preserve the environment endpoint.");
+        AssertEqual("fallback-key", fallbackHandler.AuthorizationParameter, "Environment API key fallback should remain available.");
+        using var fallbackBody = JsonDocument.Parse(fallbackHandler.RequestBody
+            ?? throw new InvalidOperationException("Fallback request body was not recorded."));
+        AssertEqual("fallback-model", fallbackBody.RootElement.GetProperty("model").GetString(),
+            "Environment model fallback should remain available.");
+        AssertFalse(fallbackBody.RootElement.TryGetProperty("thinking", out _),
+            "Generic OpenAI-compatible requests must not receive the DeepSeek thinking option.");
+    }
+    finally
+    {
+        foreach (var name in variableNames)
+        {
+            Environment.SetEnvironmentVariable(name, originalValues[name]);
+        }
+    }
+}
+
+static async Task TestDeepSeekMentionAnalysisAsync()
+{
+    // 固定响应只经过假 HTTP handler，验证协议而不会访问真实 DeepSeek 服务。
+    static string CreateResponse(string content) => JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { finish_reason = "stop", message = new { content } }
+        }
+    });
+
+    var message = CreateMessage(9100, "验收群", "王工", "@我 请今天确认验收时间");
+    var handler = new RecordingModelHttpMessageHandler(CreateResponse(
+        "{\"priority\":\"P1\",\"description\":\"  请今天确认验收时间。  \"}"));
+    using var http = new HttpClient(handler);
+    var model = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", http);
+
+    var analysis = await model.AnalyzeMentionAsync(message, CancellationToken.None);
+
+    AssertEqual(PriorityLevel.P1, analysis.Priority, "The Agent should return the automatic Todo priority.");
+    AssertEqual("请今天确认验收时间。", analysis.Description, "The Agent summary should be trimmed.");
+    AssertEqual("sk-analysis-test", handler.AuthorizationParameter, "Analysis requests must use the saved Bearer key.");
+    using var body = JsonDocument.Parse(handler.RequestBody
+        ?? throw new InvalidOperationException("Analysis request body was not recorded."));
+    AssertEqual(400, body.RootElement.GetProperty("max_tokens").GetInt32(),
+        "Priority and summary output should use a bounded token limit.");
+    AssertEqual("json_object", body.RootElement.GetProperty("response_format").GetProperty("type").GetString(),
+        "The combined analysis should require a JSON object.");
+    AssertEqual("disabled", body.RootElement.GetProperty("thinking").GetProperty("type").GetString(),
+        "The built-in DeepSeek analysis should disable thinking.");
+
+    // 用户输入只能含当前消息，不能混入相邻消息或澄清回答。
+    var requestMessages = body.RootElement.GetProperty("messages");
+    AssertEqual(2, requestMessages.GetArrayLength(), "An analysis should contain one system and one user message.");
+    var userContent = requestMessages[1].GetProperty("content").GetString()
+        ?? throw new InvalidOperationException("Analysis user input was missing.");
+    using var input = JsonDocument.Parse(userContent);
+    AssertEqual(message.Content, input.RootElement.GetProperty("currentMessage").GetProperty("content").GetString(),
+        "The analysis input should contain the current message.");
+    AssertFalse(input.RootElement.TryGetProperty("adjacentMessages", out _),
+        "The analysis must not send adjacent messages.");
+    AssertFalse(input.RootElement.TryGetProperty("userAnswer", out _),
+        "The analysis must not send a clarification answer.");
+
+    // 空白说明不会丢弃已返回的有效优先级，后续由待办工厂回退默认说明。
+    var blankHandler = new RecordingModelHttpMessageHandler(CreateResponse(
+        "{\"priority\":\"P3\",\"description\":\" \\n\\t \"}"));
+    using var blankHttp = new HttpClient(blankHandler);
+    var blankModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", blankHttp);
+    var blankAnalysis = await blankModel.AnalyzeMentionAsync(message, CancellationToken.None);
+    AssertEqual(PriorityLevel.P3, blankAnalysis.Priority, "A blank summary must preserve the parsed priority.");
+    AssertEqual<string?>(null, blankAnalysis.Description, "A blank summary should request the default Todo description.");
 }
 
 static async Task TestReminderSnoozeAsync()
@@ -3727,6 +3893,53 @@ static async Task TestProtectedWeChatDatabaseKeyStoreAsync()
     }
 }
 
+static Task TestProtectedDeepSeekApiKeyStoreAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", "deepseek-key", Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(root, "protected-deepseek-api-key.bin");
+    var store = new ProtectedDeepSeekApiKeyStore(path);
+    try
+    {
+        // 首次运行没有密文文件时应保持未配置状态。
+        AssertTrue(store.Load() is null, "A missing DeepSeek key file should return no saved key.");
+        const string apiKey = "sk-deepseek-test-only";
+        store.Save($"  {apiKey}  ");
+        AssertTrue(File.Exists(path), "Saving should create the DeepSeek protected key file.");
+
+        // 密文既不能包含明文，也必须能由当前 Windows 用户还原。
+        var persisted = File.ReadAllBytes(path);
+        AssertFalse(Encoding.UTF8.GetString(persisted).Contains(apiKey, StringComparison.Ordinal),
+            "The protected file must not contain the plaintext DeepSeek API key.");
+        AssertEqual(apiKey, store.Load(), "The saved DeepSeek API key should round-trip after trimming.");
+
+        // 损坏文件必须返回可读错误，不能把异常内容当作有效密钥。
+        File.WriteAllText(path, "broken-cache");
+        var rejected = false;
+        try
+        {
+            store.Load();
+        }
+        catch (InvalidOperationException exception)
+        {
+            rejected = exception.Message.Contains("重新保存", StringComparison.Ordinal);
+        }
+
+        AssertTrue(rejected, "A corrupt DeepSeek key file should request configuration again.");
+        store.Clear();
+        AssertFalse(File.Exists(path), "Clear should remove only the DeepSeek protected key file.");
+        AssertTrue(store.Load() is null, "A cleared DeepSeek key should return to the unconfigured state.");
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    return Task.CompletedTask;
+}
+
 static async Task TestNativeWeChatReaderRestoresProtectedKeyAsync()
 {
     var root = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", "protected-key-reader", Guid.NewGuid().ToString("N"));
@@ -3822,7 +4035,9 @@ static async Task TestCapturePipelineAsync()
     await File.WriteAllLinesAsync(Path.Combine(inputRoot, "wechat.jsonl"), new[]
     {
         """{"id":"wx-mention","platform":"WeChat","chatId":"crm","chatName":"CRM项目群","senderName":"王经理","content":"@张三 紧急，今天处理线上故障","sentAt":"2026-06-03T10:00:00+08:00","messageType":"Text"}""",
-        """{"id":"wx-normal","platform":"WeChat","chatId":"pay","chatName":"支付项目群","senderName":"赵经理","content":"支付联调今天继续推进","sentAt":"2026-06-03T10:10:00+08:00","messageType":"Text"}"""
+        """{"id":"wx-normal","platform":"WeChat","chatId":"pay","chatName":"支付项目群","senderName":"赵经理","content":"支付联调今天继续推进","sentAt":"2026-06-03T10:10:00+08:00","messageType":"Text"}""",
+        // 三人群 @所有人 必须沿用真实 SQLite 工作单元创建自动待办，正文包含微信 U+2005 空白。
+        """{"id":"wx-mention-all","platform":"WeChat","chatId":"three-person-room","chatName":"三人群","senderName":"白驹过隙","content":"@所有人\u2005 ai agent 开发测试","sentAt":"2026-06-03T10:20:00+08:00","messageType":"Text"}"""
     }, CancellationToken.None);
 
     var initializer = new SqliteDatabaseInitializer(databasePath);
@@ -3856,23 +4071,196 @@ static async Task TestCapturePipelineAsync()
     var recentMessages = await messageRepository.GetRecentAsync(10, CancellationToken.None);
     var pendingTodos = await todoRepository.GetPendingAsync(CancellationToken.None);
 
-    AssertEqual(2, firstRun.CapturedCount, "First pipeline run should capture two messages.");
-    AssertEqual(1, firstRun.CreatedTodoCount, "Only the mention should create a todo.");
+    AssertEqual(3, firstRun.CapturedCount, "First pipeline run should capture all three messages.");
+    AssertEqual(2, firstRun.CreatedTodoCount, "Both a direct mention and a group mention-all should create todos.");
     AssertEqual(0, secondRun.CapturedCount, "Offset should prevent duplicate capture.");
     AssertEqual(CaptureSourceRunStatus.Empty, secondRun.Sources.Single().Status, "A successful zero-message source must be distinct from failure.");
-    AssertEqual(2, recentMessages.Count, "Two messages should be persisted.");
-    AssertEqual(1, pendingTodos.Count, "One pending todo should be persisted.");
-    AssertTrue(pendingTodos.Single().Title.Contains("@张三"), "Todo title should come from mention message.");
-    AssertEqual(1L, pendingTodos.Single().ProjectId, "Legacy classifier output should remain unchanged.");
-    AssertEqual(managedCrmProject.Id, pendingTodos.Single().ManagedProjectId, "Automatic Todo should use the existing followed-project keyword matcher for its managed project.");
+    AssertEqual(3, recentMessages.Count, "All three messages should be persisted.");
+    AssertEqual(2, pendingTodos.Count, "Both mention messages should persist pending todos.");
+    var directMentionTodo = pendingTodos.Single(todo => todo.Title.Contains("@张三"));
+    AssertEqual(1L, directMentionTodo.ProjectId, "Legacy classifier output should remain unchanged.");
+    AssertEqual(managedCrmProject.Id, directMentionTodo.ManagedProjectId, "Automatic Todo should use the existing followed-project keyword matcher for its managed project.");
+    var mentionAllTodo = pendingTodos.Single(todo => todo.Title.Contains("@所有人"));
+    // 日历要求待办具有截止日期；此处直接验证三人群 @所有人 的产物满足显示条件。
+    AssertTrue(mentionAllTodo.DueAt.HasValue, "A group mention-all Todo should have a due date for calendar display.");
 
     await using var resultConnection = new SqliteConnection($"Data Source={databasePath}");
     await resultConnection.OpenAsync(CancellationToken.None);
     await using var resultCommand = resultConnection.CreateCommand();
     resultCommand.CommandText = "SELECT COUNT(*) FROM message_classifications;";
-    AssertEqual(2, Convert.ToInt32(await resultCommand.ExecuteScalarAsync(CancellationToken.None)), "Every persisted message should have a classification result.");
+    AssertEqual(3, Convert.ToInt32(await resultCommand.ExecuteScalarAsync(CancellationToken.None)), "Every persisted message should have a classification result.");
     resultCommand.CommandText = "SELECT COUNT(*) FROM urgency_scores;";
-    AssertEqual(2, Convert.ToInt32(await resultCommand.ExecuteScalarAsync(CancellationToken.None)), "Every persisted message should have an urgency result.");
+    AssertEqual(3, Convert.ToInt32(await resultCommand.ExecuteScalarAsync(CancellationToken.None)), "Every persisted message should have an urgency result.");
+}
+
+static async Task TestCapturePipelineMentionAnalysisAsync()
+{
+    // 使用真实 SQLite 工作单元，确保测试覆盖消息与自动待办的实际持久化路径。
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var analyzeMessageContent = false;
+    var analysisCalls = new List<string>();
+    using var cancellationSource = new CancellationTokenSource();
+    const string mentionContent = "@我 请今天确认验收时间";
+    var sentAt = new DateTimeOffset(2026, 8, 9, 13, 30, 0, TimeSpan.FromHours(8));
+
+    // 只改变来源消息键，便于用同一正文比较 Agent 分析前后的待办字段。
+    CapturedMessage Capture(string key, string content) => new(
+        "WeChat",
+        key,
+        "analysis-room",
+        "分析群",
+        "王工",
+        content,
+        sentAt,
+        MessageType.Text);
+
+    // 可控 Agent 委托模拟成功、故障、空白和外部取消，不产生真实模型费用。
+    Task<MentionMessageAnalysis> Analyze(Message message, CancellationToken cancellationToken)
+    {
+        analysisCalls.Add(message.SourceMessageKey);
+        if (message.SourceMessageKey == "summary-on")
+        {
+            return Task.FromResult(new MentionMessageAnalysis(PriorityLevel.P1, "  请今天确认验收时间。  "));
+        }
+
+        if (message.SourceMessageKey == "summary-failure")
+        {
+            throw new InvalidOperationException("模拟模型故障");
+        }
+
+        if (message.SourceMessageKey == "summary-blank")
+        {
+            return Task.FromResult(new MentionMessageAnalysis(PriorityLevel.P0, " \n "));
+        }
+
+        if (message.SourceMessageKey == "summary-cancel")
+        {
+            // 在 Agent 执行期间取消，验证取消不会被失败降级逻辑吞掉。
+            cancellationSource.Cancel();
+            return Task.FromCanceled<MentionMessageAnalysis>(cancellationToken);
+        }
+
+        throw new InvalidOperationException("未配置分析行为的消息不应调用模型。");
+    }
+
+    var pipeline = new MessageCapturePipeline(
+        adapters: Array.Empty<IMessageCaptureAdapter>(),
+        messageProcessingUnitOfWork: new SqliteMessageProcessingUnitOfWork(databasePath),
+        offsetRepository: new SqliteProcessingOffsetRepository(databasePath),
+        mentionDetector: new MentionDetector(new[] { "张三" }),
+        projectClassifier: new ProjectClassifier(new[]
+        {
+            new ProjectRule(7, "验收项目", ProjectRuleType.ChatName, "分析群", 100)
+        }),
+        urgencyRanker: new UrgencyRanker(),
+        messageRepository: messageRepository,
+        analyzeMessageContent: () => analyzeMessageContent,
+        analyzeMentionAsync: Analyze);
+
+    // 默认关闭时必须保持零模型调用，同时仍创建原自动待办。
+    var offResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-off", mentionContent) },
+        CancellationToken.None);
+    AssertEqual(1, offResult.CreatedTodoCount, "A disabled summary must not disable automatic Todo creation.");
+    AssertEqual(0, analysisCalls.Count, "A disabled summary must not call the model.");
+
+    // 不重建同一管线，直接打开内存开关验证立即生效。
+    analyzeMessageContent = true;
+    var onResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-on", mentionContent) },
+        CancellationToken.None);
+    AssertEqual(1, onResult.CreatedTodoCount, "An enabled summary should create exactly one Todo.");
+    AssertEqual(1, analysisCalls.Count, "A new mention should invoke the summary once.");
+
+    // 普通消息即使开启开关，也不能调用模型或创建待办。
+    var normalResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-normal", "普通项目进展") },
+        CancellationToken.None);
+    AssertEqual(0, normalResult.CreatedTodoCount, "A non-mention must not create a Todo.");
+    AssertEqual(1, analysisCalls.Count, "A non-mention must not invoke the model.");
+
+    // 模型异常和空白结果分别验证两种默认说明回退路径。
+    var failureResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-failure", mentionContent) },
+        CancellationToken.None);
+    var blankResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-blank", mentionContent) },
+        CancellationToken.None);
+    AssertEqual(1, failureResult.CreatedTodoCount, "A model failure must still create an automatic Todo.");
+    AssertEqual(1, blankResult.CreatedTodoCount, "A blank summary must still create an automatic Todo.");
+
+    // 重复消息仍由工作单元去重，但摘要前预检应阻止第二次模型调用。
+    var callsBeforeDuplicate = analysisCalls.Count;
+    var duplicateResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-on", mentionContent) },
+        CancellationToken.None);
+    AssertEqual(1, duplicateResult.DuplicateCount, "The repeated source key should remain a duplicate.");
+    AssertEqual(callsBeforeDuplicate, analysisCalls.Count, "A duplicate message must not invoke the model again.");
+
+    var cancellationPropagated = false;
+    try
+    {
+        await pipeline.ProcessAsync(
+            new[] { Capture("summary-cancel", mentionContent) },
+            cancellationSource.Token);
+    }
+    catch (OperationCanceledException) when (cancellationSource.IsCancellationRequested)
+    {
+        cancellationPropagated = true;
+    }
+
+    AssertTrue(cancellationPropagated, "External cancellation during summarization must propagate.");
+    var messages = await messageRepository.GetRecentAsync(20, CancellationToken.None);
+    var todos = await todoRepository.GetPendingAsync(CancellationToken.None);
+    AssertEqual(5, messages.Count, "Only five non-duplicate, non-cancelled messages should persist.");
+    AssertEqual(4, todos.Count, "Only the four persisted mention messages should create Todos.");
+
+    // 通过来源消息键定位待办，避免依赖仓储的排序规则。
+    TodoItem TodoFor(string key)
+    {
+        var sourceMessage = messages.Single(message => message.SourceMessageKey == key);
+        return todos.Single(todo => todo.SourceMessageId == sourceMessage.Id);
+    }
+
+    var offTodo = TodoFor("summary-off");
+    var onTodo = TodoFor("summary-on");
+    var failureTodo = TodoFor("summary-failure");
+    var blankTodo = TodoFor("summary-blank");
+    var defaultDescription = $"分析群 / 王工: {mentionContent}";
+    AssertEqual(defaultDescription, offTodo.Description, "The disabled path should keep the default description.");
+    AssertEqual("请今天确认验收时间。", onTodo.Description, "The enabled path should persist the trimmed summary.");
+    AssertEqual(defaultDescription, failureTodo.Description, "A model exception should fall back to the default description.");
+    AssertEqual(defaultDescription, blankTodo.Description, "A blank summary should fall back to the default description.");
+    AssertEqual(PriorityLevel.P2, offTodo.Priority, "The disabled path should keep local priority calculation.");
+    AssertEqual(PriorityLevel.P1, onTodo.Priority, "The Agent priority should override only the automatic Todo.");
+    AssertEqual(PriorityLevel.P2, failureTodo.Priority, "A model exception should fall back to the local priority.");
+    AssertEqual(PriorityLevel.P0, blankTodo.Priority, "A blank summary must not discard the Agent priority.");
+
+    // Agent 只能覆盖优先级和说明，标题、项目及截止时间仍由原规则生成。
+    AssertEqual(offTodo.Title, onTodo.Title, "Agent analysis must not change the Todo title.");
+    AssertEqual(offTodo.ProjectId, onTodo.ProjectId, "Agent analysis must not change the Todo project.");
+    AssertEqual(offTodo.ManagedProjectId, onTodo.ManagedProjectId, "Agent analysis must not change the managed project.");
+    AssertEqual(offTodo.DueAt, onTodo.DueAt, "Agent analysis must not change the Todo due time.");
+    AssertTrue(onTodo.IsAutoCreated, "The analyzed Todo should remain automatic.");
+
+    // 消息流继续读取本地 urgency_scores，不能使用自动待办的 Agent 优先级。
+    var analyzedMessageIds = messages
+        .Where(message => message.SourceMessageKey is "summary-on" or "summary-blank")
+        .Select(message => message.Id)
+        .ToArray();
+    var messagePriorities = await new SqliteTodoSuggestionRepository(databasePath)
+        .GetEffectivePrioritiesAsync(analyzedMessageIds, CancellationToken.None);
+    AssertTrue(messagePriorities.Values.All(priority => priority == PriorityLevel.P2),
+        "Agent priorities must not change message feed priorities.");
+    var normalMessage = messages.Single(message => message.SourceMessageKey == "summary-normal");
+    AssertFalse(todos.Any(todo => todo.SourceMessageId == normalMessage.Id),
+        "The non-mention message should not have a Todo.");
+    AssertFalse(messages.Any(message => message.SourceMessageKey == "summary-cancel"),
+        "A cancelled message should not enter the database transaction.");
 }
 
 static async Task TestCapturePipelineReportsIndividualSourceFailuresAsync()
@@ -3988,6 +4376,40 @@ static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
     AssertEqual("WeChat", recentMessages.Single().Source, "Persisted local message should keep WeChat source.");
     AssertEqual("CRM项目群", recentMessages.Single().ChatName, "Persisted local message should use local chat name.");
     AssertEqual(1, pendingTodos.Count, "One pending todo should be created from @我.");
+}
+
+static async Task TestModelSettingsRepositoryAsync()
+{
+    // 每个用例使用独立数据库，避免开发者本机设置影响测试结果。
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var repository = new SqliteModelSettingsRepository(databasePath);
+
+    // 空库没有配置记录，必须默认关闭以避免意外模型费用。
+    AssertFalse(await repository.GetAnalyzeMessageContentAsync(CancellationToken.None),
+        "A fresh database should disable message analysis.");
+    await repository.SetAnalyzeMessageContentAsync(true, CancellationToken.None);
+
+    // 使用新仓储实例回读，确认状态来自 SQLite 而不是内存缓存。
+    var reloadedRepository = new SqliteModelSettingsRepository(databasePath);
+    AssertTrue(await reloadedRepository.GetAnalyzeMessageContentAsync(CancellationToken.None),
+        "An enabled analysis switch should round-trip through SQLite.");
+    await reloadedRepository.SetAnalyzeMessageContentAsync(false, CancellationToken.None);
+    AssertFalse(await repository.GetAnalyzeMessageContentAsync(CancellationToken.None),
+        "A disabled analysis switch should overwrite the previously enabled value.");
+
+    // 直接写入非法值，验证读取端采用安全关闭而不是抛出或意外开启。
+    await using var connection = new SqliteConnection($"Data Source={databasePath}");
+    await connection.OpenAsync(CancellationToken.None);
+    await using var command = connection.CreateCommand();
+    command.CommandText = """
+        INSERT INTO app_settings (key, value) VALUES ('model_analyze_message_content', 'invalid')
+        ON CONFLICT(key) DO UPDATE SET value = 'invalid';
+        """;
+    await command.ExecuteNonQueryAsync(CancellationToken.None);
+    AssertFalse(await repository.GetAnalyzeMessageContentAsync(CancellationToken.None),
+        "An invalid persisted value should safely disable message analysis.");
 }
 
 static async Task TestCaptureSourceSettingsRepositoryAsync()
@@ -4942,6 +5364,35 @@ public sealed class FakeTodoDialogService : ITodoDialogService
 public sealed class FixedClock(DateTimeOffset now) : IClock
 {
     public DateTimeOffset Now { get; } = now;
+}
+
+/// <summary>记录模型 HTTP 请求并返回固定响应，避免测试访问真实服务。</summary>
+public sealed class RecordingModelHttpMessageHandler(string responseBody) : HttpMessageHandler
+{
+    public Uri? RequestUri { get; private set; }
+
+    public string? AuthorizationScheme { get; private set; }
+
+    public string? AuthorizationParameter { get; private set; }
+
+    public string? RequestBody { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        // 在返回响应前完整记录地址、鉴权和请求体供断言检查。
+        RequestUri = request.RequestUri;
+        AuthorizationScheme = request.Headers.Authorization?.Scheme;
+        AuthorizationParameter = request.Headers.Authorization?.Parameter;
+        RequestBody = request.Content is null
+            ? null
+            : await request.Content.ReadAsStringAsync(cancellationToken);
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
+        };
+    }
 }
 
 public sealed class FakeMessageActionModel(params MessageActionDraft[] responses) : IMessageActionModel

@@ -28,7 +28,9 @@ public static class TodoService
         UrgencyScore urgency,
         DateTimeOffset now,
         TimeZoneInfo timeZone,
-        long? managedProjectId = null)
+        long? managedProjectId = null,
+        string? description = null,
+        PriorityLevel? priority = null)
     {
         // 到期时间按消息发送日期（微信/石化通 SentAt）计算，而不是采集时刻：
         // 补采历史消息时，待办应落在消息发送当天的日历格，而非采集当天。
@@ -36,8 +38,11 @@ public static class TodoService
         return TodoFactory.CreateFromMessage(
             message,
             classification.ProjectId,
-            urgency.Priority,
+            // Agent 只覆盖待办优先级；未提供时仍使用本地紧急度评分。
+            priority ?? urgency.Priority,
             now,
+            // 分析结果只覆盖优先级和说明；null 说明仍由工厂按原消息生成。
+            description: description,
             dueAt: dueAt,
             isAutoCreated: true,
             managedProjectId: managedProjectId);

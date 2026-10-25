@@ -171,7 +171,17 @@ KeyProbe 作为独立 x64 进程运行，通过当前用户限定的随机命名
 
 ## 消息行动建议 Agent
 
-配置与 OpenAI Chat Completions 兼容、支持 `response_format: json_object` 的模型接口后，重启应用：
+### 在界面配置 DeepSeek
+
+1. 在主窗口左侧打开“模型配置”，填写 DeepSeek 平台的 API Key，然后点击“保存配置”。界面固定使用 `https://api.deepseek.com/chat/completions` 和 `deepseek-flash`，无需填写接口或模型名。
+2. 保存或清除后重启应用。保存成功只表示密钥已写入本机，不代表连接或鉴权成功；本次运行始终使用启动时加载的配置。
+3. 密钥使用当前 Windows 用户的 DPAPI 加密，不会明文回显或写入 SQLite。密文保存在：
+
+```text
+%LocalAppData%\WechatDashboard\Agent\protected-deepseek-api-key.bin
+```
+
+未保存本机密钥时，仍可使用 OpenAI Chat Completions 兼容、支持 `response_format: json_object` 的环境变量配置。存在本机密钥时优先使用 DeepSeek；清除本机密钥并重启后回退到以下环境变量：
 
 ```powershell
 $env:WECHATDASHBOARD_AGENT_ENDPOINT = 'https://your-provider.example/v1/chat/completions'
@@ -183,7 +193,7 @@ $env:WECHATDASHBOARD_AGENT_API_KEY = '<从安全配置读取的密钥>'
 
 模型提出澄清问题时，可在建议框中填写回答并重新判断。用户核对后点击“采纳并加入待办”才会创建待办；“忽略建议”只更改建议状态。原有 `@我` 自动建待办规则仍会执行，若该消息已经关联待办，采纳操作会打开现有待办供核对，不会另建一条。消息颜色按有效优先级显示：P0 鲜红、P1 橙、P2 蓝、P3 深灰；未运行 Agent 时使用现有规则评分，缺少评分则按 P3 显示。模型不可用、超时或响应无效时不会保存新建议，也不会影响消息采集和原有待办。
 
-模型请求会把上述消息数据发往所配置的服务；在使用真实工作消息前，请按公司的数据处理规则选择获准的模型服务。模型密钥仅从运行环境读取，不写入数据库或界面。
+模型请求会把上述消息数据发往 DeepSeek 或环境变量所配置的服务；在使用真实工作消息前，请按公司的数据处理规则选择获准的模型服务。界面保存的密钥仅以 DPAPI 密文写入本机文件，环境变量密钥仍只从运行环境读取，两者都不会写入 SQLite。
 
 ## 待办日期与日程概览
 
