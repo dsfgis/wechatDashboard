@@ -153,13 +153,18 @@ internal sealed class ShihuatongLocalDatabaseReader
             };
 
         using var command = connection.CreateCommand();
+        // reference_seq 只在同一会话内有效，因此联查必须同时匹配 cider 和 server_seq。
         command.CommandText = """
-            SELECT uuid, cider, creator, msg_type, create_time,
-                   msg_content, search_text, hint_content
-            FROM imdb_message_models
-            WHERE create_time > $createTime
-               OR (create_time = $createTime AND uuid > $uuid)
-            ORDER BY create_time, uuid
+            SELECT message.uuid, message.cider, message.creator, message.msg_type, message.create_time,
+                   message.msg_content, message.search_text, message.hint_content,
+                   quoted.msg_content, quoted.search_text, quoted.hint_content, quoted.msg_type
+            FROM imdb_message_models AS message
+            LEFT JOIN imdb_message_models AS quoted
+              ON quoted.cider = message.cider
+             AND quoted.server_seq = message.reference_seq
+            WHERE message.create_time > $createTime
+               OR (message.create_time = $createTime AND message.uuid > $uuid)
+            ORDER BY message.create_time, message.uuid
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$createTime", cursor.LastCreateTime);
@@ -182,6 +187,22 @@ internal sealed class ShihuatongLocalDatabaseReader
             var searchText = ReadString(reader, 6);
             var hintContent = ReadString(reader, 7);
             var content = ResolveContent(payload, searchText, hintContent, nativeMessageType);
+
+            // 引用记录只通过 reference_seq 关联，必须主动联查并合并，不能只解析当前正文。
+            var quotedPayload = reader.IsDBNull(8) ? null : (byte[])reader.GetValue(8);
+            var quotedSearchText = ReadString(reader, 9);
+            var quotedHintContent = ReadString(reader, 10);
+            var hasQuotedMessage = quotedPayload is not null
+                || !string.IsNullOrWhiteSpace(quotedSearchText)
+                || !string.IsNullOrWhiteSpace(quotedHintContent);
+            if (hasQuotedMessage)
+            {
+                var quotedMessageType = reader.IsDBNull(11) ? 0 : reader.GetInt32(11);
+                var quotedContent = ResolveContent(
+                    quotedPayload, quotedSearchText, quotedHintContent, quotedMessageType);
+                content = CombineWithReference(content, quotedContent);
+            }
+
             var chatName = directory.ResolveChatName(cider);
             var senderName = directory.ResolveSenderName(cider, creator, chatName);
 
@@ -296,6 +317,20 @@ internal sealed class ShihuatongLocalDatabaseReader
             connection.Dispose();
             throw new InvalidOperationException("石化通本地消息数据库解密失败，当前客户端版本可能已变化。");
         }
+    }
+
+    /// <summary>把被引用正文附在当前消息后；重复内容不重复拼接，避免污染标题和模型输入。</summary>
+    internal static string CombineWithReference(string content, string? quotedContent)
+    {
+        var normalizedQuote = quotedContent?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedQuote)
+            || content.Contains(normalizedQuote, StringComparison.Ordinal))
+        {
+            return content;
+        }
+
+        // 使用明确文本边界，后续原始消息展示和大模型分析都能识别引用关系。
+        return $"{content}\n\n引用消息：\n{normalizedQuote}";
     }
 
     private static string ResolveContent(byte[]? payload, string searchText, string hintContent, int nativeMessageType)

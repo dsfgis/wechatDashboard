@@ -1704,7 +1704,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 enabled,
                 CancellationToken.None);
             ModelConfigStatusText = enabled
-                ? "分析消息内容已开启并保存，立即生效；仅处理之后新入库的 @我 消息。"
+                ? "分析消息内容已开启并保存，立即生效；大模型将筛选之后新入库的 @我 消息并生成待办分析。"
                 : "分析消息内容已关闭并保存，立即生效；@我 消息仍按原逻辑自动创建待办。";
         }
         catch (Exception exception)
@@ -1846,7 +1846,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 _currentFollowedProjectKeywords)?.ProjectId,
             messageRepository: _messageRepository,
             analyzeMessageContent: () => _analyzeMessageContent,
-            // 单次 Agent 调用同时生成自动待办优先级和说明，不影响消息流评分。
+            // 单次 Agent 调用同时判断创建必要性并生成优先级和说明，不影响消息流评分。
             analyzeMentionAsync: _messageActionModel.AnalyzeMentionAsync);
     }
 

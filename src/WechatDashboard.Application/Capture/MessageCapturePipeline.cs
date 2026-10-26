@@ -7,10 +7,14 @@ using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Application.Capture;
 
-/// <summary>Agent 对 @我 消息的分析结果，只覆盖自动待办的优先级和说明。</summary>
+/// <summary>Agent 对 @我 消息的分析结果，控制是否创建并覆盖自动待办的优先级和说明。</summary>
+/// <param name="Priority">仅用于自动待办的模型优先级。</param>
+/// <param name="Description">模型生成的待办说明；空白时回退默认说明。</param>
+/// <param name="ShouldCreate">是否值得自动创建待办；默认 true 兼容未启用筛选的调用。</param>
 public sealed record MentionMessageAnalysis(
     PriorityLevel Priority,
-    string? Description);
+    string? Description,
+    bool ShouldCreate = true);
 
 /// <summary>
 /// 消息采集管线：协调多个适配器完成"采集 -> 去重 -> 持久化 -> 分类 -> 紧急度评分 -> 自动建待办"的完整流程。
@@ -160,7 +164,10 @@ public sealed class MessageCapturePipeline
                     // 分类和评分保持在应用层；待办与消息由工作单元在同一事务中提交。
                     var classification = _projectClassifier.Classify(savedMessage);
                     var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
-                    var todo = isMentionMe
+                    // 仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
+                    var shouldCreateTodo = isMentionMe
+                        && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
+                    var todo = shouldCreateTodo
                         ? TodoService.CreateFromMention(
                             savedMessage,
                             classification,
@@ -192,7 +199,7 @@ public sealed class MessageCapturePipeline
         return new CaptureRunResult(captured, persisted, duplicates, createdTodos);
     }
 
-    /// <summary>为新的 @我 消息准备 Agent 分析；任何模型故障都回退本地规则，不阻断自动待办。</summary>
+    /// <summary>为新的 @我 消息准备 Agent 筛选与内容分析；任何模型故障都回退本地规则，不阻断自动待办。</summary>
     private async Task<MentionMessageAnalysis?> PrepareMentionAnalysisAsync(
         Message message,
         bool isMentionMe,

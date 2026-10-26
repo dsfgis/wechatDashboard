@@ -39,7 +39,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
     ("Todo suggestion agent asks for context and persists a reviewed proposal", TestTodoSuggestionAgentAsync),
     ("DeepSeek model uses saved API key and preserves environment fallback", TestDeepSeekMessageActionModelAsync),
-    ("DeepSeek mention analysis returns bounded priority and summary JSON", TestDeepSeekMentionAnalysisAsync),
+    ("DeepSeek mention analysis returns creation decision, priority and summary JSON", TestDeepSeekMentionAnalysisAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
     ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
@@ -79,7 +79,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Default mention aliases include current user's WeChat display names", TestDefaultMentionAliasesAsync),
     ("Capture adapter factory creates enabled adapters for collaboration sources", TestCaptureAdapterFactoryAsync),
     ("Capture adapter factory creates live WeChat visible-window adapters", TestLiveCaptureAdapterFactoryAsync),
-    ("Shihuatong protobuf decoder reads text content", TestShihuatongMessageContentDecoderAsync),
+    ("Shihuatong decoder and referenced meeting content are preserved", TestShihuatongMessageContentDecoderAsync),
     ("Shihuatong source stamp ignores volatile shared-memory changes", TestShihuatongSourceStampAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
@@ -281,6 +281,39 @@ static Task TestTodoCreationAsync()
         TodoDueBucket.Overdue,
         new TodoDueBucketPolicy(timeZone).Classify(lateTodo.DueAt, now),
         "A back-filled todo from yesterday should appear in the overdue bucket.");
+
+    // 只有“本周三”时，截止时间为发送消息所在自然周的周三末尾。
+    var meetingSentAt = new DateTimeOffset(2026, 10, 26, 11, 10, 0, TimeSpan.FromHours(8));
+    var meetingMessage = CreateMessage(
+        id: 31,
+        chatName: "项目协作群",
+        senderName: "李工",
+        content: "@张三 本周三上午对接项目进展，请协调相关人员参会") with
+    {
+        SentAt = meetingSentAt
+    };
+    var weekdayTodo = TodoService.CreateFromMention(
+        meetingMessage, classification, urgency, meetingSentAt.AddHours(1), timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
+        weekdayTodo.DueAt,
+        "An explicit current-week Wednesday should move the Todo and calendar entry to Wednesday.");
+    AssertEqual(TodoDueBucket.Upcoming,
+        new TodoDueBucketPolicy(timeZone).Classify(weekdayTodo.DueAt, meetingSentAt),
+        "Wednesday's Todo should remain in the upcoming bucket on Monday.");
+
+    // 引用会议存在明确开始时间时，应优先于相对日期和默认日末时间。
+    var quotedMeetingMessage = meetingMessage with
+    {
+        Content = meetingMessage.Content
+            + "\n\n引用消息：\n李工 邀请您参加腾讯会议\n会议时间：2026/10/28 09:00-12:00 (GMT+08:00)"
+    };
+    var meetingTodo = TodoService.CreateFromMention(
+        quotedMeetingMessage, classification, urgency, meetingSentAt.AddHours(1), timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 28, 9, 0, 0, TimeSpan.FromHours(8)),
+        meetingTodo.DueAt,
+        "A referenced meeting start time should take precedence over the relative Wednesday date.");
 
     return Task.CompletedTask;
 }
@@ -630,12 +663,13 @@ static async Task TestDeepSeekMentionAnalysisAsync()
 
     var message = CreateMessage(9100, "验收群", "王工", "@我 请今天确认验收时间");
     var handler = new RecordingModelHttpMessageHandler(CreateResponse(
-        "{\"priority\":\"P1\",\"description\":\"  请今天确认验收时间。  \"}"));
+        "{\"shouldCreate\":true,\"priority\":\"P1\",\"description\":\"  请今天确认验收时间。  \"}"));
     using var http = new HttpClient(handler);
     var model = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", http);
 
     var analysis = await model.AnalyzeMentionAsync(message, CancellationToken.None);
 
+    AssertTrue(analysis.ShouldCreate, "An actionable mention should be approved for automatic Todo creation.");
     AssertEqual(PriorityLevel.P1, analysis.Priority, "The Agent should return the automatic Todo priority.");
     AssertEqual("请今天确认验收时间。", analysis.Description, "The Agent summary should be trimmed.");
     AssertEqual("sk-analysis-test", handler.AuthorizationParameter, "Analysis requests must use the saved Bearer key.");
@@ -663,12 +697,21 @@ static async Task TestDeepSeekMentionAnalysisAsync()
 
     // 空白说明不会丢弃已返回的有效优先级，后续由待办工厂回退默认说明。
     var blankHandler = new RecordingModelHttpMessageHandler(CreateResponse(
-        "{\"priority\":\"P3\",\"description\":\" \\n\\t \"}"));
+        "{\"shouldCreate\":true,\"priority\":\"P3\",\"description\":\" \\n\\t \"}"));
     using var blankHttp = new HttpClient(blankHandler);
     var blankModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", blankHttp);
     var blankAnalysis = await blankModel.AnalyzeMentionAsync(message, CancellationToken.None);
     AssertEqual(PriorityLevel.P3, blankAnalysis.Priority, "A blank summary must preserve the parsed priority.");
     AssertEqual<string?>(null, blankAnalysis.Description, "A blank summary should request the default Todo description.");
+
+    // 模型对无关或低优先级消息可以明确否决创建，解析层必须保留该决定。
+    var skipHandler = new RecordingModelHttpMessageHandler(CreateResponse(
+        "{\"shouldCreate\":false,\"priority\":\"P3\",\"description\":\"仅同步进展，无需处理\"}"));
+    using var skipHttp = new HttpClient(skipHandler);
+    var skipModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", skipHttp);
+    var skipAnalysis = await skipModel.AnalyzeMentionAsync(message, CancellationToken.None);
+    AssertFalse(skipAnalysis.ShouldCreate, "The model's no-Todo decision must survive JSON parsing.");
+    AssertEqual(PriorityLevel.P3, skipAnalysis.Priority, "A skipped item should retain its analyzed priority.");
 }
 
 static async Task TestReminderSnoozeAsync()
@@ -3323,6 +3366,16 @@ static Task TestShihuatongMessageContentDecoderAsync()
 
     AssertEqual(text, decoded, "Decoder should read field 2 CoreIMTextMessage field 1 text.");
     AssertEqual<string?>(null, ShihuatongMessageContentDecoder.TryDecodeText(Array.Empty<byte>()), "Empty payload should not produce text.");
+
+    // 引用会议必须保留完整正文和时间，供原始消息、待办说明及截止日解析共同使用。
+    const string quotedMeeting = "李工 邀请您参加腾讯会议\n会议时间：2026/10/28 09:00-12:00";
+    var combined = ShihuatongLocalDatabaseReader.CombineWithReference(text, quotedMeeting);
+    AssertEqual($"{text}\n\n引用消息：\n{quotedMeeting}", combined,
+        "A referenced meeting should be appended with an explicit boundary.");
+    AssertEqual(combined, ShihuatongLocalDatabaseReader.CombineWithReference(combined, quotedMeeting),
+        "An already included reference must not be duplicated.");
+    AssertEqual(text, ShihuatongLocalDatabaseReader.CombineWithReference(text, " \n\t"),
+        "A blank reference should leave the current content unchanged.");
     return Task.CompletedTask;
 }
 
@@ -4127,6 +4180,15 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
             return Task.FromResult(new MentionMessageAnalysis(PriorityLevel.P1, "  请今天确认验收时间。  "));
         }
 
+        if (message.SourceMessageKey == "summary-skip")
+        {
+            // 明确返回 false，模拟无关或低优先级消息无需形成待办。
+            return Task.FromResult(new MentionMessageAnalysis(
+                PriorityLevel.P3,
+                "仅同步进展，无需处理",
+                ShouldCreate: false));
+        }
+
         if (message.SourceMessageKey == "summary-failure")
         {
             throw new InvalidOperationException("模拟模型故障");
@@ -4193,6 +4255,13 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     AssertEqual(1, failureResult.CreatedTodoCount, "A model failure must still create an automatic Todo.");
     AssertEqual(1, blankResult.CreatedTodoCount, "A blank summary must still create an automatic Todo.");
 
+    // 只有模型成功且明确否决时才跳过待办，原始消息及分类评分仍正常入库。
+    var skipResult = await pipeline.ProcessAsync(
+        new[] { Capture("summary-skip", "@所有人 本周版本已按计划发布") },
+        CancellationToken.None);
+    AssertEqual(1, skipResult.PersistedCount, "A skipped Todo must not prevent its source message from persisting.");
+    AssertEqual(0, skipResult.CreatedTodoCount, "A model-approved skip must not create an automatic Todo.");
+
     // 重复消息仍由工作单元去重，但摘要前预检应阻止第二次模型调用。
     var callsBeforeDuplicate = analysisCalls.Count;
     var duplicateResult = await pipeline.ProcessAsync(
@@ -4216,8 +4285,8 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     AssertTrue(cancellationPropagated, "External cancellation during summarization must propagate.");
     var messages = await messageRepository.GetRecentAsync(20, CancellationToken.None);
     var todos = await todoRepository.GetPendingAsync(CancellationToken.None);
-    AssertEqual(5, messages.Count, "Only five non-duplicate, non-cancelled messages should persist.");
-    AssertEqual(4, todos.Count, "Only the four persisted mention messages should create Todos.");
+    AssertEqual(6, messages.Count, "All six non-duplicate, non-cancelled messages should persist, including the skipped Todo source.");
+    AssertEqual(4, todos.Count, "Only the four model-approved or fallback mention messages should create Todos.");
 
     // 通过来源消息键定位待办，避免依赖仓储的排序规则。
     TodoItem TodoFor(string key)
@@ -4249,16 +4318,26 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
 
     // 消息流继续读取本地 urgency_scores，不能使用自动待办的 Agent 优先级。
     var analyzedMessageIds = messages
-        .Where(message => message.SourceMessageKey is "summary-on" or "summary-blank")
+        .Where(message => message.SourceMessageKey is "summary-on" or "summary-blank" or "summary-skip")
         .Select(message => message.Id)
         .ToArray();
     var messagePriorities = await new SqliteTodoSuggestionRepository(databasePath)
         .GetEffectivePrioritiesAsync(analyzedMessageIds, CancellationToken.None);
-    AssertTrue(messagePriorities.Values.All(priority => priority == PriorityLevel.P2),
-        "Agent priorities must not change message feed priorities.");
+    AssertEqual(PriorityLevel.P2,
+        messagePriorities[messages.Single(message => message.SourceMessageKey == "summary-on").Id],
+        "The Agent P1 must not replace the local P2 message priority.");
+    AssertEqual(PriorityLevel.P2,
+        messagePriorities[messages.Single(message => message.SourceMessageKey == "summary-blank").Id],
+        "The Agent P0 must not replace the local P2 message priority.");
+    var skippedMessage = messages.Single(message => message.SourceMessageKey == "summary-skip");
+    // 跳过消息没有“今天”等本地加分词，因此应保留本地 P3，而非统一按其他消息断言。
+    AssertEqual(PriorityLevel.P3, messagePriorities[skippedMessage.Id],
+        "A skipped Todo must keep its independent local message priority.");
     var normalMessage = messages.Single(message => message.SourceMessageKey == "summary-normal");
     AssertFalse(todos.Any(todo => todo.SourceMessageId == normalMessage.Id),
         "The non-mention message should not have a Todo.");
+    AssertFalse(todos.Any(todo => todo.SourceMessageId == skippedMessage.Id),
+        "The rejected message should persist without any automatic Todo.");
     AssertFalse(messages.Any(message => message.SourceMessageKey == "summary-cancel"),
         "A cancelled message should not enter the database transaction.");
 }

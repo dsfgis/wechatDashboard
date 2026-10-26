@@ -584,7 +584,8 @@
                                       Content="分析消息内容"
                                       Click="AnalyzeMessageContentCheckBox_Click"
                                       Margin="0,8,0,4" />
-                            <TextBlock Text="开启后仅总结之后新入库的 @我 消息，并写入待办说明；模型失败时仍按原逻辑自动创建待办。"
+                            <!-- 明确说明智能筛选范围与模型故障时的保守回退行为。 -->
+                            <TextBlock Text="开启后由大模型判断之后新入库的 @我 消息是否需要创建待办，并生成优先级和说明；低优先级或与你无关的消息仅入库，模型失败时仍按原逻辑自动创建待办。"
                                        Foreground="#6B7280"
                                        TextWrapping="Wrap"
                                        Margin="0,0,0,8" />
