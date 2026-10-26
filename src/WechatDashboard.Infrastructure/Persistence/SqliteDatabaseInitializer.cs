@@ -481,21 +481,6 @@ public sealed class SqliteDatabaseInitializer
             FOREIGN KEY(message_id) REFERENCES messages(id)
         );
 
-        -- 模型判断独立于采集事务；按消息唯一保存，待办必须经用户确认。
-        CREATE TABLE IF NOT EXISTS todo_suggestions (
-            message_id INTEGER PRIMARY KEY,
-            decision TEXT NOT NULL,
-            priority TEXT NOT NULL,
-            title TEXT NULL,
-            description TEXT NULL,
-            due_at TEXT NULL,
-            reason TEXT NOT NULL,
-            question TEXT NULL,
-            review_status TEXT NOT NULL,
-            analyzed_at TEXT NOT NULL,
-            FOREIGN KEY(message_id) REFERENCES messages(id)
-        );
-
         -- 待办表
         CREATE TABLE IF NOT EXISTS todo_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

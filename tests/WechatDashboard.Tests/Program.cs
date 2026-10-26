@@ -37,7 +37,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo workbench summary matches its mutually exclusive visible groups", TestTodoWorkbenchBucketSummaryAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
-    ("Todo suggestion agent asks for context and persists a reviewed proposal", TestTodoSuggestionAgentAsync),
+    ("Message feed manual conversion applies Agent output with safe fallback", TestMessageFeedManualAgentConversionAsync),
+    ("Manual Agent priority stays isolated and rolls back with Todo failures", TestManualAgentPriorityTransactionAsync),
     ("DeepSeek model uses saved API key and preserves environment fallback", TestDeepSeekMessageActionModelAsync),
     ("DeepSeek mention analysis returns creation decision, priority and summary JSON", TestDeepSeekMentionAnalysisAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
@@ -500,74 +501,201 @@ static async Task TestMessageTodoStateLookupAsync()
     AssertFalse(states.ContainsKey(noTodoMessage.Id), "A message without a Todo must remain convertible.");
 }
 
-static async Task TestTodoSuggestionAgentAsync()
+static async Task TestMessageFeedManualAgentConversionAsync()
 {
+    // 使用真实消息流、SQLite 工作单元和假模型覆盖完整手动点击链路。
     var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
     Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
     await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
-    var messages = new SqliteMessageRepository(databasePath);
-    var earlier = await messages.SaveAsync(CreateMessage(0, "验收群", "王工", "验收材料还差附件") with
-    {
-        SourceMessageKey = $"suggestion-context-{Guid.NewGuid():N}"
-    }, CancellationToken.None);
-    var unrelated = await messages.SaveAsync(CreateMessage(0, "另一群", "李工", "无关的敏感讨论") with
-    {
-        SourceMessageKey = $"suggestion-unrelated-{Guid.NewGuid():N}",
-        ChatSessionId = earlier.ChatSessionId + 100,
-        SentAt = earlier.SentAt.AddSeconds(30)
-    }, CancellationToken.None);
-    var anchor = await messages.SaveAsync(CreateMessage(0, "验收群", "王工", "周三前把材料提交给我") with
-    {
-        SourceMessageKey = $"suggestion-anchor-{Guid.NewGuid():N}",
-        ChatSessionId = earlier.ChatSessionId,
-        SentAt = earlier.SentAt.AddMinutes(1)
-    }, CancellationToken.None);
-    var dueAt = new DateTimeOffset(2026, 8, 26, 18, 0, 0, TimeSpan.FromHours(8));
-    var model = new FakeMessageActionModel(
-        new MessageActionDraft(MessageActionDecision.NeedContext, PriorityLevel.P2, null, null, null, "需要前文", null),
-        new MessageActionDraft(MessageActionDecision.SuggestTodo, PriorityLevel.P1, "提交验收材料", "补齐附件后提交", dueAt, "前后文明确了附件", null));
-    var suggestions = new SqliteTodoSuggestionRepository(databasePath);
-    var agent = new TodoSuggestionAgent(messages, suggestions, model, new FixedClock(dueAt.AddDays(-2)));
-    var suggestion = await agent.AnalyzeAsync(anchor.Id, CancellationToken.None);
-    AssertEqual(2, model.Calls.Count, "The agent should fetch context only after the model requests it.");
-    AssertEqual(0, model.Calls[0].Context.Count, "The first call should use the anchor only.");
-    AssertTrue(model.Calls[1].Context.Any(message => message.Id == earlier.Id), "The second call should include adjacent messages.");
-    AssertFalse(model.Calls[1].Context.Any(message => message.Id == unrelated.Id),
-        "The agent must not disclose an unrelated conversation as context.");
-    AssertEqual("提交验收材料", suggestion.Title, "The actionable title should come from the model proposal.");
-    AssertEqual(PriorityLevel.P1, suggestion.Priority, "The model's priority should be persisted.");
-    AssertEqual(PriorityLevel.P1, (await suggestions.GetEffectivePrioritiesAsync(new[] { anchor.Id }, CancellationToken.None))[anchor.Id],
-        "Message-feed priority should use the saved agent decision.");
-    var cached = await agent.AnalyzeAsync(anchor.Id, CancellationToken.None);
-    AssertEqual(2, model.Calls.Count, "Reopening a saved suggestion should not send message text again.");
-    AssertEqual(suggestion.Title, cached.Title, "Cached suggestions should remain available.");
-    var todo = await new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(dueAt.AddDays(-2)))
-        .CreateFromMessageAsync(new CreateTodoFromMessageRequest(anchor.Id, suggestion.Title, suggestion.Description,
-            null, suggestion.Priority, suggestion.DueAt, null), CancellationToken.None);
-    AssertEqual(CreateTodoOutcome.Created, todo.Outcome, "A confirmed suggestion should use the existing Todo use case.");
-    await suggestions.SetReviewStatusAsync(anchor.Id, TodoSuggestionReviewStatus.Accepted, CancellationToken.None);
-    AssertEqual(TodoSuggestionReviewStatus.Accepted, (await suggestions.GetAsync(anchor.Id, CancellationToken.None))!.ReviewStatus,
-        "Review state should survive a refresh.");
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var now = new DateTimeOffset(2026, 8, 24, 10, 0, 0, TimeSpan.FromHours(8));
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
 
-    var ambiguous = await messages.SaveAsync(CreateMessage(0, "验收群", "王工", "那个也处理一下") with
+    // 每条消息先写入本地 P2，便于区分手动 Agent 覆盖与模型失败回退。
+    async Task<Message> SaveMessageAsync(string key, string content)
     {
-        SourceMessageKey = $"suggestion-ambiguous-{Guid.NewGuid():N}",
-        ChatSessionId = earlier.ChatSessionId,
-        SentAt = anchor.SentAt.AddMinutes(1)
-    }, CancellationToken.None);
-    var clarifyingModel = new FakeMessageActionModel(
-        new MessageActionDraft(MessageActionDecision.AskUser, PriorityLevel.P2, null, null, null,
-            "缺少具体对象", "需要处理哪份材料？"),
-        new MessageActionDraft(MessageActionDecision.SuggestTodo, PriorityLevel.P2, "补齐验收附件", null, null,
-            "用户确认了具体对象", null));
-    var clarifyingAgent = new TodoSuggestionAgent(messages, suggestions, clarifyingModel, new FixedClock(dueAt));
-    var question = await clarifyingAgent.AnalyzeAsync(ambiguous.Id, CancellationToken.None);
-    AssertEqual(MessageActionDecision.AskUser, question.Decision, "Ambiguous input should ask the user before making a Todo.");
-    var revised = await clarifyingAgent.ClarifyAsync(ambiguous.Id, "验收附件", CancellationToken.None);
-    AssertEqual("验收附件", clarifyingModel.Calls[1].UserAnswer, "Clarification must reach the model.");
-    AssertEqual("补齐验收附件", revised.Title, "A reply should replace the pending question with a concrete proposal.");
-    AssertEqual(MessageActionDecision.SuggestTodo, (await suggestions.GetAsync(ambiguous.Id, CancellationToken.None))!.Decision,
-        "The revised proposal should survive refresh.");
+        var saved = await messageRepository.SaveAsync(
+            CreateMessage(0, "项目协作群", "李工", content) with { SourceMessageKey = key },
+            CancellationToken.None);
+        await InsertUrgencyScoreAsync(databasePath, saved.Id, 50, PriorityLevel.P2, "本地测试评分");
+        return saved;
+    }
+
+    var actionable = await SaveMessageAsync("manual-agent-success", "请今天确认验收时间");
+    var skipped = await SaveMessageAsync("manual-agent-skip", "本周版本已按计划发布");
+    var blank = await SaveMessageAsync("manual-agent-blank", "请核对验收附件");
+    var failure = await SaveMessageAsync("manual-agent-failure", "请回复接口字段");
+    var model = new FakeMessageActionModel(
+        new MentionMessageAnalysis(PriorityLevel.P1, "  请今天确认验收时间并回复。  "),
+        new MentionMessageAnalysis(PriorityLevel.P3, "本周版本已按计划发布。", ShouldCreate: false),
+        new MentionMessageAnalysis(PriorityLevel.P0, " \n\t "));
+    var shown = new TaskCompletionSource<CreateTodoResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var feed = new MessageFeedViewModel(
+        messageRepository,
+        todoRepository,
+        todoService,
+        model,
+        () => Array.Empty<string>(),
+        () => Array.Empty<string>(),
+        () => FollowedChatFilterMode.Include,
+        result =>
+        {
+            // async void 命令通过现有导航回调通知测试本次创建已完成。
+            shown.TrySetResult(result);
+            return Task.CompletedTask;
+        });
+
+    async Task<CreateTodoResult> ConvertAsync(long messageId)
+    {
+        shown = new TaskCompletionSource<CreateTodoResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        feed.ConvertToTodoCommand.Execute(messageId);
+        return await shown.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    async Task<PriorityLevel> EffectivePriorityAsync(long messageId)
+    {
+        var priorities = await messageRepository.GetEffectivePrioritiesAsync(new[] { messageId }, CancellationToken.None);
+        return priorities[messageId];
+    }
+
+    await feed.RefreshAsync();
+    var created = await ConvertAsync(actionable.Id);
+
+    // 非 @我 消息同样调用 Agent，摘要和优先级同时进入待办与消息流评分。
+    AssertEqual(CreateTodoOutcome.Created, created.Outcome, "A manual click should create a Todo after Agent analysis.");
+    AssertEqual("请今天确认验收时间并回复。", created.Todo!.Description, "The manual Todo should use the trimmed Agent summary.");
+    AssertEqual(PriorityLevel.P1, created.Todo.Priority, "The manual Todo should use the Agent priority.");
+    AssertEqual(PriorityLevel.P1, await EffectivePriorityAsync(actionable.Id),
+        "A successful manual analysis should append the Agent message-feed priority.");
+    AssertEqual(1, model.Calls.Count, "The first manual conversion should invoke the Agent once.");
+    AssertEqual(2, await CountUrgencyScoresAsync(databasePath, actionable.Id),
+        "The Agent score should be appended after the original local score.");
+    var actionRow = feed.Items.Single(item => item.MessageId == actionable.Id);
+    AssertEqual(actionable.Content, actionRow.RawContent, "The message feed must keep the original content instead of the Agent summary.");
+    AssertEqual("P1", actionRow.Priority, "The refreshed message row should show the Agent priority.");
+
+    // 已有待办直接幂等打开，不再次分析，也不追加评分。
+    var existing = await ConvertAsync(actionable.Id);
+    AssertEqual(CreateTodoOutcome.ExistingTodo, existing.Outcome, "A repeated click should open the existing Todo.");
+    AssertEqual(created.Todo.Id, existing.Todo!.Id, "A repeated click should preserve the original Todo.");
+    AssertEqual(1, model.Calls.Count, "An existing Todo must not trigger another Agent call.");
+    AssertEqual(2, await CountUrgencyScoresAsync(databasePath, actionable.Id),
+        "An existing Todo must not append another Agent score.");
+
+    // 手动点击是明确创建指令，即使模型返回 shouldCreate=false 也不能跳过。
+    var skippedResult = await ConvertAsync(skipped.Id);
+    AssertEqual(CreateTodoOutcome.Created, skippedResult.Outcome,
+        "A manual click must ignore the model's automatic-creation rejection.");
+    AssertEqual("本周版本已按计划发布。", skippedResult.Todo!.Description,
+        "A rejected automatic action can still provide a neutral manual-Todo summary.");
+    AssertEqual(PriorityLevel.P3, await EffectivePriorityAsync(skipped.Id),
+        "The manually requested Todo should still use the returned Agent priority.");
+
+    // 空白说明回退默认正文，但成功返回的 Agent 优先级仍然生效。
+    var blankResult = await ConvertAsync(blank.Id);
+    AssertEqual(CreateTodoOutcome.Created, blankResult.Outcome, "A blank Agent summary must not block manual creation.");
+    AssertEqual($"项目协作群 / 李工: {blank.Content}", blankResult.Todo!.Description,
+        "A blank Agent summary should use the standard source-message description.");
+    AssertEqual(PriorityLevel.P0, blankResult.Todo.Priority, "A blank summary must not discard the Agent Todo priority.");
+    AssertEqual(PriorityLevel.P0, await EffectivePriorityAsync(blank.Id),
+        "A blank summary must not discard the Agent message-feed priority.");
+
+    // 模型异常只影响分析结果，待办仍按原文和最后的本地评分创建。
+    model.Exception = new InvalidOperationException("模拟模型故障");
+    var failureResult = await ConvertAsync(failure.Id);
+    AssertEqual(CreateTodoOutcome.Created, failureResult.Outcome, "A model failure must not block manual Todo creation.");
+    AssertEqual($"项目协作群 / 李工: {failure.Content}", failureResult.Todo!.Description,
+        "A model failure should fall back to the default source-message description.");
+    AssertEqual(PriorityLevel.P2, failureResult.Todo.Priority, "A model failure should retain the local Todo priority.");
+    AssertEqual(PriorityLevel.P2, await EffectivePriorityAsync(failure.Id),
+        "A model failure must not replace the local message-feed priority.");
+    AssertEqual(1, await CountUrgencyScoresAsync(databasePath, failure.Id),
+        "A model failure must not append an Agent score.");
+    AssertTrue(feed.StatusText.Contains("模型分析失败", StringComparison.Ordinal),
+        "The status should explain that the Todo was created through the fallback path.");
+    AssertEqual(4, model.Calls.Count, "Only four new manual conversions should invoke the Agent.");
+}
+
+static async Task TestManualAgentPriorityTransactionAsync()
+{
+    // 独立验证普通 Priority 不写消息评分，以及 Agent 评分与待办的原子性。
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var now = new DateTimeOffset(2026, 8, 24, 10, 0, 0, TimeSpan.FromHours(8));
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+
+    async Task<Message> SaveMessageAsync(string key)
+    {
+        var saved = await messageRepository.SaveAsync(
+            CreateMessage(0, "事务测试群", "测试员", "请处理事务验证") with { SourceMessageKey = key },
+            CancellationToken.None);
+        await InsertUrgencyScoreAsync(databasePath, saved.Id, 50, PriorityLevel.P2, "本地测试评分");
+        return saved;
+    }
+
+    async Task<PriorityLevel> EffectivePriorityAsync(long messageId)
+    {
+        var priorities = await messageRepository.GetEffectivePrioritiesAsync(new[] { messageId }, CancellationToken.None);
+        return priorities[messageId];
+    }
+
+    // 普通 Priority 只修改待办，不得被误当成 Agent 评分覆盖消息流。
+    var ordinaryMessage = await SaveMessageAsync("manual-ordinary-priority");
+    var ordinary = await service.CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(
+            ordinaryMessage.Id, null, null, null, PriorityLevel.P0, null, null),
+        CancellationToken.None);
+    AssertEqual(CreateTodoOutcome.Created, ordinary.Outcome, "The ordinary manual request should create its Todo.");
+    AssertEqual(PriorityLevel.P0, ordinary.Todo!.Priority, "The ordinary request should still control Todo priority.");
+    AssertEqual(PriorityLevel.P2, await EffectivePriorityAsync(ordinaryMessage.Id),
+        "An ordinary Todo priority must not rewrite the message-feed score.");
+    AssertEqual(1, await CountUrgencyScoresAsync(databasePath, ordinaryMessage.Id),
+        "An ordinary Todo priority must not append an urgency score.");
+
+    // 工作单元复查到已有待办时，应在 Agent 评分写入前返回。
+    var existing = await service.CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(
+            ordinaryMessage.Id, null, null, null, null, null, null, AgentPriority: PriorityLevel.P1),
+        CancellationToken.None);
+    AssertEqual(CreateTodoOutcome.ExistingTodo, existing.Outcome, "The transactional recheck should reuse the existing Todo.");
+    AssertEqual(1, await CountUrgencyScoresAsync(databasePath, ordinaryMessage.Id),
+        "The transactional existing-Todo path must not append an Agent score.");
+
+    // 删除提醒表制造后续写入故障，验证 Agent 评分和新待办一起回滚。
+    var rollbackMessage = await SaveMessageAsync("manual-agent-rollback");
+    await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await connection.OpenAsync(CancellationToken.None);
+        await using var drop = connection.CreateCommand();
+        drop.CommandText = "DROP TABLE todo_reminders;";
+        await drop.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    var failureObserved = false;
+    try
+    {
+        await service.CreateFromMessageAsync(
+            new CreateTodoFromMessageRequest(
+                rollbackMessage.Id, null, null, null, null, null, now.AddHours(1),
+                AgentPriority: PriorityLevel.P0),
+            CancellationToken.None);
+    }
+    catch (SqliteException)
+    {
+        failureObserved = true;
+    }
+
+    AssertTrue(failureObserved, "The test should force a reminder failure after the Agent score insert.");
+    AssertEqual(1, await CountUrgencyScoresAsync(databasePath, rollbackMessage.Id),
+        "A failed Todo transaction must roll back its appended Agent score.");
+    AssertEqual(PriorityLevel.P2, await EffectivePriorityAsync(rollbackMessage.Id),
+        "A failed Todo transaction must leave the local message-feed score unchanged.");
+    AssertTrue(await todoRepository.GetBySourceMessageIdAsync(rollbackMessage.Id, CancellationToken.None) is null,
+        "A failed reminder insert must also roll back the new Todo.");
 }
 
 static async Task TestDeepSeekMessageActionModelAsync()
@@ -582,13 +710,9 @@ static async Task TestDeepSeekMessageActionModelAsync()
     var originalValues = variableNames.ToDictionary(name => name, name => Environment.GetEnvironmentVariable(name));
     var modelResult = JsonSerializer.Serialize(new
     {
-        decision = "NO_ACTION",
+        shouldCreate = false,
         priority = "P3",
-        title = (string?)null,
-        description = (string?)null,
-        dueAt = (DateTimeOffset?)null,
-        reason = "无需行动",
-        question = (string?)null
+        description = "验收时间已同步。"
     });
     var responseBody = JsonSerializer.Serialize(new
     {
@@ -604,16 +728,14 @@ static async Task TestDeepSeekMessageActionModelAsync()
         Environment.SetEnvironmentVariable(variableNames[0], "https://fallback.example/v1/chat/completions");
         Environment.SetEnvironmentVariable(variableNames[1], "fallback-model");
         Environment.SetEnvironmentVariable(variableNames[2], "fallback-key");
-        var request = new MessageActionRequest(
-            CreateMessage(9001, "验收群", "王工", "请确认验收时间"),
-            Array.Empty<Message>(),
-            DateTimeOffset.Now);
+        var message = CreateMessage(9001, "验收群", "王工", "请确认验收时间");
         var savedHandler = new RecordingModelHttpMessageHandler(responseBody);
         using var savedHttp = new HttpClient(savedHandler);
         var savedModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-saved-test", savedHttp);
-        var savedDraft = await savedModel.EvaluateAsync(request, CancellationToken.None);
+        var savedAnalysis = await savedModel.AnalyzeMentionAsync(message, CancellationToken.None);
 
-        AssertEqual(MessageActionDecision.NoAction, savedDraft.Decision, "DeepSeek response should use the existing parser.");
+        AssertFalse(savedAnalysis.ShouldCreate, "DeepSeek response should use the retained analysis parser.");
+        AssertEqual("验收时间已同步。", savedAnalysis.Description, "The saved-key response should preserve its neutral summary.");
         AssertEqual("https://api.deepseek.com/chat/completions", savedHandler.RequestUri?.ToString(),
             "A saved API key must select the fixed DeepSeek endpoint.");
         AssertEqual("sk-saved-test", savedHandler.AuthorizationParameter, "The saved API key must be used for Bearer auth.");
@@ -630,7 +752,7 @@ static async Task TestDeepSeekMessageActionModelAsync()
         var fallbackHandler = new RecordingModelHttpMessageHandler(responseBody);
         using var fallbackHttp = new HttpClient(fallbackHandler);
         var fallbackModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment(null, fallbackHttp);
-        await fallbackModel.EvaluateAsync(request, CancellationToken.None);
+        await fallbackModel.AnalyzeMentionAsync(message, CancellationToken.None);
         AssertEqual("https://fallback.example/v1/chat/completions", fallbackHandler.RequestUri?.ToString(),
             "Missing saved key should preserve the environment endpoint.");
         AssertEqual("fallback-key", fallbackHandler.AuthorizationParameter, "Environment API key fallback should remain available.");
@@ -863,7 +985,6 @@ static async Task TestMessageFeedContextSurvivesRefreshAsync()
     await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
     var messageRepository = new SqliteMessageRepository(databasePath);
     var todoRepository = new SqliteTodoRepository(databasePath);
-    var suggestionRepository = new SqliteTodoSuggestionRepository(databasePath);
     var todoService = new TodoApplicationService(
         new SqliteTodoUnitOfWork(databasePath),
         new FixedClock(new DateTimeOffset(2026, 8, 9, 10, 0, 0, TimeSpan.FromHours(8))));
@@ -884,9 +1005,7 @@ static async Task TestMessageFeedContextSurvivesRefreshAsync()
         messageRepository,
         todoRepository,
         todoService,
-        suggestionRepository,
-        new TodoSuggestionAgent(messageRepository, suggestionRepository, new FakeMessageActionModel(),
-            new FixedClock(sentAt)),
+        new FakeMessageActionModel(),
         () => Array.Empty<string>(),
         () => Array.Empty<string>(),
         () => FollowedChatFilterMode.Include,
@@ -4321,7 +4440,7 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
         .Where(message => message.SourceMessageKey is "summary-on" or "summary-blank" or "summary-skip")
         .Select(message => message.Id)
         .ToArray();
-    var messagePriorities = await new SqliteTodoSuggestionRepository(databasePath)
+    var messagePriorities = await messageRepository
         .GetEffectivePrioritiesAsync(analyzedMessageIds, CancellationToken.None);
     AssertEqual(PriorityLevel.P2,
         messagePriorities[messages.Single(message => message.SourceMessageKey == "summary-on").Id],
@@ -4889,6 +5008,23 @@ static async Task TestNativeWeChatReaderAsync()
         var dtdPayload = "<!DOCTYPE msg [<!ENTITY xxe SYSTEM 'file:///not-allowed'>]><msg>&xxe;</msg>";
         AssertEqual("[图片]", contentDecoder.Summarize(dtdPayload, 3), "DTD content must be rejected without returning the raw payload.");
         AssertEqual("[图片]", contentDecoder.Summarize("<msg><img>", 3), "Malformed XML should degrade to a safe type summary.");
+        const string referencedContent = "项目周会\n时间：2026/10/28 09:00-12:00\n参会人：张三 & 李工";
+        const string referencedReply =
+            "<msg><appmsg><title>本周三请参加会议</title><type>57</type>" +
+            "<refermsg><type>1</type><content>项目周会\n时间：2026/10/28 09:00-12:00\n参会人：张三 &amp; 李工</content></refermsg>" +
+            "</appmsg></msg>";
+        // 引用回复应保留当前标题，并由 XML 解码器还原文本实体后追加完整引用。
+        AssertEqual("[链接] 本周三请参加会议\n\n引用消息：\n" + referencedContent, contentDecoder.Summarize(referencedReply, 49), "WeChat refermsg content should follow the current reply.");
+        // 没有 refermsg 时只返回当前回复，不添加空引用标记。
+        AssertEqual("[链接] 无引用回复", contentDecoder.Summarize("<msg><appmsg><title>无引用回复</title><type>57</type></appmsg></msg>", 49), "A missing refermsg should leave the reply unchanged.");
+        // 空白引用正文不应产生多余分隔符或引用标题。
+        AssertEqual("[链接] 空引用回复", contentDecoder.Summarize("<msg><appmsg><title>空引用回复</title><type>57</type><refermsg><content>  </content></refermsg></appmsg></msg>", 49), "A blank refermsg should be ignored.");
+        // 当前摘要已含相同正文时不重复拼接，避免模型收到重复内容。
+        AssertEqual("[链接] 项目周会", contentDecoder.Summarize("<msg><appmsg><title>项目周会</title><type>57</type><refermsg><content>项目周会</content></refermsg></appmsg></msg>", 49), "An already included reference should not be duplicated.");
+        // 非引用类型即使带有 refermsg 节点，也必须保持既有摘要规则。
+        AssertEqual("[链接] 普通链接 - 说明 https://example.test", contentDecoder.Summarize("<msg><appmsg><title>普通链接</title><des>说明</des><type>5</type><url>https://example.test</url><refermsg><content>不应合并</content></refermsg></appmsg></msg>", 49), "Ordinary links must not merge refermsg content.");
+        AssertEqual("[文件]", contentDecoder.Summarize("<msg><appmsg><title>文件</title><type>6</type><refermsg><content>不应合并</content></refermsg></appmsg></msg>", 49), "File messages must retain their existing summary.");
+        AssertEqual("普通文本", contentDecoder.Summarize("  普通文本  ", 1), "Plain text should only be trimmed.");
         AssertEqual("", contentDecoder.DecodeContent(new byte[] { 0x28, 0xB5, 0x2F, 0xFD, 0x00 }, 1), "Corrupt zstd should fail closed.");
         var mention = all.Messages.Single(message => message.Content.Contains("@张三", StringComparison.Ordinal));
         AssertEqual("Alice", mention.SenderName, "Name2Id and contact display names should resolve the group sender.");
@@ -5164,6 +5300,40 @@ static byte[] CreateV4PageFixture(byte[] databaseKey, int reserveSize)
         CryptographicOperations.ZeroMemory(macSalt);
         CryptographicOperations.ZeroMemory(macKey);
     }
+}
+
+/// <summary>为手动转待办测试写入一条本地评分基线。</summary>
+static async Task InsertUrgencyScoreAsync(
+    string databasePath,
+    long messageId,
+    int score,
+    PriorityLevel priority,
+    string reason)
+{
+    await using var connection = new SqliteConnection($"Data Source={databasePath}");
+    await connection.OpenAsync(CancellationToken.None);
+    await using var command = connection.CreateCommand();
+    command.CommandText = """
+        INSERT INTO urgency_scores (message_id, score, priority, reason, calculated_at)
+        VALUES ($messageId, $score, $priority, $reason, $calculatedAt);
+        """;
+    command.Parameters.AddWithValue("$messageId", messageId);
+    command.Parameters.AddWithValue("$score", score);
+    command.Parameters.AddWithValue("$priority", priority.ToString());
+    command.Parameters.AddWithValue("$reason", reason);
+    command.Parameters.AddWithValue("$calculatedAt", DateTimeOffset.Now.ToString("O"));
+    await command.ExecuteNonQueryAsync(CancellationToken.None);
+}
+
+/// <summary>读取评分行数，验证追加、幂等和事务回滚行为。</summary>
+static async Task<int> CountUrgencyScoresAsync(string databasePath, long messageId)
+{
+    await using var connection = new SqliteConnection($"Data Source={databasePath}");
+    await connection.OpenAsync(CancellationToken.None);
+    await using var command = connection.CreateCommand();
+    command.CommandText = "SELECT COUNT(*) FROM urgency_scores WHERE message_id = $messageId;";
+    command.Parameters.AddWithValue("$messageId", messageId);
+    return Convert.ToInt32(await command.ExecuteScalarAsync(CancellationToken.None), CultureInfo.InvariantCulture);
 }
 
 static Message CreateMessage(long id, string chatName, string senderName, string content)
@@ -5474,15 +5644,25 @@ public sealed class RecordingModelHttpMessageHandler(string responseBody) : Http
     }
 }
 
-public sealed class FakeMessageActionModel(params MessageActionDraft[] responses) : IMessageActionModel
+/// <summary>按队列返回手动或自动待办分析结果，并记录实际发送的单条消息。</summary>
+public sealed class FakeMessageActionModel(params MentionMessageAnalysis[] responses) : IMessageActionModel
 {
-    private readonly Queue<MessageActionDraft> _responses = new(responses);
-    public List<MessageActionRequest> Calls { get; } = new();
+    private readonly Queue<MentionMessageAnalysis> _responses = new(responses);
 
-    public Task<MessageActionDraft> EvaluateAsync(MessageActionRequest request, CancellationToken cancellationToken)
+    public List<Message> Calls { get; } = new();
+
+    /// <summary>设置后模拟模型故障，用于验证手动创建仍安全回退。</summary>
+    public Exception? Exception { get; set; }
+
+    public Task<MentionMessageAnalysis> AnalyzeMentionAsync(Message message, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        Calls.Add(request);
+        Calls.Add(message);
+        if (Exception is not null)
+        {
+            return Task.FromException<MentionMessageAnalysis>(Exception);
+        }
+
         return Task.FromResult(_responses.Dequeue());
     }
 }

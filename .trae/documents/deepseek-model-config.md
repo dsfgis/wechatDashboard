@@ -2,9 +2,9 @@
 
 ## Context
 
-项目已有“消息流 → AI 建议 → OpenAI 兼容 Chat Completions 接口”的完整调用链，但只能在启动时从三个环境变量读取 Endpoint、Model 和 API Key，没有模型配置界面。用户希望固定使用 DeepSeek，在界面填写 API Key 并保存，重启应用后即可调用大模型。
+项目已有“消息流 → 转为待办 → OpenAI 兼容 Chat Completions 接口”和自动待办分析调用链。模型最初只能在启动时从三个环境变量读取 Endpoint、Model 和 API Key，没有模型配置界面。用户希望固定使用 DeepSeek，在界面填写 API Key 并保存，重启应用后即可调用大模型。
 
-采用最小接入方式：内置 DeepSeek 接口和 `deepseek-flash` 模型，界面只管理 API Key；复用现有 Agent、HTTP 适配器和建议持久化逻辑，不增加模型选择、连接测试或运行时热更新。
+采用最小接入方式：内置 DeepSeek 接口和 `deepseek-flash` 模型，界面只管理 API Key；复用现有 Agent、HTTP 适配器和待办创建逻辑，不增加模型选择、连接测试或运行时热更新。
 
 ## 实施方案
 
@@ -20,7 +20,7 @@
 - 修改 `src/WechatDashboard.Infrastructure/Agent/OpenAiCompatibleMessageActionModel.cs`：
   - 内置 `https://api.deepseek.com/chat/completions` 和 `deepseek-flash`。
   - 增加“本机已保存 Key 优先、否则沿用原三个 `WECHATDASHBOARD_AGENT_*` 环境变量”的装配入口。
-  - 仅内置 DeepSeek 配置在请求中加入 `thinking.type=disabled`，避免默认思考过程耗尽现有 800 token 的短 JSON 响应限制；环境变量驱动的其他 OpenAI 兼容请求保持不变。
+  - 仅内置 DeepSeek 配置在请求中加入 `thinking.type=disabled`，避免默认思考过程耗尽现有 400 token 的短 JSON 响应限制；环境变量驱动的其他 OpenAI 兼容请求保持不变。
   - 未配置时的提示增加“模型配置”页引导，现有鉴权、请求、响应解析和错误处理继续复用。
 - 修改 `src/WechatDashboard.App/Services/TodoFeatureCoordinator.cs`，通过构造函数接收 `IMessageActionModel`，不再自行从环境变量创建模型。
 - 修改 `src/WechatDashboard.App/MainWindow.xaml.cs`：在创建 `TodoFeatureCoordinator` 前读取密钥并创建模型。密钥读取失败不阻断其他页面，在模型配置页显示重新保存提示，并保留环境变量回退。
@@ -50,13 +50,16 @@
 1. 执行 Release 还原、构建和现有自定义测试 runner，确保新增及原回归测试全部通过。
 2. 启动应用，在“模型配置”填写有效 DeepSeek API Key 并保存；确认输入框被清空、密文文件存在且不含明文、SQLite 中没有 API Key。
 3. 保存后不重启，确认本次运行仍使用启动时配置；重启后确认页面只显示已保存状态且不回显密钥。
-4. 在“消息流”点击“AI 建议”，使用真实 Key 做一次人工验收，确认 DeepSeek 返回建议且可正常采纳；无有效 Key 时不执行真实外部请求。
+4. 在“消息流”点击“转为待办”，使用真实 Key 做一次人工验收，确认 DeepSeek 返回的说明和优先级写入新待办，且消息流评分同步更新；无有效 Key 时不执行真实外部请求。
 5. 替换 Key 后确认重启才使用新值；清除本机 Key 后确认重启时回退到原环境变量配置（如有）。
 
-## 后续补充（2026-10-25）
+## 后续补充（2026-10-26）
 
 - 模型配置页已增加“分析消息内容”开关。开关持久化到 SQLite 并立即生效，不改变本文规定的 API Key“保存或清除后重启生效”语义。
 - 开启后，新的 `@我` / `@所有人` 消息由 Agent 单次返回 `shouldCreate`、优先级和内容摘要；明确判定无关、低优先级或无需行动时只入库不建待办。
-- 开关关闭或模型失败时仍按原规则创建待办，并保留本地优先级及默认说明；模型故障不会被当成“无需创建”。
-- 自动分析不改写消息流本地评分，不复用手动建议审核流程。石化通引用正文会在采集时合并到当前消息，截止时间仍由本地规则识别会议开始时间或本周日期。
+- 自动分析开关关闭或模型失败时仍按原规则创建待办，并保留本地优先级及默认说明；模型故障不会被当成“无需创建”。
+- 自动分析不改写消息流本地评分。旧“AI 建议”、审核和澄清流程已删除；手动“转为待办”复用同一 Agent 协议，只发送当前消息，已有待办直接打开且不重复分析。
+- 手动点击不受自动开关或提及识别限制，即使 `shouldCreate=false` 也创建；模型失败仍按默认说明和本地优先级创建。
+- 仅手动转换成功分析时，Agent 优先级才同时写入待办和该消息的消息流评分，二者与首个提醒在同一事务提交。Agent 摘要只进入待办说明，不改写消息原文。
+- 旧库中的 `todo_suggestions` 遗留表和数据保留但不再读写，新库不再创建该表。石化通引用正文会在采集时合并到当前消息，截止时间仍由本地规则识别会议开始时间或本周日期。
 - 最新协议、事务边界、引用消息、截止时间和降级规则见 `.trae/documents/model-message-content-analysis.md`。

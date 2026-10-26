@@ -185,6 +185,51 @@ public sealed class SqliteMessageRepository : IMessageRepository
         return messages;
     }
 
+    /// <summary>
+    /// 批量读取最新消息评分，只使用 urgency_scores，不再叠加旧建议结果。
+    /// 自动消息保留本地评分，手动成功分析的消息由最新 Agent 评分覆盖展示。
+    /// </summary>
+    public async Task<IReadOnlyDictionary<long, PriorityLevel>> GetEffectivePrioritiesAsync(
+        IReadOnlyCollection<long> messageIds,
+        CancellationToken cancellationToken)
+    {
+        var distinctIds = messageIds.Where(id => id > 0).Distinct().ToArray();
+        var result = new Dictionary<long, PriorityLevel>(distinctIds.Length);
+        if (distinctIds.Length == 0)
+        {
+            return result;
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        foreach (var batch in distinctIds.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = batch.Select((_, index) => $"$id{index}").ToArray();
+            command.CommandText = $"""
+                SELECT m.id, COALESCE(
+                    (SELECT u.priority FROM urgency_scores u
+                     WHERE u.message_id = m.id ORDER BY u.id DESC LIMIT 1),
+                    'P3')
+                FROM messages m
+                WHERE m.id IN ({string.Join(", ", placeholders)});
+                """;
+            for (var index = 0; index < batch.Length; index++)
+            {
+                command.Parameters.AddWithValue(placeholders[index], batch[index]);
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var raw = reader.GetString(1);
+                result[reader.GetInt64(0)] = Enum.TryParse<PriorityLevel>(raw, out var priority)
+                    && Enum.IsDefined(priority) ? priority : PriorityLevel.P3;
+            }
+        }
+
+        return result;
+    }
+
     public async Task<IReadOnlyList<Message>> GetBySourceKeysAsync(
         IReadOnlyCollection<MessageIdentity> identities,
         CancellationToken cancellationToken)
@@ -516,6 +561,42 @@ public sealed class SqliteMessageRepository : IMessageRepository
             messages.Add(ReadMessage(reader));
         }
         return messages;
+    }
+
+    /// <summary>
+    /// 在调用方事务中追加紧急度评分，供自动采集和手动 Agent 转待办共用。
+    /// 每次分析新增一行，既有本地评分保留用于审计和失败回退。
+    /// </summary>
+    internal static async Task InsertUrgencyAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        UrgencyScore urgency,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO urgency_scores (
+                message_id,
+                score,
+                priority,
+                reason,
+                calculated_at
+            )
+            VALUES (
+                $messageId,
+                $score,
+                $priority,
+                $reason,
+                $calculatedAt
+            );
+            """;
+        command.Parameters.AddWithValue("$messageId", urgency.MessageId);
+        command.Parameters.AddWithValue("$score", urgency.Score);
+        command.Parameters.AddWithValue("$priority", urgency.Priority.ToString());
+        command.Parameters.AddWithValue("$reason", urgency.Reason);
+        command.Parameters.AddWithValue("$calculatedAt", DateTimeOffset.Now.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>绑定消息参数到 INSERT 命令。</summary>

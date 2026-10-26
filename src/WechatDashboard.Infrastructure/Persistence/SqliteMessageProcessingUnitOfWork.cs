@@ -49,7 +49,7 @@ public sealed class SqliteMessageProcessingUnitOfWork : IMessageProcessingUnitOf
                 : artifacts.Todo with { SourceMessageId = savedMessage.Id };
 
             await InsertClassificationAsync(connection, transaction, classification, cancellationToken);
-            await InsertUrgencyAsync(connection, transaction, urgency, cancellationToken);
+            await SqliteMessageRepository.InsertUrgencyAsync(connection, transaction, urgency, cancellationToken);
 
             var createdTodo = todo is not null;
             if (todo is not null)
@@ -114,36 +114,4 @@ public sealed class SqliteMessageProcessingUnitOfWork : IMessageProcessingUnitOf
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    /// <summary>在当前事务中写入紧急度评分结果。</summary>
-    private static async Task InsertUrgencyAsync(
-        Microsoft.Data.Sqlite.SqliteConnection connection,
-        Microsoft.Data.Sqlite.SqliteTransaction transaction,
-        UrgencyScore urgency,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            INSERT INTO urgency_scores (
-                message_id,
-                score,
-                priority,
-                reason,
-                calculated_at
-            )
-            VALUES (
-                $messageId,
-                $score,
-                $priority,
-                $reason,
-                $calculatedAt
-            );
-            """;
-        command.Parameters.AddWithValue("$messageId", urgency.MessageId);
-        command.Parameters.AddWithValue("$score", urgency.Score);
-        command.Parameters.AddWithValue("$priority", urgency.Priority.ToString());
-        command.Parameters.AddWithValue("$reason", urgency.Reason);
-        command.Parameters.AddWithValue("$calculatedAt", DateTimeOffset.Now.ToString("O"));
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
 }

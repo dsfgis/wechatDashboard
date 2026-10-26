@@ -1,4 +1,5 @@
 using WechatDashboard.Domain.Entities;
+using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Application.Capture;
 
@@ -19,6 +20,11 @@ public interface IMessageRepository
 
     /// <summary>按消息 ID 集合精确查询消息。</summary>
     Task<IReadOnlyList<Message>> GetByIdsAsync(IReadOnlyCollection<long> ids, CancellationToken cancellationToken);
+
+    /// <summary>读取每条消息最新的紧急度优先级；没有评分记录的消息返回 P3。</summary>
+    Task<IReadOnlyDictionary<long, PriorityLevel>> GetEffectivePrioritiesAsync(
+        IReadOnlyCollection<long> messageIds,
+        CancellationToken cancellationToken);
 
     /// <summary>按来源与来源消息键批量解析规范化数据库消息。</summary>
     Task<IReadOnlyList<Message>> GetBySourceKeysAsync(

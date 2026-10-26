@@ -33,10 +33,6 @@ public sealed class TodoFeatureCoordinator : IDisposable
         var clock = SystemClock.Instance;
         var todoRepository = new SqliteTodoRepository(databasePath);
         var messageRepository = new SqliteMessageRepository(databasePath);
-        var suggestionRepository = new SqliteTodoSuggestionRepository(databasePath);
-        // 模型在启动时完成配置，保存新密钥不会更改当前进程使用的实例。
-        var suggestionAgent = new TodoSuggestionAgent(messageRepository, suggestionRepository,
-            messageActionModel, clock);
         var reminderRepository = new SqliteReminderRepository(databasePath);
         var projectRepository = new SqliteFollowedProjectRepository(databasePath);
         var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
@@ -59,8 +55,7 @@ public sealed class TodoFeatureCoordinator : IDisposable
             messageRepository,
             todoRepository,
             todoService,
-            suggestionRepository,
-            suggestionAgent,
+            messageActionModel,
             aliases,
             followedChats,
             filterMode,

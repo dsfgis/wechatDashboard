@@ -12,7 +12,9 @@ public sealed record CreateTodoFromMessageRequest(
     PriorityLevel? Priority,
     DateTimeOffset? DueAt,
     DateTimeOffset? FirstReminderAt,
-    long? ManagedProjectId = null);
+    long? ManagedProjectId = null,
+    // 独立区分手动 Agent 评分，避免普通待办优先级修改意外覆盖消息流评分。
+    PriorityLevel? AgentPriority = null);
 
 public enum CreateTodoOutcome
 {

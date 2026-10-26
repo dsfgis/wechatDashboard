@@ -190,7 +190,8 @@ public sealed class WeChatMessageContentDecoder
                 var title = ChildText(appMessage, "title");
                 var description = ChildText(appMessage, "des");
                 var url = ChildText(appMessage, "url");
-                if (ChildText(appMessage, "type") == "6")
+                var type = ChildText(appMessage, "type");
+                if (type == "6")
                 {
                     return "[文件]";
                 }
@@ -209,7 +210,15 @@ public sealed class WeChatMessageContentDecoder
                     parts.Add(url);
                 }
 
-                return string.Join(" ", parts);
+                var summary = string.Join(" ", parts);
+                if (type != "57")
+                {
+                    return summary;
+                }
+
+                // 引用回复的当前正文仍按原规则摘要，仅补充 refermsg 中嵌入的被引用正文。
+                var quotedContent = appMessage.Element("refermsg")?.Element("content")?.Value;
+                return CombineWithReference(summary, quotedContent);
             }
 
             var location = document.Descendants("location").FirstOrDefault();
@@ -247,6 +256,22 @@ public sealed class WeChatMessageContentDecoder
         {
             return "";
         }
+    }
+
+    /// <summary>
+    /// 合并微信引用正文，并保持与石化通相同的去重规则和文本边界。
+    /// </summary>
+    private static string CombineWithReference(string content, string? quotedContent)
+    {
+        var normalizedQuote = quotedContent?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedQuote)
+            || content.Contains(normalizedQuote, StringComparison.Ordinal))
+        {
+            return content;
+        }
+
+        // 明确的引用标记会随 Content 进入消息展示、自动待办摘要和本地日期解析。
+        return $"{content}\n\n引用消息：\n{normalizedQuote}";
     }
 
     private static string ChildText(XElement parent, string name) =>

@@ -4,29 +4,33 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
-## Agent and Automatic Todo Analysis (2026-10-25)
+## Agent and Automatic/Manual Todo Analysis (2026-10-26)
 
 Current implemented behavior:
 
 - The `模型配置` page configures the built-in DeepSeek endpoint and `deepseek-flash` model. The API Key is encrypted with Windows DPAPI `CurrentUser` and stored at `%LocalAppData%\WechatDashboard\Agent\protected-deepseek-api-key.bin`; saving or clearing the Key still requires an application restart.
 - The `分析消息内容` checkbox is independent of Key loading. It persists as `model_analyze_message_content` in SQLite `app_settings` and takes effect immediately for subsequently processed messages.
 - `MentionDetector` recognizes configured aliases, `@我`, `@你`, and `@所有人`. Automatic Todo creation also covers `@所有人`, including WeChat's U+2005 separator after the mention.
-- Message-feed refresh and automatic capture do not use an LLM to rerank the message list. The existing manual `AI 建议` action remains an explicit, reviewed operation; automatic message priority continues to come from local `urgency_scores` rules unless a manual suggestion already exists.
-- When analysis is enabled, a newly ingested `@我` or `@所有人` message triggers one `AnalyzeMentionAsync` JSON request. The Agent returns `shouldCreate`, a P0-P3 priority, and a concise Chinese description.
+- Message-feed refresh and automatic capture do not use an LLM to rerank the message list. Automatic message priority continues to come from local `urgency_scores` rules, including when an automatic Todo uses an Agent priority.
+- The former `AI 建议`, review, and clarification workflow has been removed. Manual `转为待办` now reuses `AnalyzeMentionAsync` for any newly converted message, independently of the automatic-analysis switch and mention detection. It sends only the current message, never adjacent messages or clarification answers; an existing Todo opens directly without another model call.
+- A manual click is an explicit creation instruction, so `shouldCreate=false` does not block creation. Missing configuration, request failure, timeout, or invalid JSON falls back to the default description and local priority without blocking the Todo. A blank Agent description also falls back to the default text without discarding a valid Agent priority.
+- After successful manual analysis, the Agent description is written only to the Todo, while its priority is used by both the Todo and a newly appended message-feed `urgency_scores` row. P0/P1/P2/P3 map to 90/75/50/20, and the score, Todo, and initial reminder commit or roll back together. The separate `AgentPriority` request field prevents ordinary Todo priority edits from changing feed scores; the displayed source message remains unchanged.
+- Legacy `todo_suggestions` tables and data in existing databases are left untouched but are no longer read or written. New databases do not create that table.
+- When automatic analysis is enabled, a newly ingested `@我` or `@所有人` message triggers one `AnalyzeMentionAsync` JSON request. The Agent returns `shouldCreate`, a P0-P3 priority, and a concise Chinese description.
 - A successful `shouldCreate=false` decision persists the message but skips its automatic Todo when the content is unrelated, low priority, informational, or has no concrete action. This explicit decision is different from model failure.
 - Agent output controls automatic Todo creation and overrides only `TodoItem.Priority` and `TodoItem.Description`. Title, project, managed project, due time, and automatic-creation status remain rule-driven. Local urgency scores are not overwritten.
 - Automatic Todo due time uses local rules: an explicit `会议时间` start takes precedence, then an explicit current-week weekday such as `本周三` selects that Wednesday at day end, and otherwise the send-day end remains the fallback. Calendar grouping reads the same `DueAt`.
 - Shihuatong capture follows a current message's `reference_seq` to the quoted record with the same `cider` and `server_seq`. A non-empty, non-duplicate quoted body is appended under `引用消息：`; the merged content feeds message display, automatic-Todo analysis, local urgency, and due-time parsing. Missing or already included quoted content is not appended again.
-- Analysis runs before `IMessageProcessingUnitOfWork.TryProcessAsync`, so no network wait occurs inside the SQLite transaction. An existing `(source, source_message_key)` skips the model call and still uses the transactional deduplication path.
-- With the switch off, no model call is made and the original automatic-create behavior is preserved. Missing configuration, request failure, timeout, or invalid JSON also creates the Todo with local priority/default description rather than treating the message as rejected. A blank description falls back to the default text without discarding a valid Agent priority. External cancellation is propagated.
+- Automatic analysis runs before `IMessageProcessingUnitOfWork.TryProcessAsync`, so no network wait occurs inside the SQLite transaction. An existing `(source, source_message_key)` skips the model call and still uses the transactional deduplication path.
+- With the automatic switch off, no automatic model call is made and the original automatic-create behavior is preserved. Missing configuration, request failure, timeout, or invalid JSON also creates the automatic Todo with local priority/default description rather than treating the message as rejected. External cancellation is propagated.
 - Existing messages and Todos are not automatically backfilled or recalculated in bulk. Automated model tests use fake HTTP handlers and do not consume real API quota.
 
 Verification at this checkpoint:
 
-- Release solution builds succeeded with 0 compile errors after the automatic-creation filter, quoted-message merge, and local due-time changes.
-- Focused tests passed for explicit `shouldCreate=false`, model-failure fallback, message-feed priority isolation, quoted-body merge/deduplication, current-week weekday resolution, meeting-start due time, and calendar grouping.
-- A real authorized Shihuatong referenced-meeting record was read through the production adapter and included the quoted meeting details. The matching existing local message and Todo were repaired after a backup; no bulk historical backfill was performed.
-- The complete .NET runner reported 81/82 passing tests; the remaining failure is the pre-existing `MessageFeedViewModel` concurrent refresh/context-navigation race. Do not describe the full suite as all green until that unrelated race is fixed.
+- Release solution builds succeed with 0 compile errors.
+- The complete .NET runner reports 83/83 passing tests.
+- Coverage includes explicit automatic `shouldCreate=false`, model-failure fallback, manual conversion despite `shouldCreate=false`, existing-Todo idempotency, Agent description/priority application, local-versus-Agent feed-score isolation, transactional score rollback, quoted-body merge/deduplication, current-week weekday resolution, meeting-start due time, and calendar grouping.
+- Automated model tests use fake HTTP handlers or controllable fakes and do not consume real API quota.
 
 ## Historical Snapshot (2026-08-09)
 

@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.Urgency;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
@@ -39,6 +40,17 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         {
             await transaction.CommitAsync(cancellationToken);
             return new CreateTodoResult(CreateTodoOutcome.ExistingTodo, existing);
+        }
+
+        // 仅手动点击携带 AgentPriority；评分与待办同事务写入，任何后续失败都会一起回滚。
+        if (request.AgentPriority is { } agentPriority)
+        {
+            var agentUrgency = UrgencyRanker.ForManualAgentAnalysis(message.Id, agentPriority);
+            await SqliteMessageRepository.InsertUrgencyAsync(
+                connection,
+                transaction,
+                agentUrgency,
+                cancellationToken);
         }
 
         var suggestedProjectId = await ReadSuggestedProjectIdAsync(connection, transaction, request.MessageId, cancellationToken);
@@ -339,7 +351,7 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
         command.CommandText = """
             SELECT priority FROM urgency_scores
             WHERE message_id = $messageId
-            ORDER BY calculated_at DESC, id DESC LIMIT 1;
+            ORDER BY id DESC LIMIT 1;
             """;
         command.Parameters.AddWithValue("$messageId", messageId);
         var result = await command.ExecuteScalarAsync(cancellationToken) as string;
