@@ -160,6 +160,7 @@ MainWindow ---- ScheduleOverview/Navigation
 1. `SourceMessageId=null`：来源显示“手动添加”，消息上下文显示“无来源消息”；内容区域显示待办描述，描述为空时显示标题。
 2. `SourceMessageId` 有值且消息可读取：显示真实平台、群聊、发送人、消息时间和正文。
 3. `SourceMessageId` 有值但消息不可读取：显示“原始消息已不存在”，不得误标为手动添加。
+4. 一条待办可被多个群的多条消息共同触发（跨群去重合并，见迁移 v6 的 `todo_source_messages`）：列表行显示“N 条来源”角标，详情页原始消息框按“[序号] 群聊 / 发送人 / 时间 + 正文”逐条展示，主来源消息始终排在首位。
 
 ### D-011：用变更事件刷新 MainWindow 聚合计数
 

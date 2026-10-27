@@ -14,6 +14,8 @@
 - 石化通当前消息带有 `reference_seq` 时，先联查并合并非重复的引用正文，再执行展示、自动待办分析、本地紧急度和截止时间计算。
 - 自动待办截止时间优先使用 Agent 识别的明确时间；未识别时由本地规则生成：明确的会议开始时间优先，其次是“本周三”等本周星期，最后回退到消息发送当天日末；日历直接使用同一个 `TodoItem.DueAt` 分组。
 - 首次提醒时间优先使用 Agent 识别的 `reminderAt`；未识别时按截止时间倒推：会议待办提前五分钟、普通任务提前一小时（`MeetingReminderLead` / `TaskEffortLead`）。提醒早于当前时间或无法落到未来时不创建提醒。手动消息待办同样按上述规则自动补全提醒；无来源消息的手动待办只在用户显式设置时才创建提醒。提醒与待办在同一 SQLite 事务原子写入。
+- 跨群重复提醒同一件事时不重复建待办：在创建待办之前，把当前消息与最多 30 条活动待办交给 Agent 语义判定，命中后只把消息追加为来源消息（`todo_source_messages`），原始消息框同时展示多个群的消息。
+- 合并时提醒时间只向后取更晚：新提醒晚于当前未触发提醒才取消旧提醒并改期，更早的忽略；后到消息识别的截止时间更晚时同步平移。已完成或已忽略的待办不参与判定，同一件事再次提醒会创建新待办。
 - 不批量回填已有待办；重复消息不重复调用模型；外部取消继续传播。
 - API Key 继续保持“保存或清除后重启生效”。旧“AI 建议”、审核、澄清以及 `todo_suggestions` 读写流程已删除；旧库遗留表和数据保留但不使用，新库不再创建该表。
 
@@ -78,6 +80,19 @@
 - 消息流统一读取每条消息 ID 最新的 `urgency_scores` 优先级，没有评分时回退 P3。自动管线仍只追加本地 `UrgencyRanker` 评分；只有手动转换成功分析时才追加 Agent 评分。因此自动待办可以是 Agent P1，而消息流仍保持本地 P2。
 - Agent 摘要只进入待办说明，消息流继续显示原始消息及采集时合并的引用正文。旧 `todo_suggestions` 不再参与有效优先级或其他读写流程；旧库保留遗留数据，新库不创建该表。
 
+### 3.6 跨群去重协议与合并事务
+
+`IMessageActionModel.MatchDuplicateTodoAsync` 是去重判定的唯一入口，`TodoDuplicateDetector` 负责候选与降级：
+
+- 候选来源：`ITodoRepository.GetActiveAsync` 中状态为 `Pending` / `InProgress` / `Waiting` 的待办，按 `UpdatedAt` 倒序取最多 30 条；`Done` / `Ignored` 不进入候选。
+- 请求使用 `temperature = 0`、`max_tokens = 120`、`response_format: json_object`，只发送当前消息 `ToInput(message)` 与候选的 `id`、`title`、`description`、`status`、`dueAt`，不发送相邻消息或密钥。
+- 模型必须返回 `{"duplicateTodoId":12}` 或 `{"duplicateTodoId":null}`；返回值必须是候选集合中存在的整数 id，否则按未命中处理。非法 JSON 抛出格式错误，由 `TodoDuplicateDetector` 捕获后按未命中处理，不阻断采集。
+- 判定发生在 SQLite 事务之前：`MessageCapturePipeline` 新增 `detectDuplicateAsync` 委托，在 `PrepareMentionAnalysisAsync` 之后调用；手动链路在 `AnalyzeMentionAsync` 之后、`CreateFromMessageAsync` 之前调用。
+- 命中后的写入：自动链路通过 `MessageProcessingArtifacts.MergeIntoTodoId`、`MergeDueAt` 交给 `SqliteMessageProcessingUnitOfWork`；手动链路调用 `ITodoUnitOfWork.MergeIntoExistingAsync(MergeTodoRequest)`。两者共用 `SqliteTodoMerge.ApplyAsync`：写入 `todo_source_messages`（`is_primary = 0`）、刷新 `todo_items.updated_at`、在新提醒更晚时把旧提醒置为 `Cancelled` 并插入新提醒、在新截止时间更晚时更新 `due_at`。
+- 命中时仍会构造待办草稿：若目标待办在判定与写入之间被完成或删除，工作单元会回退到正常新建，消息不会丢失归属。
+- `MessageProcessingWriteResult.MergedIntoTodoId` 标记合并结果，`CreateTodoOutcome.MergedIntoExisting` 供手动链路给出“已把本条消息加入原始消息”的反馈。
+- 查询与展示：`GetBySourceMessageIdsAsync` 先查关联表、再按主来源消息回退，使被合并的第二条消息也显示“已转待办”；`GetSourceMessagesForTodosAsync` 按主来源在前返回全部来源消息；`GetByAnySourceMessageIdAsync` 支持按任意来源消息幂等打开待办。
+
 ## 4. 自动化回归
 
 `tests/WechatDashboard.Tests/Program.cs` 当前覆盖：
@@ -95,11 +110,15 @@
 11. 三人群 `@所有人` 与 U+2005 空白可通过真实 SQLite 管线生成有待办截止日期的记录。
 12. 石化通 `reference_seq` 和微信 `appmsg type=57` / `refermsg` 引用正文合并，以及多行正文、XML 转义、空引用和重复引用处理。
 13. 2026-10-26 周一发送“本周三”时截止为 2026-10-28 日末并进入日历 `Upcoming` 分组；引用会议包含 `2026/10/28 09:00-12:00` 时截止为 2026-10-28 09:00。
+14. 跨群合并：第二条群的提醒只追加来源消息、活动待办仍为一条，两条来源消息按主来源在前返回，两条消息都能查到同一条待办。
+15. 提醒合并规则：新提醒更晚时旧提醒置为 `Cancelled` 并改期到更晚时间；新提醒更早时不改期但仍追加来源消息；待办完成后既不进入去重候选也拒绝继续合并。
+16. 真实管线去重：第一条 `@我` 消息建待办，第二条不同群的等价消息经 `TodoDuplicateDetector` 命中后 `CreatedTodoCount = 0`、来源消息两条、提醒改期为更晚时间；没有候选待办的首条消息不调用模型。
+17. 迁移 v6：在模拟的升级前库（无关联表、无 v6 记录）上初始化后历史 `source_message_id` 回填为 `is_primary = 1`，重复初始化不产生重复关联行；详情页多来源时按条展示并隐藏单来源行。
 
 ## 5. 已执行验证与限制
 
 - 本次改动后的 Release 解决方案构建成功，0 编译错误。
-- 完整 .NET runner 最新结果为 82/83：除 `Native WeChat reader matches the frozen Python oracle field by field`（时间提醒功能实施前已失败，内容摘要压缩消息回退差异，与本功能无关）外全部通过。
+- 完整 .NET runner 最新结果为 86/87：除 `Native WeChat reader matches the frozen Python oracle field by field`（跨群去重功能实施前已失败，内容摘要压缩消息回退差异，与本功能无关，已在干净基线上复现）外全部通过。
 - 已通过正式 `ShihuatongLocalDatabaseCaptureAdapter.ReadMessages` 只读验证一条真实授权引用会议记录，确认合并正文包含完整会议信息；备份后定向修复了对应现有消息和待办，没有批量回填历史数据。
 - 自动化模型测试使用假 HTTP handler 或可控 Fake，不消耗真实 API 配额；真实 DeepSeek 在线结果仍需有效 Key 单独验收。
 - 新增和修改代码保持必要的中文注释，新增代码注释率遵守项目 20% 以上的约束。
@@ -113,6 +132,9 @@
 - `src/WechatDashboard.Application/Todos/TodoApplicationService.cs`
 - `src/WechatDashboard.Application/Todos/TodoFactory.cs`
 - `src/WechatDashboard.Application/Todos/TodoService.cs`
+- `src/WechatDashboard.Application/Todos/TodoDuplicateDetector.cs`
+- `src/WechatDashboard.Application/Todos/ITodoUnitOfWork.cs`
+- `src/WechatDashboard.Application/Capture/ITodoRepository.cs`
 - `src/WechatDashboard.Application/Urgency/UrgencyRanker.cs`
 - `src/WechatDashboard.Infrastructure/Agent/OpenAiCompatibleMessageActionModel.cs`
 - `src/WechatDashboard.Infrastructure/Capture/ShihuatongLocalDatabaseCaptureAdapter.cs`
@@ -121,9 +143,14 @@
 - `src/WechatDashboard.Infrastructure/Persistence/SqliteMessageRepository.cs`
 - `src/WechatDashboard.Infrastructure/Persistence/SqliteModelSettingsRepository.cs`
 - `src/WechatDashboard.Infrastructure/Persistence/SqliteTodoUnitOfWork.cs`
+- `src/WechatDashboard.Infrastructure/Persistence/SqliteTodoRepository.cs`
+- `src/WechatDashboard.Infrastructure/Persistence/SqliteTodoMerge.cs`
+- `src/WechatDashboard.Infrastructure/Persistence/SqliteDatabaseInitializer.cs`
 - `src/WechatDashboard.App/ViewModels/Messages/MessageFeedViewModel.cs`
 - `src/WechatDashboard.App/ViewModels/Todos/TodoWorkbenchViewModel.cs`
+- `src/WechatDashboard.App/ViewModels/Todos/TodoDetailViewModel.cs`
 - `src/WechatDashboard.App/Views/Todos/TodoPendingView.xaml`
+- `src/WechatDashboard.App/Views/Todos/TodoDetailWindow.xaml`
 - `src/WechatDashboard.App/MainWindow.xaml`
 - `src/WechatDashboard.App/MainWindow.xaml.cs`
 - `tests/WechatDashboard.Tests/Program.cs`
