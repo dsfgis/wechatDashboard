@@ -2,6 +2,26 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <UserControl.Resources>
+        <!-- 顶级分组标题：更大字号 + 加粗，与子分组形成层级对比。 -->
+        <Style x:Key="TopLevelGroupTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="#111827" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <!-- 子分组容器：左侧竖向引导线 + 缩进 + 浅色底板，表达对父分组的归属。 -->
+        <Style x:Key="NestedGroupPanelStyle" TargetType="Border">
+            <Setter Property="Margin" Value="16,8,0,0" />
+            <Setter Property="Padding" Value="12,6,0,6" />
+            <Setter Property="Background" Value="#F9FAFB" />
+            <Setter Property="BorderBrush" Value="#D1D5DB" />
+            <Setter Property="BorderThickness" Value="2,0,0,0" />
+            <Setter Property="CornerRadius" Value="0,8,8,0" />
+        </Style>
+        <!-- 子分组内的待办卡片列表：相对子分组标题再缩进，强化树状层级。 -->
+        <Style x:Key="NestedCardListStyle" TargetType="ItemsControl">
+            <Setter Property="Margin" Value="16,8,0,2" />
+        </Style>
         <DataTemplate x:Key="TodoCardTemplate">
             <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,7">
                 <Grid>
@@ -73,55 +93,118 @@
         </DockPanel>
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-                <Expander IsExpanded="True" Margin="0,0,0,8">
+                <!-- 顶级分组：已置顶（无下级分组） -->
+                <Expander IsExpanded="True" Margin="0,0,0,10">
                     <Expander.Header>
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="已置顶（"/><Run Text="{Binding Pinned.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <TextBlock Foreground="#D97706" Style="{StaticResource TopLevelGroupTextStyle}"><Run Text="已置顶（"/><Run Text="{Binding Pinned.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
                             <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
                                     Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Pinned}" />
                         </StackPanel>
                     </Expander.Header>
                     <ItemsControl ItemsSource="{Binding Pinned}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
-                <Expander IsExpanded="True" Margin="0,0,0,8">
+                <!-- 顶级分组：截止时间。子分组收纳在左侧引导线容器内，视觉上从属于父级。 -->
+                <!-- 截止时间保留原有互斥分组，置顶待办仍只在置顶组显示。 -->
+                <Expander IsExpanded="True" Margin="0,0,0,10">
                     <Expander.Header>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Foreground="#DC2626" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="已逾期（"/><Run Text="{Binding Overdue.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Overdue}" />
-                        </StackPanel>
+                        <TextBlock Text="截止时间" Style="{StaticResource TopLevelGroupTextStyle}" />
                     </Expander.Header>
-                    <ItemsControl ItemsSource="{Binding Overdue}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
-                </Expander>
-                <Expander IsExpanded="True" Margin="0,0,0,8">
-                    <Expander.Header>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="今日到期（"/><Run Text="{Binding DueToday.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding DueToday}" />
+                    <Border Style="{StaticResource NestedGroupPanelStyle}">
+                        <StackPanel>
+                            <Expander IsExpanded="True" Margin="0,0,0,6">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Foreground="#DC2626" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="已逾期（"/><Run Text="{Binding Overdue.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Overdue}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Overdue}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                            <Expander IsExpanded="True" Margin="0,0,0,6">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="今日到期（"/><Run Text="{Binding DueToday.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding DueToday}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding DueToday}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                            <Expander IsExpanded="True" Margin="0,0,0,6">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="后续到期（"/><Run Text="{Binding Upcoming.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Upcoming}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Upcoming}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                            <Expander IsExpanded="True">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="无截止时间（"/><Run Text="{Binding NoDueDate.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding NoDueDate}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding NoDueDate}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
                         </StackPanel>
-                    </Expander.Header>
-                    <ItemsControl ItemsSource="{Binding DueToday}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                    </Border>
                 </Expander>
-                <Expander IsExpanded="True" Margin="0,0,0,8">
-                    <Expander.Header>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="后续到期（"/><Run Text="{Binding Upcoming.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Upcoming}" />
-                        </StackPanel>
-                    </Expander.Header>
-                    <ItemsControl ItemsSource="{Binding Upcoming}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
-                </Expander>
+                <!-- 顶级分组：优先级。P0–P3 同样收纳在引导线容器内，从属于"优先级"父级。 -->
+                <!-- 优先级是独立查看维度，统计全部活动待办（含置顶），不包含已办。 -->
                 <Expander IsExpanded="True">
                     <Expander.Header>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="无截止时间（"/><Run Text="{Binding NoDueDate.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                            <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                    Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding NoDueDate}" />
-                        </StackPanel>
+                        <TextBlock Style="{StaticResource TopLevelGroupTextStyle}"><Run Text="优先级（"/><Run Text="{Binding ActiveCount, Mode=OneWay}"/><Run Text="）"/></TextBlock>
                     </Expander.Header>
-                    <ItemsControl ItemsSource="{Binding NoDueDate}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
+                    <Border Style="{StaticResource NestedGroupPanelStyle}">
+                        <StackPanel>
+                            <Expander IsExpanded="True" Margin="0,0,0,6">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Foreground="#DC2626" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P0（"/><Run Text="{Binding Priority0.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority0}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Priority0}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                            <Expander IsExpanded="True" Margin="0,0,0,6">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P1（"/><Run Text="{Binding Priority1.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority1}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Priority1}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                            <Expander IsExpanded="True" Margin="0,0,0,6">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Foreground="#2563EB" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P2（"/><Run Text="{Binding Priority2.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority2}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Priority2}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                            <Expander IsExpanded="True">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Foreground="#4B5563" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P3（"/><Run Text="{Binding Priority3.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority3}" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Priority3}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                            </Expander>
+                        </StackPanel>
+                    </Border>
                 </Expander>
             </StackPanel>
         </ScrollViewer>

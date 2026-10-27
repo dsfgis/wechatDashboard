@@ -10,6 +10,12 @@ namespace WechatDashboard.Application.Todos;
 /// </summary>
 public static class TodoService
 {
+    /// <summary>会议提醒相对开始时间的默认提前量。</summary>
+    public static readonly TimeSpan MeetingReminderLead = TimeSpan.FromMinutes(5);
+
+    /// <summary>普通任务按截止时间预留的默认处理时长。</summary>
+    public static readonly TimeSpan TaskEffortLead = TimeSpan.FromHours(1);
+
     // 腾讯会议等引用卡片会给出明确会议时间，优先使用开始时间作为行动截止时间。
     private static readonly Regex MeetingStartRegex = new(
         @"会议时间\s*[：:]\s*(?<year>\d{4})\s*[年/-]\s*(?<month>\d{1,2})\s*[月/-]\s*(?<day>\d{1,2})日?\s+(?<hour>\d{1,2})[:：](?<minute>\d{2})",
@@ -32,11 +38,13 @@ public static class TodoService
     /// <returns>新建的待办实体（尚未持久化，Id=0）。</returns>
     public static TodoItem CreateFromMention(Message message, ClassificationResult classification, UrgencyScore urgency)
     {
-        return CreateFromMention(message, classification, urgency, DateTimeOffset.Now, TimeZoneInfo.Local);
+        return CreateFromMention(message, classification, urgency, DateTimeOffset.Now, TimeZoneInfo.Local).Todo;
     }
 
     /// <summary>使用指定时钟和时区创建自动识别待办，便于稳定计算到期日。</summary>
-    public static TodoItem CreateFromMention(
+    /// <param name="analysisDueAt">Agent 识别的明确完成时间；提供时优先于本地日期规则。</param>
+    /// <param name="analysisFirstReminderAt">Agent 建议的提醒时间；提供时优先于按截止时间推导的默认提醒。</param>
+    public static TodoFactory.TodoDraft CreateFromMention(
         Message message,
         ClassificationResult classification,
         UrgencyScore urgency,
@@ -44,11 +52,19 @@ public static class TodoService
         TimeZoneInfo timeZone,
         long? managedProjectId = null,
         string? description = null,
-        PriorityLevel? priority = null)
+        PriorityLevel? priority = null,
+        DateTimeOffset? analysisDueAt = null,
+        DateTimeOffset? analysisFirstReminderAt = null)
     {
         // 优先识别正文和引用会议中的明确时间，其次识别“本周三”等本周日期；
         // 都没有时仍按消息发送日期计算，补采历史消息不会误用采集当天。
-        var dueAt = ResolveAutomaticDueAt(message, timeZone);
+        var dueAt = ResolveAutomaticDueAt(message, timeZone, analysisDueAt);
+        var firstReminderAt = ResolveAutomaticFirstReminderAt(
+            message.Content,
+            dueAt,
+            now,
+            timeZone,
+            analysisFirstReminderAt);
         return TodoFactory.CreateFromMessage(
             message,
             classification.ProjectId,
@@ -59,12 +75,48 @@ public static class TodoService
             description: description,
             dueAt: dueAt,
             isAutoCreated: true,
-            managedProjectId: managedProjectId);
+            managedProjectId: managedProjectId,
+            firstReminderAt: firstReminderAt);
     }
 
-    /// <summary>从消息正文和已合并的引用内容计算自动待办截止时间。</summary>
-    private static DateTimeOffset ResolveAutomaticDueAt(Message message, TimeZoneInfo timeZone)
+    /// <summary>
+    /// 计算自动待办的首个提醒时间：会议按开始时间提前五分钟，任务按预计处理时长提前提醒。
+    /// Agent 提供的明确提醒时间优先；提醒早于当前时间或无法落到未来时不创建提醒。
+    /// </summary>
+    public static DateTimeOffset? ResolveAutomaticFirstReminderAt(
+        string content,
+        DateTimeOffset? dueAt,
+        DateTimeOffset now,
+        TimeZoneInfo timeZone,
+        DateTimeOffset? analysisFirstReminderAt = null)
     {
+        if (analysisFirstReminderAt is { } preferred)
+        {
+            return preferred > now ? preferred : null;
+        }
+
+        if (dueAt is not { } target)
+        {
+            return null;
+        }
+
+        var lead = MeetingStartRegex.IsMatch(content) ? MeetingReminderLead : TaskEffortLead;
+        var scheduledAt = target - lead;
+        return scheduledAt > now ? scheduledAt : null;
+    }
+
+    /// <summary>从消息正文、Agent 明确时间和已合并的引用内容计算自动待办截止时间。</summary>
+    private static DateTimeOffset ResolveAutomaticDueAt(
+        Message message,
+        TimeZoneInfo timeZone,
+        DateTimeOffset? analysisDueAt = null)
+    {
+        // Agent 识别出的明确完成/截止时间优先；本地规则继续作为模型未启用或失败时的可靠回退。
+        if (analysisDueAt is { } analyzed)
+        {
+            return analyzed;
+        }
+
         // 明确的“会议时间：2026/10/28 09:00-12:00”使用开始时刻，避免会议结束后才到期。
         var meetingMatch = MeetingStartRegex.Match(message.Content);
         if (meetingMatch.Success)

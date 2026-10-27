@@ -55,7 +55,7 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
 
         var suggestedProjectId = await ReadSuggestedProjectIdAsync(connection, transaction, request.MessageId, cancellationToken);
         var suggestedPriority = await ReadSuggestedPriorityAsync(connection, transaction, request.MessageId, cancellationToken);
-        var todo = TodoFactory.CreateFromMessage(
+        var draft = TodoFactory.CreateFromMessage(
             message,
             suggestedProjectId,
             suggestedPriority,
@@ -64,17 +64,23 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             request.Description,
             request.ProjectId,
             request.Priority,
-            request.DueAt,
+            request.DueAt ?? request.AnalysisDueAt,
             isAutoCreated: false,
             managedProjectId: request.ManagedProjectId);
-        var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
+        var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, draft.Todo, cancellationToken);
 
-        if (request.FirstReminderAt is { } reminderAt)
+        // 手动创建时优先使用显式提醒时间；未显式设置但存在截止时间时，按会议/任务规则自动提醒。
+        var reminderAt = request.FirstReminderAt ?? draft.FirstReminderAt ?? TodoService.ResolveAutomaticFirstReminderAt(
+            message.Content,
+            savedTodo.DueAt,
+            now,
+            TimeZoneInfo.Local);
+        if (reminderAt is { } scheduledAt)
         {
             await SqliteReminderRepository.InsertAsync(
                 connection,
                 transaction,
-                NewReminder(savedTodo.Id, reminderAt, parentReminderId: null, now),
+                NewReminder(savedTodo.Id, scheduledAt, parentReminderId: null, now),
                 cancellationToken);
         }
 
@@ -122,6 +128,7 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             IsPinned = false
         };
         var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
+        // 手动无来源待办只有用户显式设置时才创建提醒，不从标题猜测时间。
         if (request.FirstReminderAt is { } reminderAt)
         {
             await SqliteReminderRepository.InsertAsync(

@@ -7,14 +7,18 @@ using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Application.Capture;
 
-/// <summary>Agent 对 @我 消息的分析结果，控制是否创建并覆盖自动待办的优先级和说明。</summary>
+/// <summary>Agent 对 @我 消息的分析结果，控制是否创建并覆盖自动待办的优先级、说明和时间提醒。</summary>
 /// <param name="Priority">仅用于自动待办的模型优先级。</param>
 /// <param name="Description">模型生成的待办说明；空白时回退默认说明。</param>
 /// <param name="ShouldCreate">是否值得自动创建待办；默认 true 兼容未启用筛选的调用。</param>
+/// <param name="DueAt">消息中识别出的明确完成/截止时间；空白时回退本地日期规则。</param>
+/// <param name="FirstReminderAt">消息中识别出的明确提醒时间；空白时按会议/任务规则推导。</param>
 public sealed record MentionMessageAnalysis(
     PriorityLevel Priority,
     string? Description,
-    bool ShouldCreate = true);
+    bool ShouldCreate = true,
+    DateTimeOffset? DueAt = null,
+    DateTimeOffset? FirstReminderAt = null);
 
 /// <summary>
 /// 消息采集管线：协调多个适配器完成"采集 -> 去重 -> 持久化 -> 分类 -> 紧急度评分 -> 自动建待办"的完整流程。
@@ -167,7 +171,7 @@ public sealed class MessageCapturePipeline
                     // 仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
                     var shouldCreateTodo = isMentionMe
                         && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
-                    var todo = shouldCreateTodo
+                    var draft = shouldCreateTodo
                         ? TodoService.CreateFromMention(
                             savedMessage,
                             classification,
@@ -177,9 +181,16 @@ public sealed class MessageCapturePipeline
                             managedProjectId: _managedProjectMatcher(savedMessage),
                             description: mentionAnalysis?.Description,
                             // 模型优先级只进入自动待办，不改写消息流使用的本地评分。
-                            priority: mentionAnalysis?.Priority)
+                            priority: mentionAnalysis?.Priority,
+                            analysisDueAt: mentionAnalysis?.DueAt,
+                            analysisFirstReminderAt: mentionAnalysis?.FirstReminderAt)
                         : null;
-                    return new MessageProcessingArtifacts(classification, urgency, todo);
+                    // 自动待办的提醒时间由创建规则一并计算，并随消息事务原子持久化。
+                    return new MessageProcessingArtifacts(
+                        classification,
+                        urgency,
+                        draft?.Todo,
+                        draft?.FirstReminderAt);
                 },
                 cancellationToken);
 

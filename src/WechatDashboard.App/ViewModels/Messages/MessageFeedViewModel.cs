@@ -238,15 +238,22 @@ public sealed class MessageFeedViewModel : ObservableObject
             }
         }
 
-        // 手动创建忽略 ShouldCreate；空白摘要回退默认说明，但保留 Agent 优先级。
+        // 手动创建忽略 ShouldCreate；空白摘要回退默认说明，但保留 Agent 优先级和识别出的时间提醒。
         var agentDescription = analysis?.Description?.Trim();
         var description = string.IsNullOrWhiteSpace(agentDescription) ? null : agentDescription;
         var result = existing is not null
             ? new CreateTodoResult(CreateTodoOutcome.ExistingTodo, existing)
             : await _todos.CreateFromMessageAsync(
                 new CreateTodoFromMessageRequest(
-                    messageId, null, description, null, null, null, null,
-                    AgentPriority: analysis?.Priority),
+                    messageId,
+                    Title: null,
+                    Description: description,
+                    ProjectId: null,
+                    Priority: null,
+                    DueAt: null,
+                    FirstReminderAt: analysis?.FirstReminderAt,
+                    AgentPriority: analysis?.Priority,
+                    AnalysisDueAt: analysis?.DueAt),
                 CancellationToken.None);
         // 刷新会更新列表状态文本，先刷新再写最终结果，保留模型失败回退提示。
         if (result.Todo is not null && result.Outcome == CreateTodoOutcome.Created)

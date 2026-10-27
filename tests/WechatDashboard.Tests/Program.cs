@@ -234,7 +234,7 @@ static Task TestTodoCreationAsync()
     var classification = new ClassificationResult(30, 2, "支付平台", MessageCategory.Question, 0.85, "keyword rule", "Rules");
     var urgency = new UrgencyScore(30, 72, PriorityLevel.P1, "@我; 今天");
 
-    var todo = TodoService.CreateFromMention(message, classification, urgency, now, timeZone);
+    var todo = TodoService.CreateFromMention(message, classification, urgency, now, timeZone).Todo;
 
     AssertEqual(TodoStatus.Pending, todo.Status, "Mention-created todo should start as pending.");
     AssertEqual(PriorityLevel.P1, todo.Priority, "Todo priority should follow urgency.");
@@ -262,7 +262,7 @@ static Task TestTodoCreationAsync()
         urgency,
         now,
         timeZone,
-        description: "请今天反馈支付联调问题");
+        description: "请今天反馈支付联调问题").Todo;
     AssertEqual("请今天反馈支付联调问题", summarizedTodo.Description,
         "A model summary should be written to the Todo description.");
     AssertEqual(todo.Title, summarizedTodo.Title, "A summary must not change the Todo title.");
@@ -273,7 +273,7 @@ static Task TestTodoCreationAsync()
 
     // 补采场景：消息昨天发送、今天才采集，待办应落在发送当天而非采集当天。
     var lateCapturedMessage = message with { SentAt = now.AddDays(-1).AddHours(-2) };
-    var lateTodo = TodoService.CreateFromMention(lateCapturedMessage, classification, urgency, now, timeZone);
+    var lateTodo = TodoService.CreateFromMention(lateCapturedMessage, classification, urgency, now, timeZone).Todo;
     AssertEqual(
         new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
         lateTodo.DueAt,
@@ -294,7 +294,7 @@ static Task TestTodoCreationAsync()
         SentAt = meetingSentAt
     };
     var weekdayTodo = TodoService.CreateFromMention(
-        meetingMessage, classification, urgency, meetingSentAt.AddHours(1), timeZone);
+        meetingMessage, classification, urgency, meetingSentAt.AddHours(1), timeZone).Todo;
     AssertEqual(
         new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
         weekdayTodo.DueAt,
@@ -309,12 +309,43 @@ static Task TestTodoCreationAsync()
         Content = meetingMessage.Content
             + "\n\n引用消息：\n李工 邀请您参加腾讯会议\n会议时间：2026/10/28 09:00-12:00 (GMT+08:00)"
     };
-    var meetingTodo = TodoService.CreateFromMention(
+    var meetingDraft = TodoService.CreateFromMention(
         quotedMeetingMessage, classification, urgency, meetingSentAt.AddHours(1), timeZone);
+    var meetingTodo = meetingDraft.Todo;
     AssertEqual(
         new DateTimeOffset(2026, 10, 28, 9, 0, 0, TimeSpan.FromHours(8)),
         meetingTodo.DueAt,
         "A referenced meeting start time should take precedence over the relative Wednesday date.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 28, 8, 55, 0, TimeSpan.FromHours(8)),
+        meetingDraft.FirstReminderAt,
+        "A meeting Todo should be reminded five minutes before its start time.");
+
+    // 普通任务按预计处理时长（默认一小时）从截止时间倒推提醒。
+    var taskDraft = TodoService.CreateFromMention(
+        message, classification, urgency, now, timeZone);
+    AssertEqual(
+        todo.DueAt - TimeSpan.FromHours(1),
+        taskDraft.FirstReminderAt,
+        "A task Todo should reserve one hour of effort before its deadline for the first reminder.");
+
+    // Agent 识别出的明确完成时间优先，且可直接给出更合适的提醒时间。
+    var analyzedDraft = TodoService.CreateFromMention(
+        quotedMeetingMessage,
+        classification,
+        urgency,
+        meetingSentAt.AddHours(1),
+        timeZone,
+        analysisDueAt: new DateTimeOffset(2026, 10, 28, 14, 0, 0, TimeSpan.FromHours(8)),
+        analysisFirstReminderAt: new DateTimeOffset(2026, 10, 28, 12, 0, 0, TimeSpan.FromHours(8)));
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 28, 14, 0, 0, TimeSpan.FromHours(8)),
+        analyzedDraft.Todo.DueAt,
+        "An analyzed task completion time should override local meeting parsing.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 28, 12, 0, 0, TimeSpan.FromHours(8)),
+        analyzedDraft.FirstReminderAt,
+        "An analyzed reminder time should override the default meeting/task lead.");
 
     return Task.CompletedTask;
 }
@@ -347,24 +378,30 @@ static async Task TestTodoWorkbenchBucketSummaryAsync()
     var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
     var todoService = new TodoApplicationService(unitOfWork, clock);
     var pinnedOverdue = (await todoService.CreateManualAsync(
-        new CreateManualTodoRequest("已置顶且昨天到期", null, PriorityLevel.P2, now.AddDays(-1), null, null),
+        new CreateManualTodoRequest("已置顶且昨天到期", null, PriorityLevel.P0, now.AddDays(-1), null, null),
         CancellationToken.None)).Todo!;
     await todoService.CreateManualAsync(
-        new CreateManualTodoRequest("昨天到期", null, PriorityLevel.P2, now.AddDays(-1), null, null),
+        new CreateManualTodoRequest("昨天到期", null, PriorityLevel.P1, now.AddDays(-1), null, null),
         CancellationToken.None);
     await todoService.CreateManualAsync(
         new CreateManualTodoRequest("今天早些时候到期", null, PriorityLevel.P2, now.AddHours(-1), null, null),
         CancellationToken.None);
     await todoService.CreateManualAsync(
-        new CreateManualTodoRequest("今天稍后到期", null, PriorityLevel.P2, now.AddHours(1), null, null),
+        new CreateManualTodoRequest("今天稍后到期", null, PriorityLevel.P3, now.AddHours(1), null, null),
         CancellationToken.None);
     await todoService.CreateManualAsync(
-        new CreateManualTodoRequest("明天到期", null, PriorityLevel.P2, now.AddDays(1), null, null),
+        new CreateManualTodoRequest("明天到期", null, PriorityLevel.P0, now.AddDays(1), null, null),
         CancellationToken.None);
     await todoService.CreateManualAsync(
-        new CreateManualTodoRequest("无截止时间", null, PriorityLevel.P2, null, null, null),
+        new CreateManualTodoRequest("无截止时间", null, PriorityLevel.P1, null, null, null),
         CancellationToken.None);
     await todos.SetPinnedAsync(pinnedOverdue.Id, true, now, CancellationToken.None);
+
+    // 已办记录使用 P0，验证它既不会增加活动总数，也不会污染优先级统计。
+    var completed = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("已办理 P0", null, PriorityLevel.P0, now.AddDays(-2), null, null),
+        CancellationToken.None)).Todo!;
+    await todos.MarkCompletedAsync(completed.Id, now, CancellationToken.None);
 
     var workbench = new TodoWorkbenchViewModel(
         todos,
@@ -388,6 +425,13 @@ static async Task TestTodoWorkbenchBucketSummaryAsync()
     AssertEqual(2, workbench.DueToday.Count, "Past and future times on today's local date should both be due today.");
     AssertEqual(1, workbench.Upcoming.Count, "Tomorrow should be upcoming.");
     AssertEqual(1, workbench.NoDueDate.Count, "A missing deadline should remain undated.");
+
+    // 优先级是独立维度，包含置顶活动待办，但不得包含上面的已办 P0。
+    AssertEqual(2, workbench.Priority0.Count, "P0 should include active pinned and unpinned Todos, but exclude completed Todos.");
+    AssertEqual(2, workbench.Priority1.Count, "P1 should contain only active Todos.");
+    AssertEqual(1, workbench.Priority2.Count, "P2 should contain only active Todos.");
+    AssertEqual(1, workbench.Priority3.Count, "P3 should contain only active Todos.");
+    AssertEqual(1, workbench.Completed.Count, "The completed Todo should remain only in the completed history.");
     AssertEqual(
         "活动待办 6 条：已置顶 1 条、已逾期 1 条、今日到期 2 条、后续到期 1 条、无截止时间 1 条。",
         workbench.StatusText,
@@ -785,7 +829,7 @@ static async Task TestDeepSeekMentionAnalysisAsync()
 
     var message = CreateMessage(9100, "验收群", "王工", "@我 请今天确认验收时间");
     var handler = new RecordingModelHttpMessageHandler(CreateResponse(
-        "{\"shouldCreate\":true,\"priority\":\"P1\",\"description\":\"  请今天确认验收时间。  \"}"));
+        "{\"shouldCreate\":true,\"priority\":\"P1\",\"description\":\"  请今天确认验收时间。  \",\"dueAt\":\"2026-08-09T18:00:00+08:00\",\"reminderAt\":\"2026-08-09T17:00:00+08:00\"}"));
     using var http = new HttpClient(handler);
     var model = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", http);
 
@@ -794,11 +838,19 @@ static async Task TestDeepSeekMentionAnalysisAsync()
     AssertTrue(analysis.ShouldCreate, "An actionable mention should be approved for automatic Todo creation.");
     AssertEqual(PriorityLevel.P1, analysis.Priority, "The Agent should return the automatic Todo priority.");
     AssertEqual("请今天确认验收时间。", analysis.Description, "The Agent summary should be trimmed.");
+    AssertEqual(
+        new DateTimeOffset(2026, 8, 9, 18, 0, 0, TimeSpan.FromHours(8)),
+        analysis.DueAt,
+        "The Agent should return the parsed completion/deadline time.");
+    AssertEqual(
+        new DateTimeOffset(2026, 8, 9, 17, 0, 0, TimeSpan.FromHours(8)),
+        analysis.FirstReminderAt,
+        "The Agent should return the parsed reminder time.");
     AssertEqual("sk-analysis-test", handler.AuthorizationParameter, "Analysis requests must use the saved Bearer key.");
     using var body = JsonDocument.Parse(handler.RequestBody
         ?? throw new InvalidOperationException("Analysis request body was not recorded."));
-    AssertEqual(400, body.RootElement.GetProperty("max_tokens").GetInt32(),
-        "Priority and summary output should use a bounded token limit.");
+    AssertEqual(500, body.RootElement.GetProperty("max_tokens").GetInt32(),
+        "Priority, summary and time output should use a bounded token limit.");
     AssertEqual("json_object", body.RootElement.GetProperty("response_format").GetProperty("type").GetString(),
         "The combined analysis should require a JSON object.");
     AssertEqual("disabled", body.RootElement.GetProperty("thinking").GetProperty("type").GetString(),
@@ -819,12 +871,14 @@ static async Task TestDeepSeekMentionAnalysisAsync()
 
     // 空白说明不会丢弃已返回的有效优先级，后续由待办工厂回退默认说明。
     var blankHandler = new RecordingModelHttpMessageHandler(CreateResponse(
-        "{\"shouldCreate\":true,\"priority\":\"P3\",\"description\":\" \\n\\t \"}"));
+        "{\"shouldCreate\":true,\"priority\":\"P3\",\"description\":\" \\n\\t \",\"dueAt\":null,\"reminderAt\":null}"));
     using var blankHttp = new HttpClient(blankHandler);
     var blankModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-analysis-test", blankHttp);
     var blankAnalysis = await blankModel.AnalyzeMentionAsync(message, CancellationToken.None);
     AssertEqual(PriorityLevel.P3, blankAnalysis.Priority, "A blank summary must preserve the parsed priority.");
     AssertEqual<string?>(null, blankAnalysis.Description, "A blank summary should request the default Todo description.");
+    AssertEqual<DateTimeOffset?>(null, blankAnalysis.DueAt, "Null time fields should parse as no explicit time.");
+    AssertEqual<DateTimeOffset?>(null, blankAnalysis.FirstReminderAt, "Null reminder fields should parse as no explicit reminder.");
 
     // 模型对无关或低优先级消息可以明确否决创建，解析层必须保留该决定。
     var skipHandler = new RecordingModelHttpMessageHandler(CreateResponse(
@@ -2312,11 +2366,39 @@ static async Task TestManualTodoCreationAsync()
     AssertFalse(defaultResult.Todo.IsPinned, "Manual Todo should not be pinned by default.");
     AssertEqual(0, (await new SqliteReminderRepository(databasePath).GetForTodoAsync(defaultResult.Todo.Id, CancellationToken.None)).Count, "Omitted reminder should not create a reminder row.");
 
+    // 有明确截止时间的手动消息待办，未显式设置提醒时也应按任务完成时间自动提醒。
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var autoReminderMessage = await messageRepository.SaveAsync(
+        CreateMessage(0, "普通项目群", "李工", "请在明天提交材料") with
+        {
+            SourceMessageKey = $"manual-auto-reminder-{Guid.NewGuid():N}",
+            IsMentionMe = false
+        },
+        CancellationToken.None);
+    var autoReminderDueAt = now.AddHours(3);
+    var autoReminderResult = await todoService.CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(
+            autoReminderMessage.Id,
+            Title: null,
+            Description: null,
+            ProjectId: null,
+            Priority: null,
+            DueAt: autoReminderDueAt,
+            FirstReminderAt: null),
+        CancellationToken.None);
+    var autoReminders = await new SqliteReminderRepository(databasePath)
+        .GetForTodoAsync(autoReminderResult.Todo!.Id, CancellationToken.None);
+    AssertEqual(1, autoReminders.Count, "A dated manual message Todo should create an automatic reminder.");
+    AssertEqual(
+        autoReminderDueAt - TimeSpan.FromHours(1),
+        autoReminders.Single().ScheduledAt,
+        "A manual task reminder should reserve one hour of effort before the deadline.");
+
     var missingGroup = await todoService.CreateManualAsync(
         new CreateManualTodoRequest("无效分组", null, PriorityLevel.P1, null, null, long.MaxValue),
         CancellationToken.None);
     AssertEqual(CreateManualTodoOutcome.GroupMissing, missingGroup.Outcome, "Missing group should be a recoverable outcome.");
-    AssertEqual(2, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Missing group must not leave a Todo.");
+    AssertEqual(3, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Missing group must not leave a Todo.");
 
     await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
     {
@@ -2350,7 +2432,7 @@ static async Task TestManualTodoCreationAsync()
     }
 
     AssertTrue(reminderFailureRaised, "Injected reminder failure should be observable to the application layer.");
-    AssertEqual(2, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Reminder failure must roll back the Todo insert.");
+    AssertEqual(3, (await new SqliteTodoRepository(databasePath).GetActiveAsync(CancellationToken.None)).Count, "Reminder failure must roll back the Todo insert.");
 }
 
 static async Task TestTodoGroupLifecycleAsync()
@@ -4277,7 +4359,14 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     var analysisCalls = new List<string>();
     using var cancellationSource = new CancellationTokenSource();
     const string mentionContent = "@我 请今天确认验收时间";
-    var sentAt = new DateTimeOffset(2026, 8, 9, 13, 30, 0, TimeSpan.FromHours(8));
+    // 用接近真实当前时间的发送时间，保证本地回退截止时间（消息发送日末）仍在未来，
+    // 从而能断言规则提醒被创建；Agent 显式时间仍覆盖本地规则。
+    var sentAt = new DateTimeOffset(
+        DateTimeOffset.Now.Year,
+        DateTimeOffset.Now.Month,
+        DateTimeOffset.Now.Day,
+        13, 30, 0,
+        TimeSpan.FromHours(8));
 
     // 只改变来源消息键，便于用同一正文比较 Agent 分析前后的待办字段。
     CapturedMessage Capture(string key, string content) => new(
@@ -4296,7 +4385,11 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
         analysisCalls.Add(message.SourceMessageKey);
         if (message.SourceMessageKey == "summary-on")
         {
-            return Task.FromResult(new MentionMessageAnalysis(PriorityLevel.P1, "  请今天确认验收时间。  "));
+            return Task.FromResult(new MentionMessageAnalysis(
+                PriorityLevel.P1,
+                "  请今天确认验收时间。  ",
+                DueAt: sentAt.Date.AddHours(18),
+                FirstReminderAt: sentAt.Date.AddHours(17).AddMinutes(30)));
         }
 
         if (message.SourceMessageKey == "summary-skip")
@@ -4428,12 +4521,27 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     AssertEqual(PriorityLevel.P2, failureTodo.Priority, "A model exception should fall back to the local priority.");
     AssertEqual(PriorityLevel.P0, blankTodo.Priority, "A blank summary must not discard the Agent priority.");
 
-    // Agent 只能覆盖优先级和说明，标题、项目及截止时间仍由原规则生成。
+    // Agent 只能覆盖优先级、说明和时间提醒，标题及项目仍由原规则生成。
     AssertEqual(offTodo.Title, onTodo.Title, "Agent analysis must not change the Todo title.");
     AssertEqual(offTodo.ProjectId, onTodo.ProjectId, "Agent analysis must not change the Todo project.");
     AssertEqual(offTodo.ManagedProjectId, onTodo.ManagedProjectId, "Agent analysis must not change the managed project.");
-    AssertEqual(offTodo.DueAt, onTodo.DueAt, "Agent analysis must not change the Todo due time.");
+    AssertEqual(
+        sentAt.Date.AddHours(18),
+        onTodo.DueAt,
+        "An analyzed completion time should override the local due-date rule.");
     AssertTrue(onTodo.IsAutoCreated, "The analyzed Todo should remain automatic.");
+
+    var reminderRepository = new SqliteReminderRepository(databasePath);
+    var offReminders = await reminderRepository.GetForTodoAsync(offTodo.Id, CancellationToken.None);
+    var onReminders = await reminderRepository.GetForTodoAsync(onTodo.Id, CancellationToken.None);
+    AssertEqual(1, offReminders.Count, "An unanalyzed automatic Todo should still create its rule-based reminder.");
+    AssertEqual(offTodo.DueAt - TimeSpan.FromHours(1), offReminders.Single().ScheduledAt,
+        "The fallback reminder should reserve one hour before the send-day deadline.");
+    AssertEqual(1, onReminders.Count, "An analyzed automatic Todo should create exactly one reminder.");
+    AssertEqual(
+        sentAt.Date.AddHours(17).AddMinutes(30),
+        onReminders.Single().ScheduledAt,
+        "An explicit Agent reminder time should override the default lead.");
 
     // 消息流继续读取本地 urgency_scores，不能使用自动待办的 Agent 优先级。
     var analyzedMessageIds = messages

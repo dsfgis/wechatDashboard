@@ -22,10 +22,12 @@ public interface IMessageProcessingUnitOfWork
 /// <param name="Classification">项目与类别分类结果。</param>
 /// <param name="Urgency">紧急度评分结果。</param>
 /// <param name="Todo">需要自动创建的待办；普通消息为空。</param>
+/// <param name="FirstReminderAt">待办创建后应原子写入的首个提醒时间；为空时不创建提醒。</param>
 public sealed record MessageProcessingArtifacts(
     ClassificationResult Classification,
     UrgencyScore Urgency,
-    TodoItem? Todo);
+    TodoItem? Todo,
+    DateTimeOffset? FirstReminderAt = null);
 
 /// <summary>单条消息原子写入的结果。</summary>
 /// <param name="Persisted">消息是否为本次新写入；false 表示命中唯一键去重。</param>

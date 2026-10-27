@@ -14,7 +14,9 @@ public sealed record CreateTodoFromMessageRequest(
     DateTimeOffset? FirstReminderAt,
     long? ManagedProjectId = null,
     // 独立区分手动 Agent 评分，避免普通待办优先级修改意外覆盖消息流评分。
-    PriorityLevel? AgentPriority = null);
+    PriorityLevel? AgentPriority = null,
+    // Agent 识别出的明确完成时间；未显式提供截止时间时作为回退。
+    DateTimeOffset? AnalysisDueAt = null);
 
 public enum CreateTodoOutcome
 {

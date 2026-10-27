@@ -6,7 +6,10 @@ namespace WechatDashboard.Application.Todos;
 /// <summary>集中管理由原消息生成 Todo 时的默认字段，避免 UI 和采集管线各自拼装。</summary>
 public static class TodoFactory
 {
-    public static TodoItem CreateFromMessage(
+    /// <summary>由消息生成的待办及随同创建的首个提醒时间。</summary>
+    public sealed record TodoDraft(TodoItem Todo, DateTimeOffset? FirstReminderAt);
+
+    public static TodoDraft CreateFromMessage(
         Message message,
         long? suggestedProjectId,
         PriorityLevel suggestedPriority,
@@ -17,9 +20,10 @@ public static class TodoFactory
         PriorityLevel? priority = null,
         DateTimeOffset? dueAt = null,
         bool isAutoCreated = false,
-        long? managedProjectId = null)
+        long? managedProjectId = null,
+        DateTimeOffset? firstReminderAt = null)
     {
-        return new TodoItem(
+        var todo = new TodoItem(
             Id: 0,
             SourceMessageId: message.Id,
             ProjectId: projectId ?? suggestedProjectId,
@@ -35,6 +39,7 @@ public static class TodoFactory
         {
             ManagedProjectId = managedProjectId
         };
+        return new TodoDraft(todo, firstReminderAt);
     }
 
     public static string BuildTitle(string content)

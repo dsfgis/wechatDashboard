@@ -1,5 +1,6 @@
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Domain.Entities;
+using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Infrastructure.Persistence;
 
@@ -54,7 +55,15 @@ public sealed class SqliteMessageProcessingUnitOfWork : IMessageProcessingUnitOf
             var createdTodo = todo is not null;
             if (todo is not null)
             {
-                await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
+                var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
+                if (artifacts.FirstReminderAt is { } reminderAt)
+                {
+                    await SqliteReminderRepository.InsertAsync(
+                        connection,
+                        transaction,
+                        NewReminder(savedTodo.Id, reminderAt, parentReminderId: null, now: savedTodo.CreatedAt),
+                        cancellationToken);
+                }
             }
 
             await transaction.CommitAsync(cancellationToken);
@@ -74,6 +83,24 @@ public sealed class SqliteMessageProcessingUnitOfWork : IMessageProcessingUnitOf
             throw;
         }
     }
+
+    private static TodoReminder NewReminder(
+        long todoId,
+        DateTimeOffset scheduledAt,
+        long? parentReminderId,
+        DateTimeOffset now) => new(
+            0,
+            todoId,
+            scheduledAt,
+            ReminderStatus.Scheduled,
+            parentReminderId,
+            null,
+            null,
+            null,
+            0,
+            null,
+            now,
+            now);
 
     /// <summary>在当前事务中写入消息分类结果。</summary>
     private static async Task InsertClassificationAsync(

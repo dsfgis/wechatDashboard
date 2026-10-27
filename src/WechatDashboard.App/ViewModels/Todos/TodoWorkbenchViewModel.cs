@@ -65,6 +65,12 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     public ObservableCollection<TodoListItemViewModel> DueToday { get; } = new();
     public ObservableCollection<TodoListItemViewModel> Upcoming { get; } = new();
     public ObservableCollection<TodoListItemViewModel> NoDueDate { get; } = new();
+
+    /// <summary>按 P0–P3 展示全部活动待办；已办记录不进入优先级分组。</summary>
+    public ObservableCollection<TodoListItemViewModel> Priority0 { get; } = new();
+    public ObservableCollection<TodoListItemViewModel> Priority1 { get; } = new();
+    public ObservableCollection<TodoListItemViewModel> Priority2 { get; } = new();
+    public ObservableCollection<TodoListItemViewModel> Priority3 { get; } = new();
     public ObservableCollection<TodoListItemViewModel> Completed { get; } = new();
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand AddTodoCommand { get; }
@@ -116,6 +122,12 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         Replace(DueToday, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.DueToday));
         Replace(Upcoming, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.Upcoming));
         Replace(NoDueDate, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.NoDueDate));
+
+        // 优先级是独立查看维度，包含置顶活动待办，但不读取已办记录。
+        Replace(Priority0, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P0));
+        Replace(Priority1, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P1));
+        Replace(Priority2, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P2));
+        Replace(Priority3, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P3));
         Replace(Completed, rows.Where(row => !activeIds.Contains(row.Todo.Id))
             .OrderByDescending(row => row.Todo.CompletedAt ?? row.Todo.UpdatedAt));
         StatusText = $"活动待办 {ActiveCount} 条：已置顶 {Pinned.Count} 条、已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条、后续到期 {Upcoming.Count} 条、无截止时间 {NoDueDate.Count} 条。";
