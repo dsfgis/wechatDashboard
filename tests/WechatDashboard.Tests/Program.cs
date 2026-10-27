@@ -37,6 +37,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo workbench summary matches its mutually exclusive visible groups", TestTodoWorkbenchBucketSummaryAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
+    ("A reminder from another chat merges into the existing Todo and only later times reschedule it", TestTodoMergeAcrossChatsAsync),
+    ("Migration v6 backfills existing source messages into the link table", TestTodoSourceMessageMigrationAsync),    ("Capture pipeline reuses the existing Todo for a repeated cross-chat mention", TestCapturePipelineReusesTodoAcrossChatsAsync),
+    ("Todo detail shows every source message of a merged Todo", TestTodoDetailShowsMultipleSourceMessagesAsync),
     ("Message feed manual conversion applies Agent output with safe fallback", TestMessageFeedManualAgentConversionAsync),
     ("Manual Agent priority stays isolated and rolls back with Todo failures", TestManualAgentPriorityTransactionAsync),
     ("DeepSeek model uses saved API key and preserves environment fallback", TestDeepSeekMessageActionModelAsync),
@@ -543,6 +546,265 @@ static async Task TestMessageTodoStateLookupAsync()
     AssertFalse(states[manualMessage.Id].IsAutoCreated, "Manual Todo state must remain distinguishable in the message feed.");
     AssertEqual(TodoStatus.Done, states[manualMessage.Id].Status, "Completed Todo status should be returned.");
     AssertFalse(states.ContainsKey(noTodoMessage.Id), "A message without a Todo must remain convertible.");
+}
+
+static async Task TestTodoSourceMessageMigrationAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messages = new SqliteMessageRepository(databasePath);
+    var todos = new SqliteTodoRepository(databasePath);
+    var message = await messages.SaveAsync(
+        CreateMessage(0, "历史群", "王工", "升级前的待办来源消息") with { SourceMessageKey = $"migration-{Guid.NewGuid():N}" },
+        CancellationToken.None);
+    var now = DateTimeOffset.Now;
+    var todo = await todos.SaveAsync(
+        new TodoItem(0, message.Id, null, "升级前的待办", null, TodoStatus.Pending, PriorityLevel.P2, null, now, now, null, true),
+        CancellationToken.None);
+
+    // 模拟升级前的数据库：既没有关联表，也没有 v6 迁移记录。
+    await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await connection.OpenAsync(CancellationToken.None);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DROP TABLE IF EXISTS todo_source_messages; DELETE FROM schema_migrations WHERE version = 6;";
+        await command.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    await using var verified = new SqliteConnection($"Data Source={databasePath}");
+    await verified.OpenAsync(CancellationToken.None);
+    await using var count = verified.CreateCommand();
+    count.CommandText = "SELECT COUNT(*) FROM todo_source_messages WHERE todo_id = $todoId AND message_id = $messageId AND is_primary = 1;";
+    count.Parameters.AddWithValue("$todoId", todo.Id);
+    count.Parameters.AddWithValue("$messageId", message.Id);
+    AssertEqual(1, Convert.ToInt32(await count.ExecuteScalarAsync(CancellationToken.None), CultureInfo.InvariantCulture),
+        "Migration v6 should backfill the existing source message as the primary link.");
+
+    // 迁移必须幂等：再次初始化不能重复插入关联行。
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    AssertEqual(1, Convert.ToInt32(await count.ExecuteScalarAsync(CancellationToken.None), CultureInfo.InvariantCulture),
+        "Re-running the migration must not duplicate source message links.");
+}
+
+static async Task TestTodoMergeAcrossChatsAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messages = new SqliteMessageRepository(databasePath);
+    var todos = new SqliteTodoRepository(databasePath);
+    var reminders = new SqliteReminderRepository(databasePath);
+    var now = new DateTimeOffset(2026, 10, 27, 9, 0, 0, TimeSpan.FromHours(8));
+    Message NewMessage(string chatName, string sender, string content) => CreateMessage(0, chatName, sender, content);
+    var firstMessage = await messages.SaveAsync(
+        NewMessage("项目A群", "王工", "请周五前提交验收报告") with
+        {
+            SourceMessageKey = $"merge-a-{Guid.NewGuid():N}",
+            IsMentionMe = true
+        },
+        CancellationToken.None);
+    var secondMessage = await messages.SaveAsync(
+        NewMessage("项目B群", "李工", "提醒一下，周五前要交验收报告") with
+        {
+            SourceMessageKey = $"merge-b-{Guid.NewGuid():N}",
+            IsMentionMe = true
+        },
+        CancellationToken.None);
+
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), new FixedClock(now));
+    var created = await service.CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(firstMessage.Id, null, null, null, null, null, now.AddHours(2)),
+        CancellationToken.None);
+    var todoId = created.Todo!.Id;
+
+    // 第二次提醒时间更晚：应改期到更晚时间，并保留两条来源消息。
+    var laterMerge = await service.MergeIntoExistingAsync(
+        new MergeTodoRequest(todoId, secondMessage.Id, now.AddHours(5)),
+        CancellationToken.None);
+    var active = await todos.GetActiveAsync(CancellationToken.None);
+    var sources = await todos.GetSourceMessagesForTodosAsync(new[] { todoId }, CancellationToken.None);
+    var reminderRows = await reminders.GetForTodoAsync(todoId, CancellationToken.None);
+    var messageState = await todos.GetBySourceMessageIdsAsync(
+        new[] { firstMessage.Id, secondMessage.Id },
+        CancellationToken.None);
+    var linkedTodo = await todos.GetByAnySourceMessageIdAsync(secondMessage.Id, CancellationToken.None);
+
+    AssertEqual(1, active.Count, "A repeated reminder from another chat must not create a second Todo.");
+    AssertTrue(laterMerge.Merged, "The second reminder should merge into the existing Todo.");
+    AssertTrue(laterMerge.ReminderRescheduled, "A later reminder should reschedule the existing reminder.");
+    AssertEqual(2, sources[todoId].Count, "Both chats should be kept as source messages.");
+    AssertEqual("项目A群", sources[todoId][0].ChatName, "The primary source message should be listed first.");
+    AssertEqual("项目B群", sources[todoId][1].ChatName, "The merged source message should follow the primary one.");
+    AssertEqual(now.AddHours(5), reminderRows.Single(item => item.Status == ReminderStatus.Scheduled).ScheduledAt,
+        "The later reminder time should win.");
+    AssertEqual(2, reminderRows.Count, "The replaced reminder should be kept as cancelled history.");
+    AssertEqual(2, messageState.Count, "Both messages should report the same existing Todo.");
+    AssertEqual(todoId, messageState[secondMessage.Id].Id, "The merged message should point to the original Todo.");
+    AssertEqual(todoId, linkedTodo!.Id, "Merged messages must resolve to the original Todo.");
+
+    // 第三次提醒更早：保持原提醒时间，不把提醒提前，但来源消息仍要追加。
+    var thirdMessage = await messages.SaveAsync(
+        NewMessage("项目C群", "赵工", "验收报告别忘了") with
+        {
+            SourceMessageKey = $"merge-c-{Guid.NewGuid():N}",
+            IsMentionMe = true
+        },
+        CancellationToken.None);
+    var earlierMerge = await service.MergeIntoExistingAsync(
+        new MergeTodoRequest(todoId, thirdMessage.Id, now.AddMinutes(30)),
+        CancellationToken.None);
+    var finalReminders = await reminders.GetForTodoAsync(todoId, CancellationToken.None);
+    var finalSources = await todos.GetSourceMessagesForTodosAsync(new[] { todoId }, CancellationToken.None);
+
+    AssertFalse(earlierMerge.ReminderRescheduled, "An earlier reminder must not move the reminder forward.");
+    AssertEqual(now.AddHours(5), finalReminders.Single(item => item.Status == ReminderStatus.Scheduled).ScheduledAt,
+        "The later reminder time must remain unchanged after an earlier reminder.");
+    AssertEqual(3, finalSources[todoId].Count, "The third chat message should still be attached as a source.");
+
+    // 已完成的待办不参与去重，也不能被继续合并。
+    await todos.MarkCompletedAsync(todoId, now.AddHours(6), CancellationToken.None);
+    var detector = new TodoDuplicateDetector(todos, new FakeMessageActionModel());
+    var matchedAfterDone = await detector.DetectAsync(thirdMessage, CancellationToken.None);
+    var mergeAfterDone = await service.MergeIntoExistingAsync(
+        new MergeTodoRequest(todoId, thirdMessage.Id, null),
+        CancellationToken.None);
+
+    AssertEqual<TodoItem?>(null, matchedAfterDone, "A completed Todo must not be offered as a duplicate candidate.");
+    AssertFalse(mergeAfterDone.Merged, "A completed Todo must reject further merges so a new Todo can be created.");
+}
+
+static async Task TestCapturePipelineReusesTodoAcrossChatsAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var reminderRepository = new SqliteReminderRepository(databasePath);
+    var firstReminder = DateTimeOffset.Now.AddHours(2);
+    var laterReminder = DateTimeOffset.Now.AddHours(4);
+    // 两条 @我 消息来自不同群，模型第二次判定为同一件事。
+    var model = new FakeMessageActionModel(
+        new MentionMessageAnalysis(PriorityLevel.P1, "请在周五前提交验收报告。", FirstReminderAt: firstReminder),
+        new MentionMessageAnalysis(PriorityLevel.P2, "请在周五前提交验收报告。", FirstReminderAt: laterReminder));
+    var detector = new TodoDuplicateDetector(todoRepository, model);
+
+    MessageCapturePipeline BuildPipeline() => new(
+        adapters: Array.Empty<IMessageCaptureAdapter>(),
+        new SqliteMessageProcessingUnitOfWork(databasePath),
+        new SqliteProcessingOffsetRepository(databasePath),
+        new MentionDetector(new[] { "我" }),
+        new ProjectClassifier(Array.Empty<ProjectRule>()),
+        new UrgencyRanker(priorityContacts: Array.Empty<string>(), priorityProjectIds: Array.Empty<long>()),
+        messageRepository: messageRepository,
+        analyzeMessageContent: () => true,
+        analyzeMentionAsync: model.AnalyzeMentionAsync,
+        detectDuplicateAsync: detector.DetectAsync);
+
+    CapturedMessage Capture(string chatName, string sender, string content) => new(
+        "WeChat",
+        $"dedup-{Guid.NewGuid():N}",
+        chatName,
+        chatName,
+        sender,
+        content,
+        DateTimeOffset.Now,
+        MessageType.Text);
+
+    var firstRun = await BuildPipeline().ProcessAsync(
+        new[] { Capture("项目A群", "王工", "@我 请周五前提交验收报告") },
+        CancellationToken.None);
+    var created = (await todoRepository.GetPendingAsync(CancellationToken.None)).Single();
+    // 第一条消息没有候选待办，检测器不会调用模型；第二条消息才带出命中结果。
+    model.DuplicateTodoId = created.Id;
+
+    var secondRun = await BuildPipeline().ProcessAsync(
+        new[] { Capture("项目B群", "李工", "@我 记得周五前交验收报告") },
+        CancellationToken.None);
+
+    var pending = await todoRepository.GetPendingAsync(CancellationToken.None);
+    var sources = await todoRepository.GetSourceMessagesForTodosAsync(new[] { created.Id }, CancellationToken.None);
+    var reminders = await reminderRepository.GetForTodoAsync(created.Id, CancellationToken.None);
+
+    AssertEqual(1, firstRun.CreatedTodoCount, "The first mention should create exactly one Todo.");
+    AssertEqual(0, secondRun.CreatedTodoCount, "The repeated reminder from another chat must not create a second Todo.");
+    AssertEqual(1, pending.Count, "Only one active Todo should remain after the cross-chat reminder.");
+    AssertEqual(2, sources[created.Id].Count, "Both chats should be kept in the original message box.");
+    AssertEqual("项目A群", sources[created.Id][0].ChatName, "The original chat should stay first.");
+    AssertEqual("项目B群", sources[created.Id][1].ChatName, "The second chat should be appended.");
+    AssertEqual(laterReminder, reminders.Single(item => item.Status == ReminderStatus.Scheduled).ScheduledAt,
+        "A later reminder from the second chat should replace the earlier reminder time.");
+    AssertEqual(1, model.DuplicateCandidates.Count, "Only the second mention should query the duplicate matcher.");
+}
+
+static async Task TestTodoDetailShowsMultipleSourceMessagesAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var now = new DateTimeOffset(2026, 10, 27, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var messages = new SqliteMessageRepository(databasePath);
+    var todos = new SqliteTodoRepository(databasePath);
+    var todoService = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var firstMessage = await messages.SaveAsync(
+        CreateMessage(0, "项目A群", "王工", "请周五前提交验收报告") with { SourceMessageKey = $"detail-a-{Guid.NewGuid():N}" },
+        CancellationToken.None);
+    var secondMessage = await messages.SaveAsync(
+        CreateMessage(0, "项目B群", "李工", "周五前交验收报告") with { SourceMessageKey = $"detail-b-{Guid.NewGuid():N}" },
+        CancellationToken.None);
+    var created = await todoService.CreateFromMessageAsync(
+        new CreateTodoFromMessageRequest(firstMessage.Id, null, null, null, null, null, null),
+        CancellationToken.None);
+    await todoService.MergeIntoExistingAsync(
+        new MergeTodoRequest(created.Todo!.Id, secondMessage.Id, null),
+        CancellationToken.None);
+
+    var sourceMessages = (await todos.GetSourceMessagesForTodosAsync(
+        new[] { created.Todo.Id },
+        CancellationToken.None))[created.Todo.Id];
+    var row = new TodoListItemViewModel(
+        created.Todo,
+        sourceMessages[0],
+        null,
+        TodoDueBucket.NoDueDate,
+        "未指定项目",
+        ProjectColorPolicy.DefaultColor,
+        () => { },
+        sourceMessages);
+    var detail = new TodoDetailViewModel(
+        row,
+        todoService,
+        todos,
+        new SqliteFollowedProjectRepository(databasePath),
+        new ReminderApplicationService(new SqliteTodoUnitOfWork(databasePath), clock),
+        new SqliteReminderRepository(databasePath),
+        clock,
+        () => Task.CompletedTask,
+        _ => Task.CompletedTask,
+        new FakeTodoDialogService());
+
+    AssertEqual(2, row.SourceMessageCount, "The list row should expose every source message count.");
+    AssertEqual("2 条来源", row.SourceMessageBadge, "Multiple sources should be flagged in the list.");
+    AssertTrue(row.HasMultipleSourceMessages, "The list row should report multiple sources.");
+    AssertEqual(2, detail.OriginalMessages.Count, "The detail should show both chats in the original message box.");
+    AssertTrue(detail.OriginalContent.Contains("项目A群", StringComparison.Ordinal),
+        "The joined original content should keep the first chat header.");
+    AssertTrue(detail.OriginalContent.Contains("项目B群", StringComparison.Ordinal),
+        "The joined original content should include the merged chat header.");
+    AssertTrue(detail.BuildCopyText().Contains("项目B群", StringComparison.Ordinal),
+        "Copying all info should include the merged source message.");
+    AssertEqual(
+        System.Windows.Visibility.Collapsed,
+        detail.PrimarySourceVisibility,
+        "A multi-source Todo hides the single-source header rows.");
 }
 
 static async Task TestMessageFeedManualAgentConversionAsync()
@@ -5762,6 +6024,12 @@ public sealed class FakeMessageActionModel(params MentionMessageAnalysis[] respo
     /// <summary>设置后模拟模型故障，用于验证手动创建仍安全回退。</summary>
     public Exception? Exception { get; set; }
 
+    /// <summary>去重判定命中的待办 Id；为空表示永远判定不是同一件事。</summary>
+    public long? DuplicateTodoId { get; set; }
+
+    /// <summary>记录每次去重判定收到的候选待办，便于断言只把活动待办送进模型。</summary>
+    public List<IReadOnlyList<TodoItem>> DuplicateCandidates { get; } = new();
+
     public Task<MentionMessageAnalysis> AnalyzeMentionAsync(Message message, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -5772,6 +6040,16 @@ public sealed class FakeMessageActionModel(params MentionMessageAnalysis[] respo
         }
 
         return Task.FromResult(_responses.Dequeue());
+    }
+
+    public Task<long?> MatchDuplicateTodoAsync(
+        Message message,
+        IReadOnlyList<TodoItem> candidates,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DuplicateCandidates.Add(candidates);
+        return Task.FromResult(DuplicateTodoId);
     }
 }
 

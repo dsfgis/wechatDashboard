@@ -1847,7 +1847,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             messageRepository: _messageRepository,
             analyzeMessageContent: () => _analyzeMessageContent,
             // 单次 Agent 调用同时判断创建必要性并生成优先级和说明，不影响消息流评分。
-            analyzeMentionAsync: _messageActionModel.AnalyzeMentionAsync);
+            analyzeMentionAsync: _messageActionModel.AnalyzeMentionAsync,
+            // 跨群去重：第二次提醒同一件事时只追加来源消息，不再新建待办。
+            detectDuplicateAsync: new TodoDuplicateDetector(_todoRepository, _messageActionModel).DetectAsync);
     }
 
     /// <summary>

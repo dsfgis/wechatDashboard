@@ -295,12 +295,16 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     {
         var todos = source.ToArray();
         var messageIds = todos.Where(item => item.SourceMessageId.HasValue).Select(item => item.SourceMessageId!.Value).Distinct().ToArray();
+        var todoIds = todos.Select(item => item.Id).ToArray();
         var projectsTask = _projectRepository.GetAllAsync(CancellationToken.None);
         var messagesTask = _messages.GetByIdsAsync(messageIds, CancellationToken.None);
-        var remindersTask = _reminders.GetForTodosAsync(todos.Select(item => item.Id).ToArray(), CancellationToken.None);
-        await Task.WhenAll(projectsTask, messagesTask, remindersTask);
+        // 一条待办可能被多个群的多条消息共同触发，这里批量取回全部来源消息用于原文展示。
+        var sourceMessagesTask = _todos.GetSourceMessagesForTodosAsync(todoIds, CancellationToken.None);
+        var remindersTask = _reminders.GetForTodosAsync(todoIds, CancellationToken.None);
+        await Task.WhenAll(projectsTask, messagesTask, sourceMessagesTask, remindersTask);
         var projectLookup = projectsTask.Result.Where(item => item.IsActive).ToDictionary(item => item.Id);
         var messageLookup = messagesTask.Result.ToDictionary(item => item.Id);
+        var sourceMessagesLookup = sourceMessagesTask.Result;
         var reminderLookup = remindersTask.Result;
         var rows = new List<TodoListItemViewModel>(todos.Length);
         foreach (var todo in todos)
@@ -308,6 +312,13 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             var reminders = reminderLookup.GetValueOrDefault(todo.Id) ?? Array.Empty<TodoReminder>();
             var currentReminder = reminders.LastOrDefault(item => item.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching or ReminderStatus.Delivered);
             messageLookup.TryGetValue(todo.SourceMessageId ?? 0, out var message);
+            var sourceMessages = sourceMessagesLookup.GetValueOrDefault(todo.Id);
+            // 关联表缺失时回退到主来源消息，保证历史数据仍能显示原文。
+            if (sourceMessages is null or { Count: 0 })
+            {
+                sourceMessages = message is null ? Array.Empty<Message>() : new[] { message };
+            }
+
             var project = todo.ManagedProjectId is { } projectId && projectLookup.TryGetValue(projectId, out var resolvedProject)
                 ? resolvedProject
                 : null;
@@ -318,7 +329,8 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
                 _bucketPolicy.Classify(todo.DueAt, _clock.Now),
                 project?.ProjectName ?? "未指定项目",
                 project?.Color ?? ProjectColorPolicy.DefaultColor,
-                UpdateSelectionState));
+                UpdateSelectionState,
+                sourceMessages));
         }
 
         return rows;
@@ -358,10 +370,14 @@ public sealed class TodoListItemViewModel : ObservableObject
         TodoDueBucket bucket,
         string projectName,
         string projectColor,
-        Action selectionChanged)
+        Action selectionChanged,
+        IReadOnlyList<Message>? sourceMessages = null)
     {
         Todo = todo;
         SourceMessage = sourceMessage;
+        SourceMessages = sourceMessages is { Count: > 0 } messages
+            ? messages
+            : sourceMessage is null ? Array.Empty<Message>() : new[] { sourceMessage };
         Reminder = reminder;
         Bucket = bucket;
         ProjectName = projectName;
@@ -371,6 +387,18 @@ public sealed class TodoListItemViewModel : ObservableObject
 
     public TodoItem Todo { get; }
     public Message? SourceMessage { get; }
+
+    /// <summary>触发该待办的全部来源消息，主来源在前；跨群重复提醒会有多条。</summary>
+    public IReadOnlyList<Message> SourceMessages { get; }
+
+    /// <summary>来源消息条数，用于列表角标提示存在多群提醒。</summary>
+    public int SourceMessageCount => SourceMessages.Count;
+
+    /// <summary>多于一条来源消息时显示的角标文本；单条来源返回空串。</summary>
+    public string SourceMessageBadge => SourceMessageCount > 1 ? $"{SourceMessageCount} 条来源" : string.Empty;
+
+    public bool HasMultipleSourceMessages => SourceMessageCount > 1;
+
     public TodoReminder? Reminder { get; }
     public TodoDueBucket Bucket { get; }
     public string ProjectName { get; }

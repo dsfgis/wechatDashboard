@@ -45,17 +45,50 @@ public sealed class SqliteMessageProcessingUnitOfWork : IMessageProcessingUnitOf
             var artifacts = createArtifacts(savedMessage);
             var classification = artifacts.Classification with { MessageId = savedMessage.Id };
             var urgency = artifacts.Urgency with { MessageId = savedMessage.Id };
-            var todo = artifacts.Todo is null
-                ? null
-                : artifacts.Todo with { SourceMessageId = savedMessage.Id };
 
             await InsertClassificationAsync(connection, transaction, classification, cancellationToken);
             await SqliteMessageRepository.InsertUrgencyAsync(connection, transaction, urgency, cancellationToken);
+
+            // 命中既有待办时只追加来源消息并按更晚时间改期，不再产生重复待办。
+            if (artifacts.MergeIntoTodoId is { } mergeTodoId)
+            {
+                var mergeTarget = await SqliteTodoRepository.GetByIdAsync(
+                    connection,
+                    transaction,
+                    mergeTodoId,
+                    cancellationToken);
+                if (mergeTarget is not null && mergeTarget.Status is not (TodoStatus.Done or TodoStatus.Ignored))
+                {
+                    await SqliteTodoMerge.ApplyAsync(
+                        connection,
+                        transaction,
+                        mergeTarget.Id,
+                        savedMessage.Id,
+                        artifacts.FirstReminderAt,
+                        artifacts.MergeDueAt,
+                        savedMessage.CapturedAt,
+                        cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
+                    return new MessageProcessingWriteResult(true, false, savedMessage, mergeTarget.Id);
+                }
+            }
+
+            var todo = artifacts.Todo is null
+                ? null
+                : artifacts.Todo with { SourceMessageId = savedMessage.Id };
 
             var createdTodo = todo is not null;
             if (todo is not null)
             {
                 var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, todo, cancellationToken);
+                await SqliteTodoRepository.InsertSourceMessageAsync(
+                    connection,
+                    transaction,
+                    savedTodo.Id,
+                    savedMessage.Id,
+                    isPrimary: true,
+                    savedTodo.CreatedAt,
+                    cancellationToken);
                 if (artifacts.FirstReminderAt is { } reminderAt)
                 {
                     await SqliteReminderRepository.InsertAsync(

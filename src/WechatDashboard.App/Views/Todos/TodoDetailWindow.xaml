@@ -108,10 +108,12 @@
                             <Button Content="复制全部信息" Click="CopyInfoButton_Click" Padding="12,5" Margin="8,0,0,0"
                                     ToolTip="复制待办的字段信息与原始消息" />
                         </StackPanel>
-                        <TextBlock Text="原始消息（只读，可直接选中复制）" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding OriginalMessageHeader}" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
                     </DockPanel>
-                    <TextBox Text="{Binding SourceInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}" />
-                    <TextBox Text="{Binding SenderInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}" />
+                    <TextBox Text="{Binding SourceInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
+                             Visibility="{Binding PrimarySourceVisibility}" />
+                    <TextBox Text="{Binding SenderInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
+                             Visibility="{Binding PrimarySourceVisibility}" />
                     <TextBox x:Name="OriginalContentTextBox" Text="{Binding OriginalContent, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
                              AcceptsReturn="True" MaxHeight="280" VerticalScrollBarVisibility="Auto"
                              Margin="0,8,0,0" />

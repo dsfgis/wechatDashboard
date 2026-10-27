@@ -58,6 +58,55 @@ public sealed class SqliteDatabaseInitializer
             sql: TodoGroupColorsMigrationSql,
             cancellationToken);
         await ApplyProjectAssignmentMigrationAsync(connection, cancellationToken);
+        await ApplyTodoSourceMessagesMigrationAsync(connection, cancellationToken);
+    }
+
+    /// <summary>
+    /// 迁移 v6：新增待办与来源消息的多对多关联表，并把历史 source_message_id 回填为主来源。
+    /// 一条待办可以被多个群的多条消息共同触发，原始消息框需要展示全部来源。
+    /// </summary>
+    private static async Task ApplyTodoSourceMessagesMigrationAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const int version = 6;
+        const string name = "todo-source-messages";
+        const string checksum = "todo-source-messages-v1";
+
+        await using var check = connection.CreateCommand();
+        check.CommandText = "SELECT checksum FROM schema_migrations WHERE version = $version;";
+        check.Parameters.AddWithValue("$version", version);
+        var existingChecksum = await check.ExecuteScalarAsync(cancellationToken) as string;
+        if (existingChecksum is not null)
+        {
+            if (!string.Equals(existingChecksum, checksum, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Schema migration {version} checksum mismatch.");
+            }
+
+            return;
+        }
+
+        await using var transaction = connection.BeginTransaction();
+        try
+        {
+            await ExecuteAsync(connection, transaction, TodoSourceMessagesMigrationSql, cancellationToken);
+
+            await using var record = connection.CreateCommand();
+            record.Transaction = transaction;
+            record.CommandText = "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES ($version, $name, $checksum, $appliedAt);";
+            record.Parameters.AddWithValue("$version", version);
+            record.Parameters.AddWithValue("$name", name);
+            record.Parameters.AddWithValue("$checksum", checksum);
+            record.Parameters.AddWithValue("$appliedAt", DateTimeOffset.UtcNow.ToString("O"));
+            await record.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw;
+        }
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -414,6 +463,30 @@ public sealed class SqliteDatabaseInitializer
     /// 数据库模式 SQL：会话、消息、项目、分类、紧急度、待办、规则、别名、偏移量、采集源设置、审计日志。
     /// 所有对象均使用 CREATE ... IF NOT EXISTS，保证可重复执行。
     /// </summary>
+    /// <summary>v6：待办与来源消息的多对多关联，并回填历史主来源消息。</summary>
+    private const string TodoSourceMessagesMigrationSql = """
+        CREATE TABLE IF NOT EXISTS todo_source_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            todo_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            linked_at TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(todo_id, message_id),
+            FOREIGN KEY(todo_id) REFERENCES todo_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(message_id) REFERENCES messages(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_todo_source_messages_todo
+            ON todo_source_messages(todo_id, is_primary DESC, id);
+        CREATE INDEX IF NOT EXISTS idx_todo_source_messages_message
+            ON todo_source_messages(message_id);
+
+        INSERT OR IGNORE INTO todo_source_messages (todo_id, message_id, linked_at, is_primary)
+        SELECT id, source_message_id, COALESCE(updated_at, created_at), 1
+        FROM todo_items
+        WHERE source_message_id IS NOT NULL;
+        """;
+
     private const string SchemaSql = """
         -- 会话表：一个群聊/私聊对应一行
         CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -497,6 +570,23 @@ public sealed class SqliteDatabaseInitializer
             is_auto_created INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(source_message_id) REFERENCES messages(id)
         );
+
+        -- 待办与来源消息关联表：一条待办可被多个群的多条消息触发
+        CREATE TABLE IF NOT EXISTS todo_source_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            todo_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            linked_at TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(todo_id, message_id),
+            FOREIGN KEY(todo_id) REFERENCES todo_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(message_id) REFERENCES messages(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_todo_source_messages_todo
+            ON todo_source_messages(todo_id, is_primary DESC, id);
+        CREATE INDEX IF NOT EXISTS idx_todo_source_messages_message
+            ON todo_source_messages(message_id);
 
         -- 项目分类规则表
         CREATE TABLE IF NOT EXISTS project_rules (

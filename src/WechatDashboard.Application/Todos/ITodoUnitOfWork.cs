@@ -16,6 +16,12 @@ public interface ITodoUnitOfWork
         DateTimeOffset now,
         CancellationToken cancellationToken);
 
+    /// <summary>把一条消息合并到既有待办：追加来源消息并按更晚时间调整提醒。</summary>
+    Task<MergeTodoResult> MergeIntoExistingAsync(
+        MergeTodoRequest request,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
     Task<SnoozeReminderResult> SnoozeReminderAsync(
         long reminderId,
         DateTimeOffset snoozeUntil,

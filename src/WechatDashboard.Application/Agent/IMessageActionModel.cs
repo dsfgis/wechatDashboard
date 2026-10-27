@@ -12,4 +12,13 @@ public interface IMessageActionModel
     Task<MentionMessageAnalysis> AnalyzeMentionAsync(
         Message message,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 判断消息是否与某条既有活动待办描述同一件事。
+    /// 命中时返回该待办 Id，供调用方把消息合并为来源消息；没有匹配返回 null。
+    /// </summary>
+    Task<long?> MatchDuplicateTodoAsync(
+        Message message,
+        IReadOnlyList<TodoItem> candidates,
+        CancellationToken cancellationToken);
 }

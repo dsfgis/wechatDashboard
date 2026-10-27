@@ -73,9 +73,11 @@ public sealed class TodoDetailViewModel : ObservableObject
         SourceChatName = row.SourceChatName;
         SenderName = row.SenderName;
         SentAt = row.SentAt;
-        OriginalContent = row.SourceMessage?.Content ?? (row.Todo.SourceMessageId is null
-            ? row.Todo.Description ?? row.Todo.Title
-            : "原始消息已不存在");
+        // 一条待办可能由多个群的多条消息共同触发，原始消息框需要完整展示全部来源。
+        OriginalMessages = row.SourceMessages
+            .Select(message => new TodoSourceMessageViewModel(message))
+            .ToArray();
+        OriginalContent = BuildOriginalContent(row);
         ProjectName = row.ProjectName;
         ProjectColor = row.ProjectColor;
         _isPinned = row.Todo.IsPinned;
@@ -116,6 +118,16 @@ public sealed class TodoDetailViewModel : ObservableObject
     public string SenderName { get; }
     public string SentAt { get; }
     public string OriginalContent { get; }
+    /// <summary>全部来源消息（主来源在前），用于在原始消息框中逐条展示。</summary>
+    public IReadOnlyList<TodoSourceMessageViewModel> OriginalMessages { get; }
+    /// <summary>原始消息区标题，多来源时显示条数。</summary>
+    public string OriginalMessageHeader => OriginalMessages.Count > 1
+        ? $"原始消息（共 {OriginalMessages.Count} 条，只读，可直接选中复制）"
+        : "原始消息（只读，可直接选中复制）";
+    /// <summary>单条来源时显示来源/发送人行，多来源时由每条消息自带头信息。</summary>
+    public System.Windows.Visibility PrimarySourceVisibility => OriginalMessages.Count > 1
+        ? System.Windows.Visibility.Collapsed
+        : System.Windows.Visibility.Visible;
     /// <summary>来源与群聊的只读展示行，绑定到可选中复制的文本框。</summary>
     public string SourceInfoLine => $"来源：{Source}　群聊：{SourceChatName}";
     /// <summary>发送人与时间的只读展示行，绑定到可选中复制的文本框。</summary>
@@ -251,6 +263,27 @@ public sealed class TodoDetailViewModel : ObservableObject
 
     /// <summary>由界面层写入底部提示文本（如复制结果反馈）。</summary>
     public void SetStatus(string text) => StatusText = text;
+
+    /// <summary>拼装原始消息区正文：单条直接返回原文，多条按“群聊/发送人/时间 + 正文”分块。</summary>
+    private string BuildOriginalContent(TodoListItemViewModel row)
+    {
+        if (OriginalMessages.Count == 0)
+        {
+            return row.Todo.SourceMessageId is null
+                ? row.Todo.Description ?? row.Todo.Title
+                : "原始消息已不存在";
+        }
+
+        if (OriginalMessages.Count == 1)
+        {
+            return OriginalMessages[0].Content;
+        }
+
+        return string.Join(
+            Environment.NewLine + Environment.NewLine,
+            OriginalMessages.Select((message, index) =>
+                $"[{index + 1}] {message.HeaderLine}{Environment.NewLine}{message.Content}"));
+    }
 
     private string FormatDueText()
     {
@@ -554,4 +587,27 @@ public sealed class TodoDetailViewModel : ObservableObject
             DateTimeKind.Unspecified);
     }
 
+}
+
+/// <summary>原始消息框中的单条来源消息，自带群聊/发送人/时间头信息。</summary>
+public sealed class TodoSourceMessageViewModel
+{
+    public TodoSourceMessageViewModel(Message message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        Source = message.Source;
+        ChatName = message.ChatName;
+        SenderName = message.SenderName;
+        SentAt = message.SentAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+        Content = message.Content;
+        HeaderLine = $"群聊：{ChatName}　发送人：{SenderName}　时间：{SentAt}";
+    }
+
+    public string Source { get; }
+    public string ChatName { get; }
+    public string SenderName { get; }
+    public string SentAt { get; }
+    public string Content { get; }
+    /// <summary>"群聊：xx　发送人：xx　时间：xx"，用于多来源时区分每条消息。</summary>
+    public string HeaderLine { get; }
 }

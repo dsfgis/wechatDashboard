@@ -26,6 +26,17 @@ public interface ITodoRepository
     /// <summary>按原消息获取第一个关联待办，用于消息转待办幂等。</summary>
     Task<TodoItem?> GetBySourceMessageIdAsync(long sourceMessageId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// 查询任意一条来源消息（主来源或被合并来源）所关联的第一个待办。
+    /// 用于跨消息去重后的幂等打开：第二条消息已经挂到既有待办上时不应再新建。
+    /// </summary>
+    Task<TodoItem?> GetByAnySourceMessageIdAsync(long sourceMessageId, CancellationToken cancellationToken);
+
+    /// <summary>批量获取每条待办关联的全部来源消息（主来源在前，其余按发送时间升序）。</summary>
+    Task<IReadOnlyDictionary<long, IReadOnlyList<Message>>> GetSourceMessagesForTodosAsync(
+        IReadOnlyCollection<long> todoIds,
+        CancellationToken cancellationToken);
+
     /// <summary>批量获取原消息已关联的第一个待办，用于消息列表展示真实转换状态。</summary>
     Task<IReadOnlyDictionary<long, TodoItem>> GetBySourceMessageIdsAsync(
         IReadOnlyCollection<long> sourceMessageIds,

@@ -68,6 +68,15 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             isAutoCreated: false,
             managedProjectId: request.ManagedProjectId);
         var savedTodo = await SqliteTodoRepository.InsertAsync(connection, transaction, draft.Todo, cancellationToken);
+        // 主来源消息写入关联表，后续跨群提醒可以通过同一张表追加更多来源。
+        await SqliteTodoRepository.InsertSourceMessageAsync(
+            connection,
+            transaction,
+            savedTodo.Id,
+            message.Id,
+            isPrimary: true,
+            now,
+            cancellationToken);
 
         // 手动创建时优先使用显式提醒时间；未显式设置但存在截止时间时，按会议/任务规则自动提醒。
         var reminderAt = request.FirstReminderAt ?? draft.FirstReminderAt ?? TodoService.ResolveAutomaticFirstReminderAt(
@@ -86,6 +95,37 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
 
         await transaction.CommitAsync(cancellationToken);
         return new CreateTodoResult(CreateTodoOutcome.Created, savedTodo);
+    }
+
+    public async Task<MergeTodoResult> MergeIntoExistingAsync(
+        MergeTodoRequest request,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
+        var message = await SqliteMessageRepository.GetByIdAsync(connection, transaction, request.MessageId, cancellationToken);
+        var todo = await SqliteTodoRepository.GetByIdAsync(connection, transaction, request.TodoId, cancellationToken);
+        // 已办/忽略的待办不参与合并，调用方应改为新建待办。
+        if (message is null || todo is null || todo.Status is TodoStatus.Done or TodoStatus.Ignored)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new MergeTodoResult(false, false, null);
+        }
+
+        var outcome = await SqliteTodoMerge.ApplyAsync(
+            connection,
+            transaction,
+            todo.Id,
+            message.Id,
+            request.ReminderAt,
+            request.DueAt,
+            now,
+            cancellationToken);
+        var updated = await SqliteTodoRepository.GetByIdAsync(connection, transaction, todo.Id, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        // 关联已存在（重复合并同一条消息）仍视为成功，只是不产生新的来源记录。
+        return new MergeTodoResult(true, outcome.ReminderRescheduled, updated);
     }
 
     public async Task<CreateManualTodoResult> CreateManualAsync(

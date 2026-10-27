@@ -223,12 +223,37 @@ public sealed class SqliteTodoRepository : ITodoRepository
         {
             await using var command = connection.CreateCommand();
             var placeholders = AddIdParameters(command, batch);
+            // 通过关联表查询，使被合并的第二条消息同样能显示"已转待办"状态。
+            command.CommandText = $"""
+                SELECT t.id, t.source_message_id, t.project_id, t.title, t.description, t.status,
+                       t.priority, t.due_at, t.created_at, t.updated_at, t.completed_at,
+                       t.is_auto_created, t.is_pinned, t.group_id, t.managed_project_id, l.message_id
+                FROM todo_source_messages l
+                JOIN todo_items t ON t.id = l.todo_id
+                WHERE l.message_id IN ({placeholders})
+                ORDER BY l.message_id, t.created_at, t.id;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var todo = ReadTodo(reader);
+                todosByMessageId.TryAdd(reader.GetInt64(15), todo);
+            }
+        }
+
+        // 兼容未写入关联表的历史行：按主来源消息补齐缺失状态。
+        var missing = ids.Where(id => !todosByMessageId.ContainsKey(id)).ToArray();
+        foreach (var batch in missing.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = AddIdParameters(command, batch);
             command.CommandText = $"""
                 SELECT id, source_message_id, project_id, title, description, status,
-                       priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned, group_id, managed_project_id
+                       priority, due_at, created_at, updated_at, completed_at,
+                       is_auto_created, is_pinned, group_id, managed_project_id
                 FROM todo_items
                 WHERE source_message_id IN ({placeholders})
-                ORDER BY source_message_id, created_at, id;
+                ORDER BY created_at, id;
                 """;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -242,6 +267,136 @@ public sealed class SqliteTodoRepository : ITodoRepository
         }
 
         return todosByMessageId;
+    }
+
+    /// <summary>查询任意一条来源消息（主来源或被合并来源）关联的第一个待办。</summary>
+    public async Task<TodoItem?> GetByAnySourceMessageIdAsync(long sourceMessageId, CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        return await GetByAnySourceMessageIdAsync(connection, transaction: null, sourceMessageId, cancellationToken);
+    }
+
+    internal static async Task<TodoItem?> GetByAnySourceMessageIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long sourceMessageId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT t.id, t.source_message_id, t.project_id, t.title, t.description, t.status,
+                   t.priority, t.due_at, t.created_at, t.updated_at, t.completed_at,
+                   t.is_auto_created, t.is_pinned, t.group_id, t.managed_project_id
+            FROM todo_items t
+            WHERE t.source_message_id = $sourceMessageId
+               OR EXISTS (
+                    SELECT 1 FROM todo_source_messages l
+                    WHERE l.todo_id = t.id AND l.message_id = $sourceMessageId)
+            ORDER BY t.created_at, t.id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$sourceMessageId", sourceMessageId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadTodo(reader) : null;
+    }
+
+    /// <summary>批量查询每条待办关联的全部来源消息，主来源排在首位。</summary>
+    public async Task<IReadOnlyDictionary<long, IReadOnlyList<Message>>> GetSourceMessagesForTodosAsync(
+        IReadOnlyCollection<long> todoIds,
+        CancellationToken cancellationToken)
+    {
+        var ids = todoIds.Where(id => id > 0).Distinct().ToArray();
+        var result = new Dictionary<long, List<Message>>(ids.Length);
+        if (ids.Length == 0)
+        {
+            return new Dictionary<long, IReadOnlyList<Message>>(0);
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        foreach (var batch in ids.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = AddIdParameters(command, batch);
+            command.CommandText = $"""
+                SELECT l.todo_id, m.id, m.source, m.source_message_key, m.chat_session_id, m.chat_name,
+                       m.sender_name, m.content, m.message_type, m.sent_at, m.captured_at, m.is_mention_me
+                FROM todo_source_messages l
+                JOIN messages m ON m.id = l.message_id
+                WHERE l.todo_id IN ({placeholders})
+                ORDER BY l.todo_id, l.is_primary DESC, m.sent_at, m.id;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var todoId = reader.GetInt64(0);
+                // 跳过 todo_id 列后复用消息表的列映射（0..10）。
+                var message = SqliteMessageRepository.ReadMessage(reader, offset: 1);
+                if (!result.TryGetValue(todoId, out var list))
+                {
+                    list = new List<Message>();
+                    result[todoId] = list;
+                }
+
+                list.Add(message);
+            }
+        }
+
+        // 兼容未写入关联表的历史行：按主来源消息回退，保证原文仍可展示。
+        var missing = ids.Where(id => !result.TryGetValue(id, out var list) || list.Count == 0).ToArray();
+        foreach (var batch in missing.Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var placeholders = AddIdParameters(command, batch);
+            command.CommandText = $"""
+                SELECT t.id, m.id, m.source, m.source_message_key, m.chat_session_id, m.chat_name,
+                       m.sender_name, m.content, m.message_type, m.sent_at, m.captured_at, m.is_mention_me
+                FROM todo_items t
+                JOIN messages m ON m.id = t.source_message_id
+                WHERE t.id IN ({placeholders})
+                ORDER BY t.id, m.sent_at, m.id;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var todoId = reader.GetInt64(0);
+                var message = SqliteMessageRepository.ReadMessage(reader, offset: 1);
+                if (!result.TryGetValue(todoId, out var list))
+                {
+                    list = new List<Message>();
+                    result[todoId] = list;
+                }
+
+                list.Add(message);
+            }
+        }
+
+        return result.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<Message>)pair.Value);
+    }
+
+    /// <summary>写入待办与来源消息的关联；已存在时返回 false。</summary>
+    internal static async Task<bool> InsertSourceMessageAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long todoId,
+        long messageId,
+        bool isPrimary,
+        DateTimeOffset linkedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO todo_source_messages (todo_id, message_id, linked_at, is_primary)
+            VALUES ($todoId, $messageId, $linkedAt, $isPrimary);
+            """;
+        command.Parameters.AddWithValue("$todoId", todoId);
+        command.Parameters.AddWithValue("$messageId", messageId);
+        command.Parameters.AddWithValue("$linkedAt", linkedAt.ToString("O"));
+        command.Parameters.AddWithValue("$isPrimary", isPrimary ? 1 : 0);
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
 
     /// <summary>查询所有已办理的待办，按完成时间倒序排列。</summary>

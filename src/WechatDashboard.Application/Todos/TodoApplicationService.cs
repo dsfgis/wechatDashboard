@@ -22,10 +22,26 @@ public enum CreateTodoOutcome
 {
     Created,
     ExistingTodo,
-    SourceMessageMissing
+    SourceMessageMissing,
+    /// <summary>该消息描述的事项已存在，已作为来源消息合并到既有待办。</summary>
+    MergedIntoExisting
 }
 
 public sealed record CreateTodoResult(CreateTodoOutcome Outcome, TodoItem? Todo);
+
+/// <summary>把一条新消息合并到既有待办的请求。</summary>
+/// <param name="TodoId">被合并的目标待办。</param>
+/// <param name="MessageId">需要追加为来源的消息。</param>
+/// <param name="ReminderAt">新消息推导出的提醒时间；仅在更晚时改期。</param>
+/// <param name="DueAt">新消息识别出的截止时间；仅在更晚时更新。</param>
+public sealed record MergeTodoRequest(
+    long TodoId,
+    long MessageId,
+    DateTimeOffset? ReminderAt,
+    DateTimeOffset? DueAt = null);
+
+/// <summary>合并结果；<paramref name="Merged"/> 为 false 表示目标待办不存在或已完成。</summary>
+public sealed record MergeTodoResult(bool Merged, bool ReminderRescheduled, TodoItem? Todo);
 
 public sealed record CreateManualTodoRequest(
     string Title,
@@ -108,6 +124,27 @@ public sealed class TodoApplicationService
             },
             _clock.Now,
             cancellationToken);
+    }
+
+    /// <summary>把一条消息合并进既有待办：追加来源消息，并在新提醒更晚时改期。</summary>
+    public Task<MergeTodoResult> MergeIntoExistingAsync(MergeTodoRequest request, CancellationToken cancellationToken)
+    {
+        if (request.TodoId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "TodoId must be a persisted positive id.");
+        }
+
+        if (request.MessageId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "MessageId must be a persisted positive id.");
+        }
+
+        if (request.ReminderAt is { } reminderAt && reminderAt <= _clock.Now)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Reminder time must be in the future.");
+        }
+
+        return _unitOfWork.MergeIntoExistingAsync(request, _clock.Now, cancellationToken);
     }
 
     public Task<TodoItem?> UpdateAsync(UpdateTodoRequest request, CancellationToken cancellationToken)

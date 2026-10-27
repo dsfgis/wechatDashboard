@@ -38,6 +38,8 @@ public sealed class MessageCapturePipeline
     private readonly IMessageRepository? _messageRepository;
     private readonly Func<bool> _analyzeMessageContent;
     private readonly Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? _analyzeMentionAsync;
+    // 跨群去重：命中既有待办时把消息合并进去，不再重复建待办。
+    private readonly Func<Message, CancellationToken, Task<TodoItem?>>? _detectDuplicateAsync;
 
     public MessageCapturePipeline(
         IEnumerable<IMessageCaptureAdapter> adapters,
@@ -49,7 +51,8 @@ public sealed class MessageCapturePipeline
         Func<Message, long?>? managedProjectMatcher = null,
         IMessageRepository? messageRepository = null,
         Func<bool>? analyzeMessageContent = null,
-        Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? analyzeMentionAsync = null)
+        Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? analyzeMentionAsync = null,
+        Func<Message, CancellationToken, Task<TodoItem?>>? detectDuplicateAsync = null)
     {
         _adapters = adapters.ToArray();
         _messageProcessingUnitOfWork = messageProcessingUnitOfWork;
@@ -61,6 +64,7 @@ public sealed class MessageCapturePipeline
         _messageRepository = messageRepository;
         _analyzeMessageContent = analyzeMessageContent ?? (() => false);
         _analyzeMentionAsync = analyzeMentionAsync;
+        _detectDuplicateAsync = detectDuplicateAsync;
     }
 
     /// <summary>
@@ -161,6 +165,13 @@ public sealed class MessageCapturePipeline
             var message = ToMessage(capturedMessage, isMentionMe);
             // 网络分析必须在数据库事务之前完成，失败时以 null 回退本地优先级和默认说明。
             var mentionAnalysis = await PrepareMentionAnalysisAsync(message, isMentionMe, cancellationToken);
+            // 仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
+            var shouldCreateTodo = isMentionMe
+                && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
+            // 语义去重同样在事务之前完成：命中既有待办时只追加来源消息，不再新建待办。
+            var mergeIntoTodoId = shouldCreateTodo
+                ? await PrepareDuplicateTargetAsync(message, cancellationToken)
+                : null;
             var writeResult = await _messageProcessingUnitOfWork.TryProcessAsync(
                 message,
                 savedMessage =>
@@ -168,9 +179,7 @@ public sealed class MessageCapturePipeline
                     // 分类和评分保持在应用层；待办与消息由工作单元在同一事务中提交。
                     var classification = _projectClassifier.Classify(savedMessage);
                     var urgency = _urgencyRanker.Calculate(savedMessage, isMentionMe, classification);
-                    // 仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
-                    var shouldCreateTodo = isMentionMe
-                        && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
+                    // 即使命中既有待办也照常构造草稿：并发完成导致合并失败时仍能按原逻辑新建待办。
                     var draft = shouldCreateTodo
                         ? TodoService.CreateFromMention(
                             savedMessage,
@@ -185,12 +194,15 @@ public sealed class MessageCapturePipeline
                             analysisDueAt: mentionAnalysis?.DueAt,
                             analysisFirstReminderAt: mentionAnalysis?.FirstReminderAt)
                         : null;
-                    // 自动待办的提醒时间由创建规则一并计算，并随消息事务原子持久化。
+                    // 自动待办的提醒时间由创建规则一并计算，并随消息事务原子持久化；
+                    // 合并路径下同一时间由工作单元按"仅取更晚"规则决定是否改期。
                     return new MessageProcessingArtifacts(
                         classification,
                         urgency,
                         draft?.Todo,
-                        draft?.FirstReminderAt);
+                        draft?.FirstReminderAt,
+                        mergeIntoTodoId,
+                        mergeIntoTodoId is null ? null : mentionAnalysis?.DueAt);
                 },
                 cancellationToken);
 
@@ -208,6 +220,30 @@ public sealed class MessageCapturePipeline
         }
 
         return new CaptureRunResult(captured, persisted, duplicates, createdTodos);
+    }
+
+    /// <summary>判断新 @我 消息是否重复要求某条既有活动待办；任何失败都按新待办处理。</summary>
+    private async Task<long?> PrepareDuplicateTargetAsync(Message message, CancellationToken cancellationToken)
+    {
+        if (_detectDuplicateAsync is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var existing = await _detectDuplicateAsync(message, cancellationToken);
+            return existing?.Id;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine($"Todo duplicate detection failed: {exception.Message}");
+            return null;
+        }
     }
 
     /// <summary>为新的 @我 消息准备 Agent 筛选与内容分析；任何模型故障都回退本地规则，不阻断自动待办。</summary>

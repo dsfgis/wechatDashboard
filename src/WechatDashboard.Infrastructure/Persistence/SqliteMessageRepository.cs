@@ -619,19 +619,19 @@ public sealed class SqliteMessageRepository : IMessageRepository
     }
 
     /// <summary>从 DataReader 映射为 Message 实体。</summary>
-    private static Message ReadMessage(SqliteDataReader reader)
+    internal static Message ReadMessage(SqliteDataReader reader, int offset = 0)
     {
         return new Message(
-            Id: reader.GetInt64(0),
-            Source: reader.GetString(1),
-            SourceMessageKey: reader.GetString(2),
-            ChatSessionId: reader.GetInt64(3),
-            ChatName: reader.GetString(4),
-            SenderName: reader.GetString(5),
-            Content: reader.GetString(6),
-            MessageType: Enum.Parse<MessageType>(reader.GetString(7)),
-            SentAt: DateTimeOffset.Parse(reader.GetString(8)),
-            CapturedAt: DateTimeOffset.Parse(reader.GetString(9)),
-            IsMentionMe: reader.GetInt32(10) == 1);
+            Id: reader.GetInt64(offset),
+            Source: reader.GetString(offset + 1),
+            SourceMessageKey: reader.GetString(offset + 2),
+            ChatSessionId: reader.GetInt64(offset + 3),
+            ChatName: reader.GetString(offset + 4),
+            SenderName: reader.GetString(offset + 5),
+            Content: reader.GetString(offset + 6),
+            MessageType: Enum.Parse<MessageType>(reader.GetString(offset + 7)),
+            SentAt: DateTimeOffset.Parse(reader.GetString(offset + 8)),
+            CapturedAt: DateTimeOffset.Parse(reader.GetString(offset + 9)),
+            IsMentionMe: reader.GetInt32(offset + 10) == 1);
     }
 }

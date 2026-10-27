@@ -216,31 +216,58 @@ public sealed class MessageFeedViewModel : ObservableObject
             return;
         }
 
-        // 幂等打开已有待办，避免重复调用模型或追加 Agent 评分。
-        var existing = await _todoRepository.GetBySourceMessageIdAsync(messageId, CancellationToken.None);
+        // 幂等打开已有待办：主来源或被合并来源都算已转待办，避免重复建模或重复追加评分。
+        var existing = await _todoRepository.GetByAnySourceMessageIdAsync(messageId, CancellationToken.None);
+        var message = existing is null
+            ? await _messages.GetByIdAsync(messageId, CancellationToken.None)
+            : null;
         MentionMessageAnalysis? analysis = null;
         var analysisFailed = false;
-        if (existing is null)
+        if (message is not null)
         {
-            var message = await _messages.GetByIdAsync(messageId, CancellationToken.None);
-            if (message is not null)
+            StatusText = "正在调用 Agent 总结消息并分析优先级...";
+            try
             {
-                StatusText = "正在调用 Agent 总结消息并分析优先级...";
-                try
-                {
-                    analysis = await _model.AnalyzeMentionAsync(message, CancellationToken.None);
-                }
-                catch (Exception)
-                {
-                    // 手动点击是明确创建指令，模型失败只回退内容，不阻断待办创建。
-                    analysisFailed = true;
-                }
+                analysis = await _model.AnalyzeMentionAsync(message, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+                // 手动点击是明确创建指令，模型失败只回退内容，不阻断待办创建。
+                analysisFailed = true;
             }
         }
 
         // 手动创建忽略 ShouldCreate；空白摘要回退默认说明，但保留 Agent 优先级和识别出的时间提醒。
         var agentDescription = analysis?.Description?.Trim();
         var description = string.IsNullOrWhiteSpace(agentDescription) ? null : agentDescription;
+
+        // 跨群去重：同一件事已在待办中时只追加来源消息，并在新提醒更晚时改期。
+        if (existing is null && message is not null)
+        {
+            var duplicate = await new TodoDuplicateDetector(_todoRepository, _model)
+                .DetectAsync(message, CancellationToken.None);
+            if (duplicate is not null)
+            {
+                StatusText = "正在把该消息合并到已有待办...";
+                // 只有未来时间才提交，避免过期提醒触发参数校验失败。
+                var reminderAt = analysis?.FirstReminderAt is { } candidate && candidate > DateTimeOffset.Now
+                    ? candidate
+                    : (DateTimeOffset?)null;
+                var merge = await _todos.MergeIntoExistingAsync(
+                    new MergeTodoRequest(duplicate.Id, messageId, reminderAt, analysis?.DueAt),
+                    CancellationToken.None);
+                if (merge.Merged && merge.Todo is not null)
+                {
+                    await RefreshAsync();
+                    StatusText = merge.ReminderRescheduled
+                        ? "该事项已有待办，已合并来源消息并按更晚时间更新提醒。"
+                        : "该事项已有待办，已把本条消息加入原始消息。";
+                    await _showTodo(new CreateTodoResult(CreateTodoOutcome.MergedIntoExisting, merge.Todo));
+                    return;
+                }
+            }
+        }
+
         var result = existing is not null
             ? new CreateTodoResult(CreateTodoOutcome.ExistingTodo, existing)
             : await _todos.CreateFromMessageAsync(
@@ -266,6 +293,7 @@ public sealed class MessageFeedViewModel : ObservableObject
             CreateTodoOutcome.Created when analysisFailed => "模型分析失败，已按默认内容和本地优先级创建待办。",
             CreateTodoOutcome.Created => "已从消息创建待办。",
             CreateTodoOutcome.ExistingTodo => "该消息已有待办，已打开现有详情。",
+            CreateTodoOutcome.MergedIntoExisting => "该事项已有待办，已把本条消息加入原始消息。",
             _ => "原始消息已不存在，无法创建待办。"
         };
         if (result.Todo is not null)
