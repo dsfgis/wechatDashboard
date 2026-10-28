@@ -41,7 +41,7 @@
 - `ITodoRepository` / `SqliteTodoRepository` 负责列表、详情、完成和置顶持久化。
 - `TodoWorkbenchViewModel` 负责活动/已办列表、截止时间分类和批量操作。
 - `TodoDetailViewModel` 负责标题、描述、优先级、状态、截止时间和提醒编辑。
-- `TodoFeatureCoordinator` 组装仓储、服务、工作台、消息流和提醒后台工作器。
+- `TodoFeatureCoordinator` 组装仓储、服务、工作台、消息流、提醒后台工作器与提醒通知队列。
 - `SqliteDatabaseInitializer` 以带版本、名称和校验和的事务迁移演进 schema；当前迁移版本为 4。
 - `TodoGroupColorPolicy` 固定可读色板并规范化持久化色值。
 - `TodoDueBucketPolicy` 同时负责互斥时间桶和用户时区当天最后一刻计算；时间桶按本地自然日比较，今天任意时刻到期均属于“今日到期”。
@@ -280,6 +280,14 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 
 迁移和项目/待办写入使用现有事务边界；初始化失败不进入可写状态。若旧二进制无法理解新事实源，发布回滚必须恢复迁移前数据库副本，或只读诊断当前数据库，不能让两个版本交替写入后再合并。
 
+### D-031：提醒以右下角队列非模态展示，投递与用户处理解耦
+
+`ReminderWorker` 原本逐条 `await` 发布，而 `IUserNotificationPublisher` 的实现用 `ShowDialog` 阻塞到用户点按钮，导致一轮内多条到期提醒串行卡住后续轮询。改为：`InAppReminderNotificationPublisher` 只把 `ReminderDispatchItem` 投入 `ReminderNotificationQueue` 并立即返回，`ReminderWorker` 随即 `MarkDeliveredAsync` 并处理同轮下一条；用户选择由 `ReminderResolutionHandler` 落地为 `MarkSelectedCompletedAsync`、`SnoozeAsync` 或仅刷新工作台。
+
+队列在屏幕工作区右下角按“最新在下、旧卡上移”叠放，最多同时显示 3 张，其余按到期顺序排队并在处理完一张后补位；可见卡片显示“+N 条待查看”角标。卡片为非模态 `Show`、`Topmost`、`ShowActivated=False`、不显示在任务栏，标题栏关闭等价于“知道了”。单卡高度上限取 `(工作区高 − 2×24 − 2×12) / 3`，保证三张叠放不越出工作区，超出内容在卡片内滚动。由于 `SizeToContent="Height"` 的窗口在 `Loaded` 时高度尚未定型，队列在 `SizeChanged`/`ContentRendered` 重排。`TodoFeatureCoordinator.StopAsync` 释放队列，关闭卡片但不把它们记为用户处理。
+
+代价：入队即视为已投递，重启后仍在内存队列中的提醒不会重发；若要保留，需要持久化“已投递未处理”状态，超出本决策范围。（REQ-010、REQ-013）
+
 ### D-030：桌面日历滚动条由日历主题驱动，不使用系统默认样式
 
 `DesktopCalendarView` 的当日日程列表启用溢出滚动时，系统默认 `ScrollBar` 会固定绘制浅色轨道与箭头按钮，在暗色主题下形成一条与面板割裂的亮带。因此 `CalendarControls.xaml` 提供隐式 `ScrollBar` 样式：轨道透明、滑块为 6 DIP 圆角胶囊、无增减箭头按钮，垂直方向宽 8 DIP、水平方向高 8 DIP；滑块颜色由 `DesktopCalendarTheme` 的 `CalendarScrollThumb`/`CalendarScrollThumbHover`/`CalendarScrollThumbPressed` 三组明暗色值驱动，随主题切换即时更新。该样式只作用于合并 `CalendarControls.xaml` 的日历视图（桌面日历窗口与主窗口“日程概览”），不改变主窗口其他页面的滚动条外观。（REQ-012、REQ-014）
@@ -304,7 +312,9 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 | `TodoCreateWindow` | App | 模态创建界面、日期/时分选择和可访问性标签 | REQ-001、REQ-004、REQ-013 |
 | `TodoDetailViewModel/Window` | App | 活动待办项目及日期/时分编辑，历史待办项目只读显示；原始消息上方提供可编辑保存的待办说明 | REQ-005、REQ-013、REQ-017 |
 | `TodoWorkbenchViewModel` | App | 添加命令、批量解析项目名/颜色、列表刷新和选择恢复 | REQ-001、REQ-006、REQ-011 |
-| `TodoFeatureCoordinator` | App | 组装服务并通知外层聚合刷新 | REQ-007 |
+| `TodoFeatureCoordinator` | App | 组装服务、提醒队列并通知外层聚合刷新 | REQ-007、REQ-010 |
+| `ReminderNotificationQueue` | App | 右下角叠放、FIFO 排队、去重、排队角标与退出清理 | REQ-010 |
+| `ReminderResolutionHandler` | App | 把完成/延后/知悉落地为用例调用并刷新工作台 | REQ-010、REQ-013 |
 | `DesktopCalendarViewModel` | App | 月视图、日期分组、排序、详情跳转和刷新 | REQ-012 |
 | `DesktopCalendarView` | App | 内嵌页与桌面窗口共享的月历视觉和命令绑定；当日日程列表使用主题化滚动条 | REQ-014 |
 | `CalendarControls.xaml` / `DesktopCalendarTheme` | App | 日历共用样式与明暗色值，含 `CalendarScrollThumb` 系列滚动条颜色 | REQ-012、REQ-014 |

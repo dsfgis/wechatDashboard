@@ -4,6 +4,26 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
+## Reminder Notification Queue (2026-10-28)
+
+Current implemented behavior:
+
+- Reminder delivery no longer blocks polling: `InAppReminderNotificationPublisher.PublishAsync` only enqueues into `ReminderNotificationQueue` and returns, so `ReminderWorker` marks the reminder delivered and continues with the remaining due items of the same round.
+- `ReminderNotificationQueue` shows at most three cards at the bottom-right corner of the work area; further due reminders wait in a FIFO queue. The newest card occupies the lowest slot, older cards keep their position and move up only when needed. Gaps are 12 DIP and the screen margin is 24 DIP.
+- Cards carry a `+N 条待查看` badge while other reminders are still queued.
+- Card height is capped at `(workArea.Height - 2*24 - 2*12) / 3`, so three stacked cards always fit; long descriptions scroll inside the card instead of pushing the buttons out of the window.
+- Cards are non-modal (`Show`, not `ShowDialog`), topmost, do not steal focus (`ShowActivated="False"`), and stay out of the taskbar. Closing a card with the title-bar X counts as Acknowledge.
+- User choices are applied by `ReminderResolutionHandler`: 完成 marks the Todo completed, 延后10分钟 snoozes the reminder, 知道了 only refreshes the workbench.
+- The queue repositions cards on `SizeChanged`/`ContentRendered`, because a `SizeToContent="Height"` window does not have its final height when `Loaded` fires.
+- `TodoFeatureCoordinator.StopAsync` disposes the queue, which closes visible cards without re-dispatching and without recording them as user decisions.
+- Trade-off: enqueuing counts as delivery, so `MarkDeliveredAsync` runs before the user acts. Reminders still waiting in the in-memory queue are not re-published after an application restart; keeping them would require a persisted "delivered but not resolved" state.
+
+Verification at this checkpoint (2026-10-28):
+
+- App project builds with 0 errors in an isolated output directory; the default `bin` path is locked when a debug instance is running (MSB3021/MSB3027, environment only).
+- WPF smoke run with five queued reminders: three visible at `left=1076, top=679/352/24`, width 500, height ≤316, bottom edge 995 = 1019−24, gaps 12 and no overlap. Closing the top card invoked the handler once (`Acknowledge`) and promoted the fourth card (pending 2 → 1). Disposing the queue produced no further handler calls.
+- Full .NET runner: no new failures. `Native WeChat reader matches the frozen Python oracle field by field` fails identically on the untouched baseline (`git stash` comparison) and is pre-existing; `Message feed keeps the source context when a page refresh races with navigation` failed on the baseline and passed with this change, so it is flaky rather than caused here.
+
 ## Agent and Automatic/Manual Todo Analysis (2026-10-26)
 
 Current implemented behavior:
