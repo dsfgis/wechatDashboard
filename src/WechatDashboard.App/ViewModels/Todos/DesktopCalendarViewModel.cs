@@ -101,12 +101,17 @@ public sealed class DesktopCalendarViewModel : ObservableObject
                     group => group.Key,
                     group => (IReadOnlyList<DesktopCalendarTodoItemViewModel>)group
                         .Select(entry => entry.Item)
-                        // 待办与已办只通过复选框勾选状态区分，不再把已办排到末尾：
-                        // 否则完成当天有多条待办时，刚完成的待办会被挤出日历格子的
-                        // 两行预览（PreviewTodos 只取前两条），看起来就像“消失”了。
-                        // 按优先级 + 截止时间排序在完成前后保持不变，位置稳定。
-                        .OrderBy(item => item.Priority)
+                        // 排序契约：第一关键字是“是否完成”（未完成在前、已办在后），
+                        // 第二关键字是时间。日期格子里的两行预览（PreviewTodos 只取前两条）
+                        // 因此始终优先展示当天还没办的事项；已办事项靠后但仍保留在
+                        // “当日日程”列表中，不会从日历消失。
+                        // 时间取展示时间（DisplayAt：有来源消息时为消息发送时间，
+                        // 否则回退到截止时间），保证右栏时间列自上而下单调递增；
+                        // DueAt 与 Id 仅用于同一时刻的稳定排序，优先级不再参与排序。
+                        .OrderBy(item => item.IsCompleted)
+                        .ThenBy(item => item.DisplayAt)
                         .ThenBy(item => item.DueAt)
+                        .ThenBy(item => item.Id)
                         .ToArray());
             return (AllCount: allItems.Length, ByDate: byDate);
         });

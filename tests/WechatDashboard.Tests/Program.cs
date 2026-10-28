@@ -2961,6 +2961,9 @@ static async Task TestDesktopCalendarViewModelAsync()
     var todayCompleted = (await service.CreateManualAsync(
         new CreateManualTodoRequest("今天已办理待办", null, PriorityLevel.P0, now.AddHours(7), null, null),
         CancellationToken.None)).Todo!;
+    var todayLateActive = (await service.CreateManualAsync(
+        new CreateManualTodoRequest("今天更晚的高优先级待办", null, PriorityLevel.P0, now.AddHours(8), null, null),
+        CancellationToken.None)).Todo!;
     var tomorrow = (await service.CreateManualAsync(
         new CreateManualTodoRequest("明天待办", null, PriorityLevel.P2, now.AddDays(1), null, null),
         CancellationToken.None)).Todo!;
@@ -2983,11 +2986,14 @@ static async Task TestDesktopCalendarViewModelAsync()
 
     AssertEqual(42, viewModel.Days.Count, "A desktop calendar month should always render six complete weeks.");
     AssertEqual(new DateTime(2026, 7, 27), viewModel.Days.First().Date, "The August 2026 grid should begin on the preceding Monday.");
-    AssertEqual(2, viewModel.SelectedTodos.Count, "The selected day should show active and completed scheduled Todos.");
-    AssertEqual(todayCompleted.Id, viewModel.SelectedTodos.First().Id,
-        "A completed Todo should keep its priority-based position instead of being demoted to the end of the day.");
-    AssertTrue(viewModel.SelectedTodos.First().IsCompleted, "Completed daily Todo should remain visible with completed state.");
-    AssertEqual(todayActive.Id, viewModel.SelectedTodos.Last().Id, "Active Todo should follow the higher-priority completed Todo on the same day.");
+    AssertEqual(3, viewModel.SelectedTodos.Count, "The selected day should show active and completed scheduled Todos.");
+    AssertEqual(todayActive.Id, viewModel.SelectedTodos[0].Id,
+        "同一完成状态内应按时间升序排列，先排当天最早的未完成待办。");
+    AssertEqual(todayLateActive.Id, viewModel.SelectedTodos[1].Id,
+        "优先级不再参与排序：时间更晚的高优先级待办应排在时间更早的低优先级待办之后。");
+    AssertEqual(todayCompleted.Id, viewModel.SelectedTodos[2].Id,
+        "已办待办应排在所有未完成待办之后，而不是按优先级插到最前面。");
+    AssertTrue(viewModel.SelectedTodos[2].IsCompleted, "Completed daily Todo should remain visible with completed state.");
     AssertTrue(viewModel.StatusText.Contains("另有 1 条未设置截止日期"), "Calendar status should report unscheduled Todos honestly.");
 
     viewModel.SelectDate(new DateTime(2026, 8, 30));
@@ -3155,7 +3161,7 @@ static async Task TestDetailCompletionKeepsTodoVisibleInCalendarAsync()
     AssertTrue(afterCompletion is not null, "详情完成后的待办必须仍出现在日历当天列表中，不能消失。");
     AssertTrue(afterCompletion!.IsCompleted, "日历中的已完成待办应通过勾选复选框区分，而不是从日历移除。");
     AssertEqual(indexBeforeCompletion, calendar.SelectedTodos.IndexOf(afterCompletion),
-        "完成前后待办在日历中的位置应保持不变，复选框勾选状态是唯一区别。");
+        "同一天只有这一条待办时，完成前后位置不变；排序规则是先按完成状态、再按时间。");
 
     // 数据库中的截止时间必须保留——这是日历分组的依据。
     var persisted = (await repository.GetByIdAsync(completedTodo.Id, CancellationToken.None))!;
