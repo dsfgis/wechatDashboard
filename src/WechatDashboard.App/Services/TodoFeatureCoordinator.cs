@@ -17,6 +17,7 @@ public sealed class TodoFeatureCoordinator : IDisposable
     private readonly Action<int> _selectTab;
     private readonly DispatcherTimer _dueRefreshTimer;
     private readonly ReminderWorker _reminderWorker;
+    private readonly ReminderNotificationQueue _reminderQueue;
     private CancellationTokenSource? _workerCancellation;
     private Task? _workerTask;
 
@@ -60,11 +61,14 @@ public sealed class TodoFeatureCoordinator : IDisposable
             followedChats,
             filterMode,
             ShowTodoAsync);
-        var publisher = new InAppReminderNotificationPublisher(
+        // 提醒展示与处理解耦：队列负责右下角堆叠与顺序，处理器负责把用户选择写回仓储。
+        var resolutionHandler = new ReminderResolutionHandler(
             reminderService,
             todoRepository,
             clock,
             Workbench.RefreshAsync);
+        _reminderQueue = new ReminderNotificationQueue(resolutionHandler.HandleAsync);
+        var publisher = new InAppReminderNotificationPublisher(_reminderQueue);
         _reminderWorker = new ReminderWorker(reminderRepository, publisher, clock);
         _dueRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         _dueRefreshTimer.Tick += async (_, _) => await Workbench.RefreshAsync();
@@ -86,6 +90,8 @@ public sealed class TodoFeatureCoordinator : IDisposable
     public async Task StopAsync()
     {
         _dueRefreshTimer.Stop();
+        // 退出时收起仍显示的提醒卡片，避免留下无人处理的孤立窗口。
+        _reminderQueue.Dispose();
         if (_workerCancellation is null)
         {
             return;
@@ -113,6 +119,7 @@ public sealed class TodoFeatureCoordinator : IDisposable
         _dueRefreshTimer.Stop();
         _workerCancellation?.Cancel();
         _workerCancellation?.Dispose();
+        _reminderQueue.Dispose();
     }
 
     private async Task ShowTodoAsync(CreateTodoResult result)

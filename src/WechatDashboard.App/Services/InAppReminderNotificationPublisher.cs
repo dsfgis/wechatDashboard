@@ -1,46 +1,34 @@
-using WechatDashboard.App.Views.Reminders;
-using WechatDashboard.Application.Capture;
-using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 
 namespace WechatDashboard.App.Services;
 
-/// <summary>第一版应用内提醒适配器；Windows Toast 可在不改用例层的情况下替换。</summary>
+/// <summary>
+/// 应用内提醒通知适配器。只负责把到期提醒投入右下角队列并立即返回，
+/// 使提醒轮询不再被用户处理动作阻塞；用户选择的落地由 <see cref="ReminderResolutionHandler"/> 承担。
+/// </summary>
 public sealed class InAppReminderNotificationPublisher : IUserNotificationPublisher
 {
-    private readonly ReminderApplicationService _reminders;
-    private readonly ITodoRepository _todos;
-    private readonly IClock _clock;
-    private readonly Func<Task> _refresh;
+    private readonly ReminderNotificationQueue _queue;
 
-    public InAppReminderNotificationPublisher(
-        ReminderApplicationService reminders,
-        ITodoRepository todos,
-        IClock clock,
-        Func<Task> refresh)
+    public InAppReminderNotificationPublisher(ReminderNotificationQueue queue)
     {
-        _reminders = reminders;
-        _todos = todos;
-        _clock = clock;
-        _refresh = refresh;
+        _queue = queue;
     }
 
-    public async Task PublishAsync(ReminderDispatchItem item, CancellationToken cancellationToken)
+    public Task PublishAsync(ReminderDispatchItem item, CancellationToken cancellationToken)
     {
-        var action = await System.Windows.Application.Current.Dispatcher.InvokeAsync(
-            () => ReminderNotificationWindow.Show(item.TodoTitle, item.TodoDescription));
-        if (action == ReminderNotificationAction.Complete)
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
         {
-            await _todos.MarkSelectedCompletedAsync(
-                new[] { item.Reminder.TodoId },
-                _clock.Now,
-                cancellationToken);
-        }
-        else if (action == ReminderNotificationAction.SnoozeTenMinutes)
-        {
-            await _reminders.SnoozeAsync(item.Reminder.Id, _clock.Now.AddMinutes(10), cancellationToken);
+            return Task.CompletedTask;
         }
 
-        await await System.Windows.Application.Current.Dispatcher.InvokeAsync(_refresh);
+        if (dispatcher.CheckAccess())
+        {
+            _queue.Enqueue(item);
+            return Task.CompletedTask;
+        }
+
+        return dispatcher.InvokeAsync(() => _queue.Enqueue(item)).Task;
     }
 }

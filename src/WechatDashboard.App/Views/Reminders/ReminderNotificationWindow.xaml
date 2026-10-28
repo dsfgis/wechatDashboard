@@ -6,8 +6,10 @@
         SizeToContent="Height"
         MaxHeight="520"
         ResizeMode="NoResize"
-        WindowStartupLocation="CenterOwner"
+        WindowStartupLocation="Manual"
         ShowInTaskbar="False"
+        ShowActivated="False"
+        Topmost="True"
         Background="#F4F6F8">
     <Grid Margin="20">
         <Grid.RowDefinitions>
@@ -17,9 +19,26 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock Text="待办提醒"
-                   FontSize="22"
-                   FontWeight="SemiBold" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="待办提醒"
+                       FontSize="22"
+                       FontWeight="SemiBold"
+                       VerticalAlignment="Center" />
+            <Border Grid.Column="1"
+                    Padding="9,2"
+                    VerticalAlignment="Center"
+                    Background="#FEF3C7"
+                    CornerRadius="9"
+                    Visibility="{Binding QueueBadgeVisibility}">
+                <TextBlock Text="{Binding QueueBadgeText}"
+                           FontSize="12"
+                           Foreground="#92400E" />
+            </Border>
+        </Grid>
 
         <Border Grid.Row="1"
                 Margin="0,16,0,0"
@@ -28,20 +47,19 @@
                 BorderBrush="#E5E7EB"
                 BorderThickness="1"
                 CornerRadius="8">
-            <StackPanel>
-                <TextBlock Text="{Binding TodoTitle}"
-                           FontSize="16"
-                           FontWeight="SemiBold"
-                           TextWrapping="Wrap" />
-                <ScrollViewer MaxHeight="220"
-                              Margin="0,8,0,0"
-                              VerticalScrollBarVisibility="Auto"
-                              Visibility="{Binding DescriptionVisibility}">
-                    <TextBlock Text="{Binding TodoDescription}"
-                               Foreground="#4B5563"
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <TextBlock Text="{Binding TodoTitle}"
+                               FontSize="16"
+                               FontWeight="SemiBold"
                                TextWrapping="Wrap" />
-                </ScrollViewer>
-            </StackPanel>
+                    <TextBlock Margin="0,8,0,0"
+                               Text="{Binding TodoDescription}"
+                               Foreground="#4B5563"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding DescriptionVisibility}" />
+                </StackPanel>
+            </ScrollViewer>
         </Border>
 
         <TextBlock Grid.Row="2"
