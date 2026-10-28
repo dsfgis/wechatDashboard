@@ -192,7 +192,7 @@ schema migration v4 仅向 `todo_groups` 追加 `color TEXT NOT NULL DEFAULT '#4
 
 ### D-016：桌面日历是现有 Todo 仓储的只读投影视图
 
-`DesktopCalendarViewModel.RefreshAsync` 各读取一次活动与已办理集合，合并后过滤 `DueAt != null`，按用户时区本地日期分组。每组按“未办理优先、优先级、截止时间”排序；无截止时间只进入状态计数，不进入日期格。月历固定生成从星期一开始的 42 个日期单元。（REQ-012、AC-051 至 AC-053、NFR-009）
+`DesktopCalendarViewModel.RefreshAsync` 各读取一次活动与已办理集合，合并后过滤 `DueAt != null`，按用户时区本地日期分组。每组排序契约为：第一关键字“是否完成”（未办在前、已办在后），第二关键字为展示时间 `DisplayAt`（有来源消息时取消息发送时间，否则回退截止时间），再以 `DueAt`、`Id` 保证同时刻稳定排序；优先级不参与组内排序，保证右栏“当日日程”时间列自上而下单调递增。日期格子两行预览（`PreviewTodos`）因此优先展示未办事项，已办可能被挤出格子预览，但仍完整保留在“当日日程”列表中。无截止时间只进入状态计数，不进入日期格。月历固定生成从星期一开始的 42 个日期单元。（REQ-012、AC-051 至 AC-053、NFR-009）
 
 日历行只保存 Todo ID、标题、优先级、本地截止时间和是否已办理。点击标题通过注入回调复用 `TodoWorkbenchViewModel.OpenTodoAsync(long)` 的详情边界，详情返回后重新刷新，不复制或直接更新 Todo。（AC-054）
 

@@ -4,6 +4,22 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
+## Desktop Calendar Todo Ordering (2026-10-28)
+
+`DesktopCalendarViewModel` (shared by the main-window 日程概览 and the desktop calendar window) orders each day's Todos with an explicit sort contract:
+
+- First key: `IsCompleted` — active items first, completed items after them.
+- Second key: `DisplayAt` — the source-message send time when the Todo has one, otherwise `DueAt`. This keeps the right-hand time column monotonically increasing.
+- Tie-breakers: `DueAt`, then `Id`, for stable order at the same instant.
+- Priority no longer participates in within-day ordering.
+- Consequence: the two-line date-cell preview (`PreviewTodos`) now prefers active items; a completed item may drop out of the cell preview but stays in the full 当日日程 list.
+
+Verification at this checkpoint (2026-10-28):
+
+- `TestDesktopCalendarViewModelAsync` covers same-day order `active 15:00 → active 18:00 (P0) → completed 17:00 (P0)`, proving both the completion-first rule and that priority is ignored.
+- The detail-completion visibility test keeps its guarantee that a completed Todo stays on the calendar; its position assertion wording was adjusted to the new contract (single-item days are unaffected).
+- Tests project builds in an isolated output directory; the full runner reports only the two pre-existing/environmental failures (Python oracle dependency, XAML relative paths outside the default bin layout).
+
 ## Reminder Notification Queue (2026-10-28)
 
 Current implemented behavior:
