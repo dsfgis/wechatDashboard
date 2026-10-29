@@ -2,6 +2,7 @@ bin/
 obj/
 .vs/
 .tmp/
+.buildcheck/
 __pycache__/
 *.py[cod]
 *.user
