@@ -266,10 +266,10 @@
   - 证据：2026-08-30 当前控制台回归中的 `Todo group migration preserves existing todos and is idempotent`、`Todo groups normalize names and reject duplicates`、`Todo rows show groups and truthful manual source` 均通过；测试断言 v4 迁移、默认灰色、红色持久化、重复不改色和 `#FFFFFF` 拒绝，完整运行器 61/61 通过。
 
 - [x] CHECK-040：自动识别待办默认当天到期且边界互斥
-  - 引用：REQ-010；AC-044、AC-045、AC-046；D-014、D-036；TASK-014、TASK-018。
-  - 验证方法：以固定时钟和 `China Standard Time` 创建自动 `@我` 待办；检查 `DueAt`、时间桶和手动/消息转待办回归。
-  - 预期结果：正文没有可识别时间时，自动待办截止为用户本地当天最后一刻并归入今日（D-036 起，正文出现“5点半”“下午3点”“16点左右”等钟点时改用该时刻）；截止日期等于今天时，无论具体时刻早于、等于或晚于当前时刻都只归“今日到期”，只有本地日期早于今天才归“已逾期”；其他创建路径不被强制覆盖。
-  - 证据：2026-08-30 `Todo service creates a pending todo from a mention message` 固定值断言 `2026-08-09T23:59:59.9999999+08:00` 与 `DueToday`；2026-09-01 根据真实界面反馈补充“今天早于当前时刻、等于当前时刻、昨天”边界回归，目标测试与完整运行器 66/66 通过；2026-10-29 新增 `Auto Todo parses an explicit clock time from the message body`，覆盖 15:13 收到“5点半”→ 截止 17:30 / 提醒 17:15、“16点左右”→ 16:00 / 15:45、“明天上午10点”跨天、“第3点”不误判为时钟，完整运行器 88/88 通过。
+  - 引用：REQ-010；AC-044、AC-045、AC-046；D-014、D-036、D-037；TASK-014、TASK-018。
+  - 验证方法：以固定时钟和 `China Standard Time` 创建自动 `@我` 待办；检查 `DueAt`、时间桶和手动/消息转待办回归；再向同一待办合并一条更早的确认时间消息，检查提醒与截止是否被覆盖。
+  - 预期结果：正文没有可识别时间时，自动待办截止为用户本地当天最后一刻并归入今日（D-036 起，正文出现“5点半”“下午3点”“16点左右”等钟点时改用该时刻）；截止日期等于今天时，无论具体时刻早于、等于或晚于当前时刻都只归“今日到期”，只有本地日期早于今天才归“已逾期”；其他创建路径不被强制覆盖。D-037 起，合并带确认表达（“好吧，那就10点半”）的更早时间时截止与提醒按确认时间覆盖，而“请问5点半方便么”这类询问仍保持原提醒。
+  - 证据：2026-08-30 `Todo service creates a pending todo from a mention message` 固定值断言 `2026-08-09T23:59:59.9999999+08:00` 与 `DueToday`；2026-09-01 根据真实界面反馈补充“今天早于当前时刻、等于当前时刻、昨天”边界回归，目标测试与完整运行器 66/66 通过；2026-10-29 新增 `Auto Todo parses an explicit clock time from the message body`，覆盖 15:13 收到“5点半”→ 截止 17:30 / 提醒 17:15、“16点左右”→ 16:00 / 15:45、“明天上午10点”跨天、“第3点”不误判为时钟；同日在该用例补充确认表达断言（“好吧，那就5点半”“改到16点”识别为确认时间、“请问5点半左右方便么”不识别），并在 `A reminder from another chat merges into the existing Todo and only later times reschedule it`、`Capture pipeline reuses the existing Todo for a repeated cross-chat mention` 中补入第四条/第三条确认消息，断言早于当前提醒的确认时间仍覆盖截止与提醒且不新建待办，完整运行器 88/88 通过。
 
 - [x] CHECK-041：工作台刷新只恢复仍有效的选择
   - 引用：REQ-011；AC-047、AC-048、AC-049；D-015；TASK-015、TASK-018。
