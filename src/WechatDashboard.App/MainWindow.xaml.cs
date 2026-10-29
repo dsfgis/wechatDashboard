@@ -392,6 +392,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ObservableCollection<FollowedProjectRow> FollowedProjects { get; } = new();
     // 项目关键字列表（UI 绑定）
     public ObservableCollection<FollowedProjectKeywordRow> FollowedProjectKeywords { get; } = new();
+    // 关注项目树：项目节点下挂各自关键字，供“关注设置”可折叠层级列表绑定
+    public ObservableCollection<FollowedProjectTreeRow> FollowedProjectTree { get; } = new();
     public IReadOnlyList<ProjectColorOption> ProjectColors { get; } =
     [
         new("灰色", ProjectColorPolicy.DefaultColor),
@@ -1521,8 +1523,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _currentFollowedProjects = projects.Select(project => project.ProjectName).ToArray();
         _currentFollowedProjectKeywords = keywords;
-        Replace(FollowedProjects, projects.Select(project => new FollowedProjectRow(project.Id, project.ProjectName, project.Color)));
-        Replace(FollowedProjectKeywords, keywords.Select(keyword => new FollowedProjectKeywordRow(keyword.Id, keyword.ProjectId, keyword.ProjectName, keyword.Keyword)));
+        var projectRows = projects
+            .Select(project => new FollowedProjectRow(project.Id, project.ProjectName, project.Color))
+            .ToArray();
+        var keywordRows = keywords
+            .Select(keyword => new FollowedProjectKeywordRow(keyword.Id, keyword.ProjectId, keyword.ProjectName, keyword.Keyword))
+            .ToArray();
+        Replace(FollowedProjects, projectRows);
+        Replace(FollowedProjectKeywords, keywordRows);
+        // 同一份数据再投影成树：每个项目节点持有自己的关键字，界面只渲染一层可折叠列表。
+        Replace(
+            FollowedProjectTree,
+            projectRows.Select(project =>
+            {
+                var projectKeywords = keywordRows
+                    .Where(keyword => keyword.ProjectId == project.Id)
+                    .ToArray();
+                return new FollowedProjectTreeRow(
+                    project.Id,
+                    project.ProjectName,
+                    project.Color,
+                    $"{projectKeywords.Length} 个关键字",
+                    projectKeywords);
+            }));
     }
 
     /// <summary>添加项目，并将项目名称作为初始关键字以保持既有匹配方式。</summary>
@@ -1542,7 +1565,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _followedProjectKeywordRepository.SaveAsync(project.Id, projectName, CancellationToken.None);
         if (NewFollowedProjectTextBox is not null) NewFollowedProjectTextBox.Text = "";
         await LoadFollowedProjectsAsync();
-        ProjectKeywordProjectComboBox.SelectedValue = project.Id;
         await LoadProjectDashboardAsync();
         SummaryText = $"已添加项目「{projectName}」，可继续为它添加多个关键字。";
     }
@@ -1550,7 +1572,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async void FollowedProjectColorComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (sender is not ComboBox comboBox ||
-            comboBox.DataContext is not FollowedProjectRow row ||
+            comboBox.DataContext is not FollowedProjectTreeRow row ||
             comboBox.SelectedItem is not ProjectColorOption selectedColor ||
             string.Equals(row.Color, selectedColor.Color, StringComparison.OrdinalIgnoreCase))
         {
@@ -1558,9 +1580,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         var originalColor = row.Color;
-        var selectedKeywordProjectId = ProjectKeywordProjectComboBox?.SelectedValue is long projectId
-            ? projectId
-            : (long?)null;
         comboBox.IsEnabled = false;
         try
         {
@@ -1571,19 +1590,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (outcome == UpdateFollowedProjectColorOutcome.Missing)
             {
                 await LoadFollowedProjectsAsync();
-                if (selectedKeywordProjectId.HasValue && ProjectKeywordProjectComboBox is { } missingProjectComboBox)
-                {
-                    missingProjectComboBox.SelectedValue = selectedKeywordProjectId.Value;
-                }
                 SummaryText = $"项目「{row.ProjectName}」已不存在，颜色未保存，项目列表已刷新。";
                 return;
             }
 
             await LoadFollowedProjectsAsync();
-            if (selectedKeywordProjectId.HasValue && ProjectKeywordProjectComboBox is { } keywordProjectComboBox)
-            {
-                keywordProjectComboBox.SelectedValue = selectedKeywordProjectId.Value;
-            }
             await Task.WhenAll(
                 TodoFeature.Workbench.RefreshAsync(),
                 ScheduleOverview.RefreshAsync());
@@ -1602,12 +1613,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    /// <summary>删除项目以及它关联的所有关键字。</summary>
+    /// <summary>删除项目以及它关联的所有关键字；按钮位于项目树节点内，按 DataContext 定位项目。</summary>
     private async void DeleteFollowedProjectButton_Click(object sender, RoutedEventArgs e)
     {
-        if (FollowedProjectsGrid?.SelectedItem is not FollowedProjectRow row)
+        if (sender is not FrameworkElement { DataContext: FollowedProjectTreeRow row })
         {
-            SummaryText = "请先选中要删除的项目。";
+            SummaryText = "请选择要删除的项目。";
             return;
         }
 
@@ -1620,35 +1631,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SummaryText = $"已删除项目「{row.ProjectName}」及其关键字。";
     }
 
-    /// <summary>向选中项目追加关键字。</summary>
-    private async void AddFollowedProjectKeywordButton_Click(object sender, RoutedEventArgs e)
+    /// <summary>在项目树节点内直接追加关键字；按钮 Tag 指向同节点的输入框。</summary>
+    private async void AddInlineKeywordButton_Click(object sender, RoutedEventArgs e)
     {
-        if (ProjectKeywordProjectComboBox?.SelectedItem is not FollowedProjectRow project)
+        if (sender is not Button { DataContext: FollowedProjectTreeRow project } button)
         {
-            SummaryText = "请先选择要添加关键字的项目。";
             return;
         }
-        var keyword = NewFollowedProjectKeywordTextBox?.Text?.Trim();
+
+        var input = button.Tag as TextBox;
+        var keyword = input?.Text?.Trim();
         if (string.IsNullOrWhiteSpace(keyword))
         {
             SummaryText = "请输入项目关键字。";
+            input?.Focus();
             return;
         }
 
         await _followedProjectKeywordRepository.SaveAsync(project.Id, keyword, CancellationToken.None);
-        if (NewFollowedProjectKeywordTextBox is not null) NewFollowedProjectKeywordTextBox.Text = "";
+        if (input is not null) input.Text = "";
         await LoadFollowedProjectsAsync();
-        ProjectKeywordProjectComboBox.SelectedValue = project.Id;
         await LoadProjectDashboardAsync();
         SummaryText = $"已为「{project.ProjectName}」添加关键字「{keyword}」。";
     }
 
-    /// <summary>删除选中的关键字；每个项目至少保留一个匹配关键字。</summary>
+    /// <summary>删除项目节点下的单个关键字；每个项目至少保留一个匹配关键字。</summary>
     private async void DeleteFollowedProjectKeywordButton_Click(object sender, RoutedEventArgs e)
     {
-        if (FollowedProjectKeywordsGrid?.SelectedItem is not FollowedProjectKeywordRow row)
+        if (sender is not FrameworkElement { DataContext: FollowedProjectKeywordRow row })
         {
-            SummaryText = "请先选中要删除的关键字。";
+            SummaryText = "请选择要删除的关键字。";
             return;
         }
         if (_currentFollowedProjectKeywords.Count(keyword => keyword.ProjectId == row.ProjectId) <= 1)
@@ -1659,7 +1671,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         await _followedProjectKeywordRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedProjectsAsync();
-        ProjectKeywordProjectComboBox.SelectedValue = row.ProjectId;
         await LoadProjectDashboardAsync();
         SummaryText = $"已删除项目「{row.ProjectName}」的关键字「{row.Keyword}」。";
     }
@@ -2345,3 +2356,11 @@ public sealed record FollowedChatRow(long Id, string ChatName);
 /// <summary>关注项目行数据：用于 UI 展示与删除操作。</summary>
 public sealed record FollowedProjectRow(long Id, string ProjectName, string Color);
 public sealed record FollowedProjectKeywordRow(long Id, long ProjectId, string ProjectName, string Keyword);
+
+/// <summary>关注设置的层级节点：一个项目 + 它名下的全部关键字，供可折叠树绑定。</summary>
+public sealed record FollowedProjectTreeRow(
+    long Id,
+    string ProjectName,
+    string Color,
+    string KeywordSummary,
+    IReadOnlyList<FollowedProjectKeywordRow> Keywords);

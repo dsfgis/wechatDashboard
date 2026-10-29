@@ -91,6 +91,75 @@
             <Setter Property="AlternatingRowBackground" Value="#F9FAFB" />
             <Setter Property="RowHeight" Value="34" />
         </Style>
+        <!-- 行内危险操作按钮（删除）：透明底、红字、紧凑 -->
+        <Style x:Key="RowDangerButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="#DC2626" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="Margin" Value="8,0,0,0" />
+            <Setter Property="MinHeight" Value="22" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <!-- 行内次要按钮（添加关键字）：白底细边框、紧凑 -->
+        <Style x:Key="RowMiniButton" TargetType="Button">
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="#D1D5DB" />
+            <Setter Property="Padding" Value="12,4" />
+            <Setter Property="Margin" Value="8,0,0,0" />
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <!-- 项目树节点：自绘三角箭头标题，展开后内容缩进，鼠标悬停高亮 -->
+        <Style x:Key="ProjectTreeExpander" TargetType="Expander">
+            <Setter Property="IsExpanded" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Expander">
+                        <StackPanel>
+                            <ToggleButton x:Name="HeaderButton"
+                                          Content="{TemplateBinding Header}"
+                                          ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                          Focusable="False"
+                                          Cursor="Hand">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="HeaderBorder" Background="Transparent" CornerRadius="6" Padding="6,6">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock x:Name="Chevron" Text="&#x25B8;" FontSize="12" Foreground="#6B7280"
+                                                           VerticalAlignment="Center" Margin="0,0,6,0" />
+                                                <ContentPresenter Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Center" />
+                                            </Grid>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Chevron" Property="Text" Value="&#x25BE;" />
+                                            </Trigger>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="HeaderBorder" Property="Background" Value="#F3F6F9" />
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter x:Name="Body" Visibility="Collapsed" />
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Setter TargetName="Body" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <DataTemplate x:Key="TodoMessageContentTemplate">
             <TextBlock Text="{Binding MessageContent}"
                        TextTrimming="CharacterEllipsis"
@@ -404,7 +473,7 @@
                 </TabItem>
                 <TabItem Header="关注设置">
                     <Border Background="White" Padding="16">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
                         <TextBlock Text="关注的 @ 人名字（消息中 @ 到这些名字时会高亮显示，并标记为重点关注）" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
                         <TextBlock Text="输入微信昵称或姓名，支持添加多个。添加后，消息中 @ 到这些名字时将红色高亮。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" />
@@ -413,7 +482,9 @@
                             <Button Content="添加" Click="AddAliasButton_Click" Margin="0,0,8,0" Padding="16,4" />
                             <Button Content="删除选中" Click="DeleteAliasButton_Click" Padding="16,4" />
                         </StackPanel>
-                        <DataGrid x:Name="AliasesGrid" ItemsSource="{Binding Aliases}" Height="240" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
+                        <DataGrid x:Name="AliasesGrid" ItemsSource="{Binding Aliases}" Margin="0,0,0,16"
+                                  ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
                                 <DataGridTextColumn Header="关注的人名字" Binding="{Binding Alias}" Width="*" />
@@ -434,7 +505,9 @@
                             <Button Content="添加" Click="AddFollowedChatButton_Click" Margin="0,0,8,0" Padding="16,4" />
                             <Button Content="删除选中" Click="DeleteFollowedChatButton_Click" Padding="16,4" />
                         </StackPanel>
-                        <DataGrid x:Name="FollowedChatsGrid" ItemsSource="{Binding FollowedChats}" Height="180" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
+                        <DataGrid x:Name="FollowedChatsGrid" ItemsSource="{Binding FollowedChats}" Margin="0,0,0,16"
+                                  ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" />
                                 <DataGridTextColumn Header="群名称" Binding="{Binding ChatName}" Width="*" />
@@ -443,9 +516,9 @@
 
                         <Separator Margin="0,16,0,12" />
                         <TextBlock Text="项目设置" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
-                        <TextBlock Text="先为项目选择颜色并创建项目，再为项目添加多个关键字。手动待办可直接选择项目；自动待办仍按群名或消息正文中的项目关键字归属。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" TextWrapping="Wrap" />
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <TextBox x:Name="NewFollowedProjectTextBox" Width="220" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入项目名称" />
+                        <TextBlock Text="先为项目选择颜色并创建项目，再展开项目为它添加多个关键字。手动待办可直接选择项目；自动待办仍按群名或消息正文中的项目关键字归属。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                            <TextBox x:Name="NewFollowedProjectTextBox" Width="220" Margin="0,0,8,0" ToolTip="输入项目名称" />
                             <ComboBox x:Name="NewFollowedProjectColorComboBox" Width="120" ItemsSource="{Binding ProjectColors}" SelectedIndex="0" Margin="0,0,8,0" ToolTip="选择项目颜色">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
@@ -456,42 +529,59 @@
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
-                            <Button x:Name="AddFollowedProjectButton" Content="添加项目" Click="AddFollowedProjectButton_Click" Margin="0,0,8,0" Padding="16,4" />
-                            <Button x:Name="DeleteFollowedProjectButton" Content="删除选中" Click="DeleteFollowedProjectButton_Click" Padding="16,4" />
+                            <Button x:Name="AddFollowedProjectButton" Content="添加项目" Click="AddFollowedProjectButton_Click" Padding="16,4" Margin="0" />
                         </StackPanel>
-                        <DataGrid x:Name="FollowedProjectsGrid" ItemsSource="{Binding FollowedProjects}" Height="130" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
-                            <DataGrid.Columns>
-                                <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="80" IsReadOnly="True" />
-                                <DataGridTextColumn Header="项目名称" Binding="{Binding ProjectName}" Width="*" IsReadOnly="True" />
-                                <DataGridTemplateColumn Header="颜色" Width="120">
-                                    <DataGridTemplateColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <ComboBox ItemsSource="{Binding DataContext.ProjectColors, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                      DisplayMemberPath="Name"
-                                                      SelectedValuePath="Color"
-                                                      SelectedValue="{Binding Color, Mode=OneWay}"
-                                                      SelectionChanged="FollowedProjectColorComboBox_SelectionChanged"
-                                                      ToolTip="选择后立即保存项目颜色"
-                                                      MinWidth="105" />
-                                        </DataTemplate>
-                                    </DataGridTemplateColumn.CellTemplate>
-                                </DataGridTemplateColumn>
-                            </DataGrid.Columns>
-                        </DataGrid>
-
-                        <TextBlock Text="项目关键字" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6" />
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <ComboBox x:Name="ProjectKeywordProjectComboBox" Width="190" ItemsSource="{Binding FollowedProjects}" DisplayMemberPath="ProjectName" SelectedValuePath="Id" Margin="0,0,8,0" ToolTip="选择要添加关键字的项目" />
-                            <TextBox x:Name="NewFollowedProjectKeywordTextBox" Width="180" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="输入匹配关键字" />
-                            <Button Content="添加关键字" Click="AddFollowedProjectKeywordButton_Click" Margin="0,0,8,0" Padding="16,4" />
-                            <Button Content="删除关键字" Click="DeleteFollowedProjectKeywordButton_Click" Padding="16,4" />
-                        </StackPanel>
-                        <DataGrid x:Name="FollowedProjectKeywordsGrid" ItemsSource="{Binding FollowedProjectKeywords}" Height="180" Margin="0,0,0,16" AutoGenerateColumns="False" CanUserAddRows="False">
-                            <DataGrid.Columns>
-                                <DataGridTextColumn Header="项目" Binding="{Binding ProjectName}" Width="180" />
-                                <DataGridTextColumn Header="关键字" Binding="{Binding Keyword}" Width="*" />
-                            </DataGrid.Columns>
-                        </DataGrid>
+                        <!-- 项目树：每个节点是一个可折叠项目，展开后缩进展示关键字并可逐个删除 -->
+                        <ItemsControl ItemsSource="{Binding FollowedProjectTree}" Margin="0,0,0,4">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Expander Style="{StaticResource ProjectTreeExpander}" Margin="0,0,0,2">
+                                        <Expander.Header>
+                                            <DockPanel LastChildFill="True">
+                                                <Button Style="{StaticResource RowDangerButton}" DockPanel.Dock="Right" Content="删除项目"
+                                                        Click="DeleteFollowedProjectButton_Click" VerticalAlignment="Center"
+                                                        ToolTip="删除该项目及其全部关键字" />
+                                                <ComboBox Width="110" DockPanel.Dock="Right" Margin="0,0,4,0" VerticalAlignment="Center"
+                                                          ItemsSource="{Binding DataContext.ProjectColors, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                          DisplayMemberPath="Name"
+                                                          SelectedValuePath="Color"
+                                                          SelectedValue="{Binding Color, Mode=OneWay}"
+                                                          SelectionChanged="FollowedProjectColorComboBox_SelectionChanged"
+                                                          ToolTip="选择后立即保存项目颜色" />
+                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,8,0" />
+                                                    <TextBlock Text="{Binding ProjectName}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                    <TextBlock Text="{Binding KeywordSummary}" Foreground="#9CA3AF" FontSize="12"
+                                                               Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Expander.Header>
+                                        <StackPanel Margin="18,2,0,6">
+                                            <ItemsControl ItemsSource="{Binding Keywords}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border Background="#FAFBFC" BorderBrush="#E5E7EB" BorderThickness="3,0,0,0"
+                                                                Padding="10,5" Margin="0,2,0,0">
+                                                            <DockPanel LastChildFill="True">
+                                                                <Button Style="{StaticResource RowDangerButton}" DockPanel.Dock="Right" Content="删除"
+                                                                        Click="DeleteFollowedProjectKeywordButton_Click" VerticalAlignment="Center" />
+                                                                <TextBlock Text="{Binding Keyword}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                                            </DockPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                <TextBox x:Name="InlineKeywordTextBox" Width="200" ToolTip="输入要添加到该项目的关键字" />
+                                                <Button Style="{StaticResource RowMiniButton}" Content="添加关键字"
+                                                        Tag="{Binding ElementName=InlineKeywordTextBox}"
+                                                        Click="AddInlineKeywordButton_Click" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Expander>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
 
                         <TextBlock Text="{Binding CaptureInboxPath, StringFormat=采集目录：{0}}" FontSize="13" Foreground="#9CA3AF" Margin="0,12,0,0" TextWrapping="Wrap" />
                     </StackPanel>
