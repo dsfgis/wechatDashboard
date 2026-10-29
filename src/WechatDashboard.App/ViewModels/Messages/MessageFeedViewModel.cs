@@ -249,18 +249,32 @@ public sealed class MessageFeedViewModel : ObservableObject
             if (duplicate is not null)
             {
                 StatusText = "正在把该消息合并到已有待办...";
+                // “那就5点半”“改到16点”这类确认表达代表大家最终认同的事件时间，
+                // 合并时允许把既有待办的截止与提醒改早；询问式时间仍只向后取更晚。
+                var timeConfirmed = TodoService.TryResolveConfirmedClockTime(
+                    message, TimeZoneInfo.Local, out var confirmedDueAt);
+                var confirmedReminderAt = timeConfirmed
+                    ? TodoService.ResolveConfirmedReminder(confirmedDueAt, DateTimeOffset.Now)
+                    : null;
                 // 只有未来时间才提交，避免过期提醒触发参数校验失败。
                 var reminderAt = analysis?.FirstReminderAt is { } candidate && candidate > DateTimeOffset.Now
                     ? candidate
-                    : (DateTimeOffset?)null;
+                    : confirmedReminderAt;
                 var merge = await _todos.MergeIntoExistingAsync(
-                    new MergeTodoRequest(duplicate.Id, messageId, reminderAt, analysis?.DueAt),
+                    new MergeTodoRequest(
+                        duplicate.Id,
+                        messageId,
+                        reminderAt,
+                        analysis?.DueAt ?? (timeConfirmed ? confirmedDueAt : null),
+                        TimeConfirmed: timeConfirmed),
                     CancellationToken.None);
                 if (merge.Merged && merge.Todo is not null)
                 {
                     await RefreshAsync();
                     StatusText = merge.ReminderRescheduled
-                        ? "该事项已有待办，已合并来源消息并按更晚时间更新提醒。"
+                        ? timeConfirmed
+                            ? "该事项已有待办，已合并来源消息并按确认的时间更新提醒。"
+                            : "该事项已有待办，已合并来源消息并按更晚时间更新提醒。"
                         : "该事项已有待办，已把本条消息加入原始消息。";
                     await _showTodo(new CreateTodoResult(CreateTodoOutcome.MergedIntoExisting, merge.Todo));
                     return;

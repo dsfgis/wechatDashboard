@@ -194,15 +194,26 @@ public sealed class MessageCapturePipeline
                             analysisDueAt: mentionAnalysis?.DueAt,
                             analysisFirstReminderAt: mentionAnalysis?.FirstReminderAt)
                         : null;
+                    // “那就5点半”“改到16点”这类确认表达代表大家最终认同的事件时间：
+                    // 合并时允许把既有待办的截止与提醒改早；询问式时间仍只向后取更晚。
+                    var confirmedDueAt = (DateTimeOffset?)null;
+                    if (mergeIntoTodoId is not null
+                        && TodoService.TryResolveConfirmedClockTime(savedMessage, TimeZoneInfo.Local, out var confirmed))
+                    {
+                        confirmedDueAt = confirmed;
+                    }
+
+                    var timeConfirmed = confirmedDueAt is not null;
                     // 自动待办的提醒时间由创建规则一并计算，并随消息事务原子持久化；
-                    // 合并路径下同一时间由工作单元按"仅取更晚"规则决定是否改期。
+                    // 合并路径下同一时间由工作单元按"仅取更晚/确认覆盖"规则决定是否改期。
                     return new MessageProcessingArtifacts(
                         classification,
                         urgency,
                         draft?.Todo,
                         draft?.FirstReminderAt,
                         mergeIntoTodoId,
-                        mergeIntoTodoId is null ? null : mentionAnalysis?.DueAt);
+                        mergeIntoTodoId is null ? null : mentionAnalysis?.DueAt ?? confirmedDueAt,
+                        timeConfirmed);
                 },
                 cancellationToken);
 

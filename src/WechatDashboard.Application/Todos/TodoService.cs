@@ -48,6 +48,12 @@ public static class TodoService
         @"\d{4}\s*[年/-]\s*\d{1,2}\s*[月/-]\s*\d{1,2}",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    // 把时间“定下来”的确认表达：好吧那就5点半 / 改到16点 / 定在下午3点 / 确认明天上午10点。
+    // 与单纯的提问（“5点半方便么？”）区分开：只有确认表达才允许把既有待办的时间改早。
+    private static readonly Regex ConfirmedClockTimeRegex = new(
+        @"(?<confirm>那就|就|定在|定于|定了|改为|改至|改到|改成|调整到|调整至|调整为|挪到|挪至|推迟到|推迟至|提前到|提前至|延后到|延后至|确认|确定|敲定|好吧)\s*(?<day>今天|今日|明天|明日|后天)?\s*(?<period>上午|下午|中午|晚上|傍晚|凌晨|早上|清晨|今晚|明早)?\s*(?<hour>\d{1,2})\s*(?:[:：]\s*(?<minute>\d{2})|[点时](?:\s*(?<half>半)|(?<minute2>\d{1,2})\s*分?)?)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /// <summary>
     /// 当一条消息 @我 时，自动创建一条待办。
     /// 待办标题取自消息正文（截断到 80 字），优先级沿用紧急度评分。
@@ -324,4 +330,37 @@ public static class TodoService
 
     private static DateTimeOffset ToInstant(DateTime localDateTime, TimeZoneInfo timeZone) =>
         new(localDateTime, timeZone.GetUtcOffset(localDateTime));
+
+    /// <summary>
+    /// 识别“那就5点半”“改到16点”“定在下午3点”这类把时间确定下来的确认表达。
+    /// 合并重复提醒时，只有确认时间才允许把既有待办的截止与提醒改早；
+    /// “请问5点半方便么”这类询问仍沿用“只向后取更晚”的规则。
+    /// </summary>
+    public static bool TryResolveConfirmedClockTime(
+        Message message,
+        TimeZoneInfo timeZone,
+        out DateTimeOffset confirmedAt)
+    {
+        confirmedAt = default;
+        if (string.IsNullOrEmpty(message?.Content) || FullDateRegex.IsMatch(message.Content))
+        {
+            return false;
+        }
+
+        var match = ConfirmedClockTimeRegex.Match(message.Content);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        var localSentAt = TimeZoneInfo.ConvertTime(message.SentAt, timeZone);
+        return TryResolveClockInstant(match, localSentAt, weekdayDate: null, timeZone, out confirmedAt);
+    }
+
+    /// <summary>确认时间沿用正文钟点口径：提前十五分钟提醒；已不足以提醒时返回 null。</summary>
+    public static DateTimeOffset? ResolveConfirmedReminder(DateTimeOffset confirmedAt, DateTimeOffset now)
+    {
+        var reminderAt = confirmedAt - ClockTimeReminderLead;
+        return reminderAt > now ? reminderAt : null;
+    }
 }

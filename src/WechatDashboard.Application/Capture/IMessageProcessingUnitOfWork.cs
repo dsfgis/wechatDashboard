@@ -25,13 +25,15 @@ public interface IMessageProcessingUnitOfWork
 /// <param name="FirstReminderAt">待办创建后应原子写入的首个提醒时间；为空时不创建提醒。</param>
 /// <param name="MergeIntoTodoId">命中的既有待办；设置后不再新建待办，只把消息合并进去。</param>
 /// <param name="MergeDueAt">合并时用于向后平移的截止时间；仅在更晚时生效。</param>
+/// <param name="MergeTimeConfirmed">消息是否包含把时间确定下来的确认表达；为 true 时合并允许把截止与提醒改早。</param>
 public sealed record MessageProcessingArtifacts(
     ClassificationResult Classification,
     UrgencyScore Urgency,
     TodoItem? Todo,
     DateTimeOffset? FirstReminderAt = null,
     long? MergeIntoTodoId = null,
-    DateTimeOffset? MergeDueAt = null);
+    DateTimeOffset? MergeDueAt = null,
+    bool MergeTimeConfirmed = false);
 
 /// <summary>单条消息原子写入的结果。</summary>
 /// <param name="Persisted">消息是否为本次新写入；false 表示命中唯一键去重。</param>

@@ -121,7 +121,8 @@ public sealed class SqliteTodoUnitOfWork : ITodoUnitOfWork
             request.ReminderAt,
             request.DueAt,
             now,
-            cancellationToken);
+            cancellationToken,
+            request.TimeConfirmed);
         var updated = await SqliteTodoRepository.GetByIdAsync(connection, transaction, todo.Id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         // 关联已存在（重复合并同一条消息）仍视为成功，只是不产生新的来源记录。

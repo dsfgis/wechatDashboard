@@ -67,7 +67,8 @@ public sealed class SqliteMessageProcessingUnitOfWork : IMessageProcessingUnitOf
                         artifacts.FirstReminderAt,
                         artifacts.MergeDueAt,
                         savedMessage.CapturedAt,
-                        cancellationToken);
+                        cancellationToken,
+                        artifacts.MergeTimeConfirmed);
                     await transaction.CommitAsync(cancellationToken);
                     return new MessageProcessingWriteResult(true, false, savedMessage, mergeTarget.Id);
                 }

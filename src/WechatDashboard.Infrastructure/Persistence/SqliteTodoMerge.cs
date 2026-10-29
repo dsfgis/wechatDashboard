@@ -6,11 +6,12 @@ namespace WechatDashboard.Infrastructure.Persistence;
 
 /// <summary>
 /// 把新消息合并进既有待办的共享逻辑：关联来源消息，
-/// 并在新提醒/截止时间更晚时向后平移，绝不因为更早的时间把提醒提前。
+/// 并在新提醒/截止时间更晚时向后平移；消息把时间“确定下来”（那就5点半/改到16点）时，
+/// 允许按确认时间改早，取大家最终认同的时间作为事件提醒时间。
 /// </summary>
 internal static class SqliteTodoMerge
 {
-    internal sealed record MergeOutcome(bool Linked, bool ReminderRescheduled, bool DueAtExtended)
+    internal sealed record MergeOutcome(bool Linked, bool ReminderRescheduled, bool DueAtUpdated)
     {
         internal static MergeOutcome Empty { get; } = new(false, false, false);
     }
@@ -19,7 +20,8 @@ internal static class SqliteTodoMerge
     /// 在既有事务内执行合并。
     /// </summary>
     /// <param name="reminderAt">新消息推导出的提醒时间；为空表示本次不调整提醒。</param>
-    /// <param name="dueAt">新消息识别出的截止时间；仅在更晚时更新。</param>
+    /// <param name="dueAt">新消息识别出的截止时间；普通消息仅在更晚时更新。</param>
+    /// <param name="timeConfirmed">消息是否包含确认表达；为 true 时提醒与截止按确认时间无条件覆盖（仍须晚于当前时间）。</param>
     internal static async Task<MergeOutcome> ApplyAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -28,7 +30,8 @@ internal static class SqliteTodoMerge
         DateTimeOffset? reminderAt,
         DateTimeOffset? dueAt,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool timeConfirmed = false)
     {
         var linked = await SqliteTodoRepository.InsertSourceMessageAsync(
             connection,
@@ -43,21 +46,25 @@ internal static class SqliteTodoMerge
         await TouchTodoAsync(connection, transaction, todoId, now, cancellationToken);
 
         var reminderRescheduled = reminderAt is { } candidateReminder
-            && await RescheduleIfLaterAsync(connection, transaction, todoId, candidateReminder, now, cancellationToken);
+            && await RescheduleAsync(connection, transaction, todoId, candidateReminder, now, timeConfirmed, cancellationToken);
 
-        var dueAtExtended = dueAt is { } candidateDueAt
-            && await ExtendDueAtIfLaterAsync(connection, transaction, todoId, candidateDueAt, cancellationToken);
+        var dueAtUpdated = dueAt is { } candidateDueAt
+            && await ApplyDueAtAsync(connection, transaction, todoId, candidateDueAt, timeConfirmed, cancellationToken);
 
-        return new MergeOutcome(linked, reminderRescheduled, dueAtExtended);
+        return new MergeOutcome(linked, reminderRescheduled, dueAtUpdated);
     }
 
-    /// <summary>仅当新提醒时间严格晚于当前未触发提醒时，取消旧提醒并改期。</summary>
-    private static async Task<bool> RescheduleIfLaterAsync(
+    /// <summary>
+    /// 普通消息只在 新提醒严格晚于当前未触发提醒 时改期；
+    /// 确认时间（那就5点半/改到16点）代表大家最终认同的事件时间，允许改早，仅在晚于当前时间时写入。
+    /// </summary>
+    private static async Task<bool> RescheduleAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         long todoId,
         DateTimeOffset candidate,
         DateTimeOffset now,
+        bool timeConfirmed,
         CancellationToken cancellationToken)
     {
         var current = await ReadOpenReminderAsync(connection, transaction, todoId, cancellationToken);
@@ -77,8 +84,14 @@ internal static class SqliteTodoMerge
             return true;
         }
 
-        if (candidate <= current.ScheduledAt)
+        if (!timeConfirmed && candidate <= current.ScheduledAt)
         {
+            return false;
+        }
+
+        if (timeConfirmed && candidate <= now)
+        {
+            // 确认的时间已经来不及提醒时保持原提醒，不让待办失去提醒。
             return false;
         }
 
@@ -153,11 +166,13 @@ internal static class SqliteTodoMerge
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<bool> ExtendDueAtIfLaterAsync(
+    /// <summary>普通消息仅在更晚时延长截止；确认时间代表大家认同的事件时间，允许改早。</summary>
+    private static async Task<bool> ApplyDueAtAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         long todoId,
         DateTimeOffset candidate,
+        bool timeConfirmed,
         CancellationToken cancellationToken)
     {
         await using var read = connection.CreateCommand();
@@ -165,7 +180,8 @@ internal static class SqliteTodoMerge
         read.CommandText = "SELECT due_at FROM todo_items WHERE id = $id;";
         read.Parameters.AddWithValue("$id", todoId);
         var raw = await read.ExecuteScalarAsync(cancellationToken);
-        if (raw is string existing
+        if (!timeConfirmed
+            && raw is string existing
             && DateTimeOffset.TryParse(existing, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var current)
             && candidate <= current)
         {

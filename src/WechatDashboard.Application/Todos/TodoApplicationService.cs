@@ -34,11 +34,13 @@ public sealed record CreateTodoResult(CreateTodoOutcome Outcome, TodoItem? Todo)
 /// <param name="MessageId">需要追加为来源的消息。</param>
 /// <param name="ReminderAt">新消息推导出的提醒时间；仅在更晚时改期。</param>
 /// <param name="DueAt">新消息识别出的截止时间；仅在更晚时更新。</param>
+/// <param name="TimeConfirmed">消息是否把时间“确定下来”（那就5点半/改到16点）；为 true 时允许把截止与提醒改早。</param>
 public sealed record MergeTodoRequest(
     long TodoId,
     long MessageId,
     DateTimeOffset? ReminderAt,
-    DateTimeOffset? DueAt = null);
+    DateTimeOffset? DueAt = null,
+    bool TimeConfirmed = false);
 
 /// <summary>合并结果；<paramref name="Merged"/> 为 false 表示目标待办不存在或已完成。</summary>
 public sealed record MergeTodoResult(bool Merged, bool ReminderRescheduled, TodoItem? Todo);

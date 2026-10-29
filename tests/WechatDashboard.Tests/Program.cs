@@ -414,6 +414,31 @@ static Task TestTodoClockTimeParsingAsync()
         numberedDraft.FirstReminderAt,
         "Without an explicit clock time the reminder should be one hour after capture once the due-day morning has passed.");
 
+    // 确认表达（那就5点半）与询问（5点半方便么）要区分开：只有前者允许把既有待办的时间改早。
+    var confirmedMessage = message with { Content = "好吧，那就5点半，就这么定了", SentAt = sentAt };
+    AssertTrue(
+        TodoService.TryResolveConfirmedClockTime(confirmedMessage, timeZone, out var confirmedAt),
+        "'好吧，那就5点半' should be recognized as a confirmed clock time.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 17, 30, 0, TimeSpan.FromHours(8)),
+        confirmedAt,
+        "A bare confirmed '5点半' in the afternoon should resolve to 17:30.");
+    var rescheduledMessage = message with { Content = "@戴少峰 那就改到16点吧", SentAt = openSentAt };
+    AssertTrue(
+        TodoService.TryResolveConfirmedClockTime(rescheduledMessage, timeZone, out var rescheduledAt),
+        "'改到16点' should be recognized as a confirmed clock time.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 16, 0, 0, TimeSpan.FromHours(8)),
+        rescheduledAt,
+        "A confirmed '改到16点' should resolve to 16:00.");
+    AssertFalse(
+        TodoService.TryResolveConfirmedClockTime(message, timeZone, out _),
+        "A question such as '请问5点半左右方便么' must not be treated as a confirmed time.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 17, 15, 0, TimeSpan.FromHours(8)),
+        TodoService.ResolveConfirmedReminder(confirmedAt, sentAt),
+        "A confirmed clock time should remind fifteen minutes before the agreed instant.");
+
     return Task.CompletedTask;
 }
 
@@ -739,6 +764,36 @@ static async Task TestTodoMergeAcrossChatsAsync()
         "The later reminder time must remain unchanged after an earlier reminder.");
     AssertEqual(3, finalSources[todoId].Count, "The third chat message should still be attached as a source.");
 
+    // 第四条消息把时间“确定下来”（好吧，那就10点半）：即使早于当前提醒，也按确认时间覆盖，
+    // 取大家最终认同的事件时间作为提醒依据；截止时间同步替换。
+    var fourthMessage = await messages.SaveAsync(
+        NewMessage("项目D群", "钱工", "好吧，那就10点半，大家都确认了") with
+        {
+            SourceMessageKey = $"merge-d-{Guid.NewGuid():N}",
+            IsMentionMe = true
+        },
+        CancellationToken.None);
+    var confirmedAt = new DateTimeOffset(2026, 10, 27, 10, 30, 0, TimeSpan.FromHours(8));
+    var confirmedMerge = await service.MergeIntoExistingAsync(
+        new MergeTodoRequest(
+            todoId,
+            fourthMessage.Id,
+            ReminderAt: confirmedAt.AddMinutes(-15),
+            DueAt: confirmedAt,
+            TimeConfirmed: true),
+        CancellationToken.None);
+    var confirmedReminders = await reminders.GetForTodoAsync(todoId, CancellationToken.None);
+    var confirmedTodo = await todos.GetByIdAsync(todoId, CancellationToken.None);
+
+    AssertTrue(confirmedMerge.ReminderRescheduled, "A confirmed earlier time should reschedule the reminder even though it is earlier.");
+    AssertEqual(
+        confirmedAt.AddMinutes(-15),
+        confirmedReminders.Single(item => item.Status == ReminderStatus.Scheduled).ScheduledAt,
+        "The reminder should follow the confirmed time minus the fifteen-minute lead.");
+    AssertEqual(confirmedAt, confirmedTodo!.DueAt, "The confirmed time should also replace the due time even when earlier.");
+    AssertEqual(4, (await todos.GetSourceMessagesForTodosAsync(new[] { todoId }, CancellationToken.None))[todoId].Count,
+        "The confirmed chat message should be attached as a source too.");
+
     // 已完成的待办不参与去重，也不能被继续合并。
     await todos.MarkCompletedAsync(todoId, now.AddHours(6), CancellationToken.None);
     var detector = new TodoDuplicateDetector(todos, new FakeMessageActionModel());
@@ -814,6 +869,29 @@ static async Task TestCapturePipelineReusesTodoAcrossChatsAsync()
     AssertEqual(laterReminder, reminders.Single(item => item.Status == ReminderStatus.Scheduled).ScheduledAt,
         "A later reminder from the second chat should replace the earlier reminder time.");
     AssertEqual(1, model.DuplicateCandidates.Count, "Only the second mention should query the duplicate matcher.");
+
+    // 第三条消息把时间确定下来：即使早于当前提醒，也按确认时间覆盖截止与提醒。
+    var confirmedReminder = DateTimeOffset.Now.AddHours(1);
+    var confirmedDueAt = DateTimeOffset.Now.AddHours(2);
+    model.Enqueue(new MentionMessageAnalysis(
+        PriorityLevel.P2,
+        "时间定了。",
+        FirstReminderAt: confirmedReminder,
+        DueAt: confirmedDueAt));
+    var thirdRun = await BuildPipeline().ProcessAsync(
+        new[] { Capture("项目C群", "赵工", "@我 好吧，那就5点半，就这个时间") },
+        CancellationToken.None);
+    var finalReminders = await reminderRepository.GetForTodoAsync(created.Id, CancellationToken.None);
+    var finalSources = await todoRepository.GetSourceMessagesForTodosAsync(new[] { created.Id }, CancellationToken.None);
+    var finalTodo = await todoRepository.GetByIdAsync(created.Id, CancellationToken.None);
+
+    AssertEqual(0, thirdRun.CreatedTodoCount, "A confirmed time must still merge instead of creating a new Todo.");
+    AssertEqual(
+        confirmedReminder,
+        finalReminders.Single(item => item.Status == ReminderStatus.Scheduled).ScheduledAt,
+        "A confirmed earlier time should replace the current reminder at pipeline level.");
+    AssertEqual(confirmedDueAt, finalTodo!.DueAt, "A confirmed earlier time should also replace the due time at pipeline level.");
+    AssertEqual(3, finalSources[created.Id].Count, "The confirmed chat message should be appended as a third source.");
 }
 
 static async Task TestTodoDetailShowsMultipleSourceMessagesAsync()
@@ -6117,6 +6195,9 @@ public sealed class FakeMessageActionModel(params MentionMessageAnalysis[] respo
 
     /// <summary>记录每次去重判定收到的候选待办，便于断言只把活动待办送进模型。</summary>
     public List<IReadOnlyList<TodoItem>> DuplicateCandidates { get; } = new();
+
+    /// <summary>追加一条排队响应，供多轮消息测试（如第三次确认时间）使用。</summary>
+    public void Enqueue(MentionMessageAnalysis response) => _responses.Enqueue(response);
 
     public Task<MentionMessageAnalysis> AnalyzeMentionAsync(Message message, CancellationToken cancellationToken)
     {
