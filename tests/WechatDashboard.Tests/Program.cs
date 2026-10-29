@@ -33,8 +33,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Project classifier uses chat and keyword rules", TestProjectClassifierAsync),
     ("Urgency ranker promotes mentioned incident due today to P0", TestUrgencyRankerAsync),
     ("Todo service creates a pending todo from a mention message", TestTodoCreationAsync),
+    ("Auto Todo parses an explicit clock time from the message body", TestTodoClockTimeParsingAsync),
     ("Todo due bucket policy separates overdue, today, upcoming and undated items", TestTodoDueBucketPolicyAsync),
-    ("Todo workbench summary matches its mutually exclusive visible groups", TestTodoWorkbenchBucketSummaryAsync),
+    ("Todo workbench shows pinned Todos in both the pinned group and their due-date group", TestTodoWorkbenchBucketSummaryAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
     ("A reminder from another chat merges into the existing Todo and only later times reschedule it", TestTodoMergeAcrossChatsAsync),
@@ -324,13 +325,14 @@ static Task TestTodoCreationAsync()
         meetingDraft.FirstReminderAt,
         "A meeting Todo should be reminded five minutes before its start time.");
 
-    // 普通任务按预计处理时长（默认一小时）从截止时间倒推提醒。
+    // 消息没有给出具体时刻、截止时间只能落在当天日终时，提醒放在截止日早上；
+    // 早上已过则收到后一小时提醒一次，不再出现“23:59 截止、22:59 提醒”的临近午夜提醒。
     var taskDraft = TodoService.CreateFromMention(
         message, classification, urgency, now, timeZone);
     AssertEqual(
-        todo.DueAt - TimeSpan.FromHours(1),
+        now + TimeSpan.FromHours(1),
         taskDraft.FirstReminderAt,
-        "A task Todo should reserve one hour of effort before its deadline for the first reminder.");
+        "A task Todo without an explicit clock time should be reminded one hour after capture once its due-day morning has passed.");
 
     // Agent 识别出的明确完成时间优先，且可直接给出更合适的提醒时间。
     var analyzedDraft = TodoService.CreateFromMention(
@@ -349,6 +351,68 @@ static Task TestTodoCreationAsync()
         new DateTimeOffset(2026, 10, 28, 12, 0, 0, TimeSpan.FromHours(8)),
         analyzedDraft.FirstReminderAt,
         "An analyzed reminder time should override the default meeting/task lead.");
+
+    return Task.CompletedTask;
+}
+
+static Task TestTodoClockTimeParsingAsync()
+{
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var classification = new ClassificationResult(10, 1, "石油销售", MessageCategory.Question, 0.8, "chat rule", "Rules");
+    var urgency = new UrgencyScore(10, 60, PriorityLevel.P2, "@我");
+
+    // 真实案例：15:13 收到“请问5点半左右方便么”，截止时间应落在当天 17:30，提醒提前十五分钟。
+    var sentAt = new DateTimeOffset(2026, 10, 29, 15, 13, 0, TimeSpan.FromHours(8));
+    var message = CreateMessage(
+        id: 40,
+        chatName: "石油销售生产运行系统信创改造项目",
+        senderName: "张力",
+        content: "@戴少峰 我没有问题，看@张文涛 ，你们看如何？ 引用消息：@张力 请问5点半左右方便么？") with
+    {
+        SentAt = sentAt
+    };
+    var draft = TodoService.CreateFromMention(message, classification, urgency, sentAt, timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 17, 30, 0, TimeSpan.FromHours(8)),
+        draft.Todo.DueAt,
+        "A bare '5点半' in the message body should become today 17:30 instead of the end-of-day fallback.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 17, 15, 0, TimeSpan.FromHours(8)),
+        draft.FirstReminderAt,
+        "A clock-time Todo should be reminded fifteen minutes before that instant, not near midnight.");
+
+    // 14:32 收到“准备16点左右开”，截止时间落在当天 16:00。
+    var openSentAt = new DateTimeOffset(2026, 10, 29, 14, 32, 0, TimeSpan.FromHours(8));
+    var openMessage = message with { Content = "@戴少峰 准备16点左右开。", SentAt = openSentAt };
+    var openDraft = TodoService.CreateFromMention(openMessage, classification, urgency, openSentAt, timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 16, 0, 0, TimeSpan.FromHours(8)),
+        openDraft.Todo.DueAt,
+        "'16点左右' should schedule the Todo at 16:00 the same day.");
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 29, 15, 45, 0, TimeSpan.FromHours(8)),
+        openDraft.FirstReminderAt,
+        "The reminder should stay fifteen minutes before the parsed clock time.");
+
+    // 带“明天上午”的钟点必须跨到次日，不能被当成今天上午。
+    var tomorrowMessage = message with { Content = "@戴少峰 明天上午10点一起过一下材料", SentAt = sentAt };
+    var tomorrowDraft = TodoService.CreateFromMention(tomorrowMessage, classification, urgency, sentAt, timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 30, 10, 0, 0, TimeSpan.FromHours(8)),
+        tomorrowDraft.Todo.DueAt,
+        "A '明天上午10点' phrase should land on the next local day.");
+
+    // 条目编号“第3点”不是时钟，仍按当天日终兜底，提醒回到收到后一小时。
+    var numberedMessage = message with { Content = "@戴少峰 第3点要求今天内回复", SentAt = sentAt };
+    var numberedDraft = TodoService.CreateFromMention(numberedMessage, classification, urgency, sentAt, timeZone);
+    AssertEqual(
+        new DateTimeOffset(2026, 10, 30, 0, 0, 0, TimeSpan.FromHours(8)).AddTicks(-1),
+        numberedDraft.Todo.DueAt,
+        "A numbered clause such as '第3点' must not be parsed as a clock time.");
+    AssertEqual(
+        sentAt + TimeSpan.FromHours(1),
+        numberedDraft.FirstReminderAt,
+        "Without an explicit clock time the reminder should be one hour after capture once the due-day morning has passed.");
 
     return Task.CompletedTask;
 }
@@ -421,13 +485,22 @@ static async Task TestTodoWorkbenchBucketSummaryAsync()
 
     await workbench.RefreshAsync();
 
-    AssertEqual(6, workbench.ActiveCount, "The active total should equal the sum of all visible mutually exclusive groups.");
-    AssertEqual(1, workbench.Pinned.Count, "Pinned Todos should appear only in the pinned group.");
-    AssertEqual(1, workbench.Overdue.Count, "The overdue group should exclude pinned Todos and include only dates before today.");
-    AssertEqual(1, workbench.OverdueCount, "The summary overdue count should match the visible overdue group.");
+    AssertEqual(6, workbench.ActiveCount, "The active total should stay de-duplicated even though pinned Todos are listed twice.");
+    AssertEqual(1, workbench.Pinned.Count, "Pinned Todos should still get their own group.");
+    AssertEqual(2, workbench.Overdue.Count, "The overdue group should also contain the pinned overdue Todo.");
+    AssertEqual(2, workbench.OverdueCount, "The summary overdue count should match the visible overdue group.");
     AssertEqual(2, workbench.DueToday.Count, "Past and future times on today's local date should both be due today.");
     AssertEqual(1, workbench.Upcoming.Count, "Tomorrow should be upcoming.");
     AssertEqual(1, workbench.NoDueDate.Count, "A missing deadline should remain undated.");
+
+    // 置顶待办同时出现在置顶组与所属截止时间组：两处必须是同一个行对象，组内置顶项排最前。
+    AssertEqual(pinnedOverdue.Id, workbench.Overdue[0].Id, "A pinned overdue Todo should sort first inside the overdue group.");
+    AssertTrue(
+        ReferenceEquals(workbench.Pinned[0], workbench.Overdue[0]),
+        "The pinned row instance should be shared by both groups so the checkbox stays in sync.");
+    workbench.Overdue[0].IsSelected = true;
+    AssertEqual(1, workbench.SelectedCount, "Selecting a row shown twice must not be counted twice.");
+    workbench.Overdue[0].IsSelected = false;
 
     // 优先级是独立维度，包含置顶活动待办，但不得包含上面的已办 P0。
     AssertEqual(2, workbench.Priority0.Count, "P0 should include active pinned and unpinned Todos, but exclude completed Todos.");
@@ -436,9 +509,9 @@ static async Task TestTodoWorkbenchBucketSummaryAsync()
     AssertEqual(1, workbench.Priority3.Count, "P3 should contain only active Todos.");
     AssertEqual(1, workbench.Completed.Count, "The completed Todo should remain only in the completed history.");
     AssertEqual(
-        "活动待办 6 条：已置顶 1 条、已逾期 1 条、今日到期 2 条、后续到期 1 条、无截止时间 1 条。",
+        "活动待办 6 条（去重）：已置顶 1 条（同时计入所属截止时间分组）、已逾期 2 条、今日到期 2 条、后续到期 1 条、无截止时间 1 条。",
         workbench.StatusText,
-        "The summary should use the same mutually exclusive counts shown by the group headers.");
+        "The summary should report the de-duplicated total and the overlapping group sizes.");
 }
 
 static async Task TestManualMessageToTodoAsync()
@@ -2543,14 +2616,17 @@ static async Task TestTodoDetailDescriptionSectionRenderingAsync()
 
             var descriptionBox = (System.Windows.Controls.TextBox)window.FindName("DescriptionTextBox");
             var originalBox = (System.Windows.Controls.TextBox)window.FindName("OriginalContentTextBox");
-            var saveDescriptionButton = (System.Windows.Controls.Button)window.FindName("SaveDescriptionButton");
+            // “保存说明”按钮已移除：说明统一由“保存待办”提交，这里改为断言该共用按钮存在且可用。
+            var saveTodoButton = FindVisualDescendant<System.Windows.Controls.Button>(
+                window,
+                button => string.Equals(button.Content as string, "保存待办", StringComparison.Ordinal));
 
             AssertNotNull(descriptionBox, "The detail should render an editable description box.");
             AssertNotNull(originalBox, "The detail should keep rendering the original message box.");
-            AssertNotNull(saveDescriptionButton, "The detail should render a save-description button.");
             AssertEqual("渲染用的说明文本", descriptionBox.Text, "The rendered description box should show the persisted description.");
             AssertFalse(descriptionBox.IsReadOnly, "The description box must stay editable.");
-            AssertTrue(saveDescriptionButton.IsEnabled, "The save-description button should be enabled for an active Todo.");
+            AssertNotNull(saveTodoButton, "The detail should render the shared save button that also submits the description.");
+            AssertTrue(saveTodoButton!.IsEnabled, "The save button should be enabled for an active Todo.");
 
             var descriptionTop = descriptionBox.TranslatePoint(new System.Windows.Point(0, 0), window).Y;
             var originalTop = originalBox.TranslatePoint(new System.Windows.Point(0, 0), window).Y;
@@ -4803,8 +4879,14 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     var offReminders = await reminderRepository.GetForTodoAsync(offTodo.Id, CancellationToken.None);
     var onReminders = await reminderRepository.GetForTodoAsync(onTodo.Id, CancellationToken.None);
     AssertEqual(1, offReminders.Count, "An unanalyzed automatic Todo should still create its rule-based reminder.");
-    AssertEqual(offTodo.DueAt - TimeSpan.FromHours(1), offReminders.Single().ScheduledAt,
-        "The fallback reminder should reserve one hour before the send-day deadline.");
+    // 没有具体时刻的自动待办不再在午夜前提醒：截止日早上九点提醒，已过则收到后一小时提醒。
+    var offDueOffset = offTodo.DueAt!.Value.Offset;
+    var offDueMorning = new DateTimeOffset(offTodo.DueAt.Value.Date.AddHours(9), offDueOffset);
+    var expectedFallbackReminder = offDueMorning > offTodo.CreatedAt
+        ? offDueMorning
+        : offTodo.CreatedAt + TimeSpan.FromHours(1);
+    AssertEqual(expectedFallbackReminder, offReminders.Single().ScheduledAt,
+        "The fallback reminder should land on the due-day morning or one hour after capture, never just before midnight.");
     AssertEqual(1, onReminders.Count, "An analyzed automatic Todo should create exactly one reminder.");
     AssertEqual(
         sentAt.Date.AddHours(17).AddMinutes(30),

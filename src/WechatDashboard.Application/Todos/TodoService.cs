@@ -13,8 +13,17 @@ public static class TodoService
     /// <summary>会议提醒相对开始时间的默认提前量。</summary>
     public static readonly TimeSpan MeetingReminderLead = TimeSpan.FromMinutes(5);
 
-    /// <summary>普通任务按截止时间预留的默认处理时长。</summary>
+    /// <summary>正文识别出具体钟点时，提醒相对该时刻的提前量（留出回复/到场时间）。</summary>
+    public static readonly TimeSpan ClockTimeReminderLead = TimeSpan.FromMinutes(15);
+
+    /// <summary>用户显式指定截止时间时，按预留一小时处理时长倒推提醒。</summary>
     public static readonly TimeSpan TaskEffortLead = TimeSpan.FromHours(1);
+
+    /// <summary>只有日终截止时间时，提醒放在截止日早上的默认时刻。</summary>
+    public static readonly TimeSpan TaskMorningReminderOffset = TimeSpan.FromHours(9);
+
+    /// <summary>既无具体时刻又已过截止日早上时，收到后多久提醒一次。</summary>
+    public static readonly TimeSpan FallbackReminderLead = TimeSpan.FromHours(1);
 
     // 腾讯会议等引用卡片会给出明确会议时间，优先使用开始时间作为行动截止时间。
     private static readonly Regex MeetingStartRegex = new(
@@ -27,6 +36,17 @@ public static class TodoService
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly string[] MeetingTimeFormats = { "yyyy/M/d H:mm", "yyyy/M/d HH:mm" };
+
+    // 正文里的口语钟点：5点半、17:30、下午3点、16点左右、明天上午10点。
+    // 用负向后行断言排除“第3点要求”这类条目编号，避免把序号当成时钟。
+    private static readonly Regex ExplicitClockTimeRegex = new(
+        @"(?<![\d第])(?<day>今天|今日|明天|明日|后天)?\s*(?<period>上午|下午|中午|晚上|傍晚|凌晨|早上|清晨|今晚|明早)?\s*(?<hour>\d{1,2})\s*(?:[:：]\s*(?<minute>\d{2})|[点时](?:\s*(?<half>半)|(?<minute2>\d{1,2})\s*分?)?)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    // 正文写出完整年月日时说明是另一种写法，交给既有会议/星期规则，避免只截取钟点造成日期错位。
+    private static readonly Regex FullDateRegex = new(
+        @"\d{4}\s*[年/-]\s*\d{1,2}\s*[月/-]\s*\d{1,2}",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// 当一条消息 @我 时，自动创建一条待办。
@@ -80,8 +100,9 @@ public static class TodoService
     }
 
     /// <summary>
-    /// 计算自动待办的首个提醒时间：会议按开始时间提前五分钟，任务按预计处理时长提前提醒。
-    /// Agent 提供的明确提醒时间优先；提醒早于当前时间或无法落到未来时不创建提醒。
+    /// 计算自动待办的首个提醒时间。优先级：Agent 明确时间 → 会议卡片提前五分钟 →
+    /// 正文明确钟点提前十五分钟 → 日终截止的任务放在截止日早上九点，已过则收到后一小时。
+    /// 提醒早于当前时间或落在截止时间之后时不创建提醒。
     /// </summary>
     public static DateTimeOffset? ResolveAutomaticFirstReminderAt(
         string content,
@@ -100,9 +121,47 @@ public static class TodoService
             return null;
         }
 
-        var lead = MeetingStartRegex.IsMatch(content) ? MeetingReminderLead : TaskEffortLead;
-        var scheduledAt = target - lead;
-        return scheduledAt > now ? scheduledAt : null;
+        if (MeetingStartRegex.IsMatch(content))
+        {
+            return Schedulable(target - MeetingReminderLead, target, now);
+        }
+
+        // 正文只给出“5点半”“下午3点”这类钟点时，提前十五分钟提醒，留出回复或到场时间。
+        if (!FullDateRegex.IsMatch(content) && ExplicitClockTimeRegex.IsMatch(content))
+        {
+            return Schedulable(target - ClockTimeReminderLead, target, now);
+        }
+
+        // 截止时间是“当天/当周某日的末尾”，说明消息没有给出具体时刻：
+        // 放在截止日早上提醒，已过早上则收到后一小时提醒，避免出现 22:59 这种临近午夜的提醒。
+        var localDue = TimeZoneInfo.ConvertTime(target, timeZone);
+        if (!IsDayEndSentinel(localDue))
+        {
+            return Schedulable(target - TaskEffortLead, target, now);
+        }
+
+        var morning = MorningOf(localDue, timeZone);
+        if (morning > now && morning < target)
+        {
+            return morning;
+        }
+
+        return Schedulable(now + FallbackReminderLead, target, now);
+    }
+
+    /// <summary>判断截止时间是否为“某日最后一刻”的兜底值（本地 23:59 之后）。</summary>
+    private static bool IsDayEndSentinel(DateTimeOffset localInstant) =>
+        localInstant.TimeOfDay >= new TimeSpan(23, 59, 0);
+
+    /// <summary>只有当提醒严格晚于当前时间且早于截止时间时才可用。</summary>
+    private static DateTimeOffset? Schedulable(DateTimeOffset candidate, DateTimeOffset dueAt, DateTimeOffset now) =>
+        candidate > now && candidate < dueAt ? candidate : null;
+
+    /// <summary>取截止日当天九点（含时区偏移），用作日终截止任务的默认提醒时刻。</summary>
+    private static DateTimeOffset MorningOf(DateTimeOffset localInstant, TimeZoneInfo timeZone)
+    {
+        var localMorning = localInstant.Date + TaskMorningReminderOffset;
+        return new DateTimeOffset(localMorning, timeZone.GetUtcOffset(localMorning));
     }
 
     /// <summary>从消息正文、Agent 明确时间和已合并的引用内容计算自动待办截止时间。</summary>
@@ -137,28 +196,132 @@ public static class TodoService
             }
         }
 
-        var weekdayMatch = CurrentWeekdayRegex.Match(message.Content);
-        if (weekdayMatch.Success)
+        var localSentAt = TimeZoneInfo.ConvertTime(message.SentAt, timeZone);
+        // 正文已写出完整年月日时交给既有规则，避免只截取到钟点导致日期错位。
+        var hasFullDate = FullDateRegex.IsMatch(message.Content);
+        var weekdayDate = TryResolveWeekdayDate(message.Content, localSentAt);
+
+        // 正文给出“5点半”“下午3点”“16点左右”这类口语钟点时，以该时刻作为截止时间，
+        // 否则文件会退回日终时间，导致提醒落在深夜（例如 22:59 才提醒回复 17:30 的确认）。
+        if (!hasFullDate
+            && ExplicitClockTimeRegex.Match(message.Content) is { Success: true } clockMatch
+            && TryResolveClockInstant(clockMatch, localSentAt, weekdayDate, timeZone, out var clockInstant))
         {
-            // 中文自然周按周一开始；目标日期完全基于消息发送日期，历史补采结果保持稳定。
-            var localSentAt = TimeZoneInfo.ConvertTime(message.SentAt, timeZone);
-            var daysSinceMonday = ((int)localSentAt.DayOfWeek + 6) % 7;
-            var weekStart = localSentAt.Date.AddDays(-daysSinceMonday);
-            var weekdayOffset = weekdayMatch.Groups["weekday"].Value switch
-            {
-                "一" => 0,
-                "二" => 1,
-                "三" => 2,
-                "四" => 3,
-                "五" => 4,
-                "六" => 5,
-                _ => 6
-            };
-            var localEnd = weekStart.AddDays(weekdayOffset).AddDays(1).AddTicks(-1);
+            return clockInstant;
+        }
+
+        // 只识别出“本周三”而没有钟点时，取该自然日末尾。
+        if (weekdayDate is { } weekday)
+        {
+            var localEnd = weekday.AddDays(1).AddTicks(-1);
             return new DateTimeOffset(localEnd, timeZone.GetUtcOffset(localEnd));
         }
 
         // 未出现可识别日期时保留原有默认规则，不影响既有自动待办。
         return new TodoDueBucketPolicy(timeZone).EndOfToday(message.SentAt);
     }
+
+    /// <summary>识别“本周三”这类本周内的明确星期，返回对应的本地自然日。</summary>
+    private static DateTime? TryResolveWeekdayDate(string content, DateTimeOffset localSentAt)
+    {
+        var weekdayMatch = CurrentWeekdayRegex.Match(content);
+        if (!weekdayMatch.Success)
+        {
+            return null;
+        }
+
+        // 中文自然周按周一开始；目标日期完全基于消息发送日期，历史补采结果保持稳定。
+        var daysSinceMonday = ((int)localSentAt.DayOfWeek + 6) % 7;
+        var weekStart = localSentAt.Date.AddDays(-daysSinceMonday);
+        var weekdayOffset = weekdayMatch.Groups["weekday"].Value switch
+        {
+            "一" => 0,
+            "二" => 1,
+            "三" => 2,
+            "四" => 3,
+            "五" => 4,
+            "六" => 5,
+            _ => 6
+        };
+        return weekStart.AddDays(weekdayOffset);
+    }
+
+    /// <summary>把正文里的口语钟点解析为具体时刻，支持“5点半”“下午3点”“16点”“明天上午10点”“17:30”。</summary>
+    private static bool TryResolveClockInstant(
+        Match match,
+        DateTimeOffset localSentAt,
+        DateTime? weekdayDate,
+        TimeZoneInfo timeZone,
+        out DateTimeOffset instant)
+    {
+        instant = default;
+        if (!int.TryParse(match.Groups["hour"].Value, out var hour) || hour > 23)
+        {
+            return false;
+        }
+
+        var minute = 0;
+        if (match.Groups["minute"].Success)
+        {
+            int.TryParse(match.Groups["minute"].Value, out minute);
+        }
+        else if (match.Groups["half"].Success)
+        {
+            minute = 30;
+        }
+        else if (match.Groups["minute2"].Success)
+        {
+            int.TryParse(match.Groups["minute2"].Value, out minute);
+        }
+
+        if (minute > 59)
+        {
+            return false;
+        }
+
+        var dayText = match.Groups["day"].Value;
+        var period = match.Groups["period"].Value;
+        var dayOffset = dayText switch
+        {
+            "明天" or "明日" or "明早" => 1,
+            "后天" => 2,
+            _ => 0
+        };
+        var baseDate = dayText.Length > 0
+            ? localSentAt.Date.AddDays(dayOffset)
+            : weekdayDate ?? localSentAt.Date;
+
+        hour = NormalizeHour(hour, period);
+
+        // 没有时段词的“5点半”可能指凌晨也可能指下午：优先取不早于消息发送时刻的最近解释。
+        var candidate = baseDate.AddHours(hour).AddMinutes(minute);
+        var hasExplicitDay = dayText.Length > 0 || weekdayDate is not null;
+        if (!match.Groups["minute"].Success
+            && period.Length == 0
+            && !hasExplicitDay
+            && hour <= 11
+            && ToInstant(candidate, timeZone) < localSentAt)
+        {
+            var afternoon = candidate.AddHours(12);
+            if (afternoon.Hour <= 23 && ToInstant(afternoon, timeZone) > localSentAt)
+            {
+                candidate = afternoon;
+            }
+        }
+
+        instant = ToInstant(candidate, timeZone);
+        return true;
+    }
+
+    /// <summary>把“上午/下午/晚上/中午/凌晨”等时段词折算成 24 小时制。</summary>
+    private static int NormalizeHour(int hour, string period) => period switch
+    {
+        "下午" or "晚上" or "傍晚" or "今晚" => hour < 12 ? hour + 12 : hour,
+        "中午" => hour < 11 ? hour + 12 : hour,
+        "凌晨" or "上午" or "早上" or "清晨" or "明早" => hour == 12 ? 0 : hour,
+        _ => hour
+    };
+
+    private static DateTimeOffset ToInstant(DateTime localDateTime, TimeZoneInfo timeZone) =>
+        new(localDateTime, timeZone.GetUtcOffset(localDateTime));
 }

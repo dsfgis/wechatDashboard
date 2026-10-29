@@ -24,6 +24,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private readonly Func<long, Task> _navigateToMessage;
     private readonly Func<Task> _onTodoCreated;
     private string _statusText = "正在加载待办...";
+    private int _activeCount;
 
     public TodoWorkbenchViewModel(
         ITodoRepository todos,
@@ -88,7 +89,8 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         private set => SetProperty(ref _statusText, value);
     }
 
-    public int ActiveCount => Pinned.Count + Overdue.Count + DueToday.Count + Upcoming.Count + NoDueDate.Count;
+    /// <summary>活动待办去重数量。置顶待办同时出现在置顶组和所属截止时间组，不能按各集合长度累加。</summary>
+    public int ActiveCount => _activeCount;
     public int SelectedCount => ActiveRows().Count(row => row.IsSelected);
     public int OverdueCount => Overdue.Count;
     public string SelectAllButtonText => ActiveCount > 0 && SelectedCount == ActiveCount ? "取消全选" : "全选";
@@ -117,11 +119,13 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             row.IsSelected = true;
         }
 
+        _activeCount = activeRows.Length;
         Replace(Pinned, activeRows.Where(row => row.IsPinned).OrderByDescending(row => row.Todo.UpdatedAt));
-        Replace(Overdue, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.Overdue));
-        Replace(DueToday, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.DueToday));
-        Replace(Upcoming, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.Upcoming));
-        Replace(NoDueDate, activeRows.Where(row => !row.IsPinned && row.Bucket == TodoDueBucket.NoDueDate));
+        // 置顶待办同时保留在其截止时间分组中（置顶组是第二展示维度），组内置顶项排在最前，避免“置顶后从逾期组消失”。
+        Replace(Overdue, activeRows.Where(row => row.Bucket == TodoDueBucket.Overdue).OrderByDescending(row => row.IsPinned));
+        Replace(DueToday, activeRows.Where(row => row.Bucket == TodoDueBucket.DueToday).OrderByDescending(row => row.IsPinned));
+        Replace(Upcoming, activeRows.Where(row => row.Bucket == TodoDueBucket.Upcoming).OrderByDescending(row => row.IsPinned));
+        Replace(NoDueDate, activeRows.Where(row => row.Bucket == TodoDueBucket.NoDueDate).OrderByDescending(row => row.IsPinned));
 
         // 优先级是独立查看维度，包含置顶活动待办，但不读取已办记录。
         Replace(Priority0, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P0));
@@ -130,7 +134,7 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         Replace(Priority3, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P3));
         Replace(Completed, rows.Where(row => !activeIds.Contains(row.Todo.Id))
             .OrderByDescending(row => row.Todo.CompletedAt ?? row.Todo.UpdatedAt));
-        StatusText = $"活动待办 {ActiveCount} 条：已置顶 {Pinned.Count} 条、已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条、后续到期 {Upcoming.Count} 条、无截止时间 {NoDueDate.Count} 条。";
+        StatusText = $"活动待办 {ActiveCount} 条（去重）：已置顶 {Pinned.Count} 条（同时计入所属截止时间分组）、已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条、后续到期 {Upcoming.Count} 条、无截止时间 {NoDueDate.Count} 条。";
         OnPropertyChanged(nameof(ActiveCount));
         OnPropertyChanged(nameof(OverdueCount));
         UpdateSelectionState();
@@ -345,8 +349,9 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         }
     }
 
+    /// <summary>全部活动待办行；置顶行会同时存在于置顶组和截止时间组，故按引用去重后再参与选择与统计。</summary>
     private IEnumerable<TodoListItemViewModel> ActiveRows() =>
-        Pinned.Concat(Overdue).Concat(DueToday).Concat(Upcoming).Concat(NoDueDate);
+        Pinned.Concat(Overdue).Concat(DueToday).Concat(Upcoming).Concat(NoDueDate).Distinct();
 
     private void UpdateSelectionState()
     {

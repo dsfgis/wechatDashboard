@@ -107,11 +107,14 @@
         </DockPanel>
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-                <!-- 顶级分组：已置顶（无下级分组） -->
+                <!-- 顶级分组：已置顶。置顶是独立展示维度，置顶待办同时保留在其截止时间分组里，
+                     避免置顶后从“已逾期”等分组消失；两处勾选状态共享同一个行对象。 -->
                 <Expander IsExpanded="True" Margin="0,0,0,10">
                     <Expander.Header>
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Foreground="#D97706" Style="{StaticResource TopLevelGroupTextStyle}"><Run Text="已置顶（"/><Run Text="{Binding Pinned.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                            <TextBlock Text="置顶待办同时计入其截止时间分组" FontSize="11" Foreground="#9CA3AF"
+                                       VerticalAlignment="Center" Margin="10,0,0,0" />
                             <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
                                     Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Pinned}" />
                         </StackPanel>
@@ -119,7 +122,7 @@
                     <ItemsControl ItemsSource="{Binding Pinned}" ItemTemplate="{StaticResource TodoCardTemplate}" Margin="0,8,0,0" />
                 </Expander>
                 <!-- 顶级分组：截止时间。子分组收纳在左侧引导线容器内，视觉上从属于父级。 -->
-                <!-- 截止时间保留原有互斥分组，置顶待办仍只在置顶组显示。 -->
+                <!-- 截止时间五组互斥；置顶待办保留在本维度中并排在各子分组最前面。 -->
                 <Expander IsExpanded="True" Margin="0,0,0,10">
                     <Expander.Header>
                         <TextBlock Text="截止时间" Style="{StaticResource TopLevelGroupTextStyle}" />
