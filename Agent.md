@@ -4,6 +4,20 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
+## Compact Todo Detail and Reminder Cards (2026-10-29)
+
+Current implemented behavior:
+
+- `TodoDetailWindow` is compact by default: 560×600 (min 480×420), 12 DIP base font, 16 DIP outer margin. Reusable styles (`Card`, `SectionTitle`, `FieldLabel`, `HintText`, `CompactButton`) unify the white-card look; 保存待办 is the primary blue button.
+- The detail window no longer offers the 状态 ComboBox: status changes only through explicit actions (完成 etc.). `TodoDetailViewModel.Status` still participates in save, `CanComplete` and `CanTogglePin`; saving writes the current status back unchanged. 优先级 and 项目 now share one row.
+- The 查看原始消息 button has been removed from the detail window. The original message stays visible in the read-only card (with 复制原文/复制全部信息). `NavigateToSourceCommand`/`NavigateAsync` remain in the ViewModel but have no UI entry.
+- `ReminderNotificationWindow` cards shrink from 500 to 380 DIP wide, MaxHeight 520 → 360; title font 22 → 15, body 16 → 14, buttons and margins tightened. `ReminderNotificationQueue.MinCardHeight` is now 170 to match.
+- Queue stacking, badge, positioning and resolution behavior are unchanged.
+
+Verification at this checkpoint (2026-10-29):
+
+- App project builds with 0 errors in an isolated output directory (default `bin` remains locked by the running debug instance; NuGet vulnerability-data warnings are network-only).
+
 ## Desktop Calendar Todo Ordering (2026-10-28)
 
 `DesktopCalendarViewModel` (shared by the main-window 日程概览 and the desktop calendar window) orders each day's Todos with an explicit sort contract:

@@ -23,7 +23,7 @@ public sealed class ReminderNotificationQueue : IDisposable
     private const double StackGap = 12;
 
     /// <summary>卡片高度下限；低于该值内容与按钮会挤在一起。</summary>
-    private const double MinCardHeight = 240;
+    private const double MinCardHeight = 170;
 
     private readonly Func<ReminderDispatchItem, ReminderNotificationAction, Task> _onResolved;
     private readonly Queue<ReminderDispatchItem> _pending = new();

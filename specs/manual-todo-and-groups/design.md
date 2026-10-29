@@ -296,6 +296,12 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 
 详情窗口新增的“待办说明”不引入新列，直接编辑既有 `todo_items.description`。`TodoDetailViewModel` 新增 `SaveDescriptionAsync`，与“保存待办”共用同一次 `UpdateTodoRequest` 提交和 `ExpectedUpdatedAt` 乐观并发检查，只是反馈文案不同；空白说明在 ViewModel 内规范化为 `null` 后再落库，保存成功后回写界面。（REQ-007、REQ-013）
 
+### D-032：详情与提醒卡片紧凑化，状态只经显式操作流转
+
+详情窗口不再提供“状态”下拉：状态只能由“完成”等显式操作改变，避免绕过生命周期直接改写 `todo_items.status`；`TodoDetailViewModel.Status` 仍随保存请求原样回写，并继续驱动完成/置顶可用性。详情同时移除“查看原始消息”按钮，原始消息仍在只读卡片中展示并支持复制，`NavigateToSourceCommand` 保留但不再有界面入口。
+
+界面密度统一收紧：详情默认 560×600（最小 480×420），基础字号 12，优先级与项目同行；提醒卡片宽 380、MaxHeight 360，`ReminderNotificationQueue.MinCardHeight` 降为 170。提醒队列的叠放、补位、角标和处理语义不变。（REQ-007、REQ-010、REQ-013）
+
 ## 4. 组件职责
 
 | 组件 | 层 | 新增或调整职责 | 追溯 |
