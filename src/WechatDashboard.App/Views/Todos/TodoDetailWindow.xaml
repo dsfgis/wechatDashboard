@@ -50,6 +50,7 @@
             <Setter Property="Padding" Value="12,5" />
             <Setter Property="FontSize" Value="12" />
         </Style>
+        <!-- 滚动条外观由全局 Styles/ScrollbarStyles.xaml 统一提供 -->
     </Window.Resources>
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="16">
@@ -119,15 +120,10 @@
                 <Button Content="完成" Command="{Binding CompleteCommand}" Style="{StaticResource CompactButton}" />
             </WrapPanel>
 
-            <!-- 待办说明：可编辑备注，位于原始消息上方；点“保存说明”即可提交，也会随“保存待办”一起保存 -->
+            <!-- 待办说明：可编辑备注，位于原始消息上方；统一随上方“保存待办”提交 -->
             <Border Style="{StaticResource Card}">
                 <StackPanel>
-                    <DockPanel Margin="0,0,0,6">
-                        <Button x:Name="SaveDescriptionButton" DockPanel.Dock="Right" Content="保存说明"
-                                Command="{Binding SaveDescriptionCommand}" Style="{StaticResource CompactButton}" Margin="8,0,0,0"
-                                ToolTip="提交当前详情（含待办说明），无需回到上方点击“保存待办”" />
-                        <TextBlock Text="待办说明（可编辑保存）" Style="{StaticResource SectionTitle}" />
-                    </DockPanel>
+                    <TextBlock Text="待办说明" Style="{StaticResource SectionTitle}" Margin="0,0,0,6" />
                     <TextBox x:Name="DescriptionTextBox" Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}"
                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="56" MaxHeight="160"
                              VerticalScrollBarVisibility="Auto" Padding="6" />
@@ -138,15 +134,8 @@
 
             <Border Style="{StaticResource Card}">
                 <StackPanel>
-                    <DockPanel Margin="0,0,0,6">
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                            <Button Content="复制原文" Click="CopyOriginalButton_Click" Style="{StaticResource CompactButton}" Margin="8,0,0,0"
-                                    ToolTip="复制原始消息正文" />
-                            <Button Content="复制全部信息" Click="CopyInfoButton_Click" Style="{StaticResource CompactButton}" Margin="8,0,0,0"
-                                    ToolTip="复制待办的字段信息与原始消息" />
-                        </StackPanel>
-                        <TextBlock Text="{Binding OriginalMessageHeader}" Style="{StaticResource SectionTitle}" TextWrapping="Wrap" />
-                    </DockPanel>
+                    <TextBlock Text="{Binding OriginalMessageHeader}" Style="{StaticResource SectionTitle}"
+                               TextWrapping="Wrap" Margin="0,0,0,6" />
                     <TextBox Text="{Binding SourceInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
                              Visibility="{Binding PrimarySourceVisibility}" />
                     <TextBox Text="{Binding SenderInfoLine, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"

@@ -4,6 +4,11 @@
              xmlns:local="clr-namespace:WechatDashboard.App"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- 全局细滚动条样式：消息流、关注设置、采集源设置等全部视图统一外观 -->
+                <ResourceDictionary Source="Styles/ScrollbarStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Application.Resources>
 </Application>
