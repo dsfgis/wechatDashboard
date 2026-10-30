@@ -3148,6 +3148,14 @@ static async Task TestDesktopCalendarViewModelAsync()
     AssertEqual(todayCompleted.Id, viewModel.SelectedTodos[2].Id,
         "已办待办应排在所有未完成待办之后，而不是按优先级插到最前面。");
     AssertTrue(viewModel.SelectedTodos[2].IsCompleted, "Completed daily Todo should remain visible with completed state.");
+    AssertEqual(PriorityColorPolicy.P1Color, viewModel.SelectedTodos[0].PriorityColor,
+        "当日日程卡片的文字颜色应取该待办的优先级色（P1）。");
+    AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[1].PriorityColor,
+        "当日日程卡片的文字颜色应取该待办的优先级色（P0）。");
+    AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[2].PriorityColor,
+        "已办理待办仍保留自身优先级色值，灰化由视图层负责。");
+    AssertEqual("#B54708", MessageFeedViewModel.PriorityColor(PriorityLevel.P1),
+        "消息流与日历必须共用同一份优先级色板，消息流色值不得漂移。");
     AssertTrue(viewModel.StatusText.Contains("另有 1 条未设置截止日期"), "Calendar status should report unscheduled Todos honestly.");
 
     viewModel.SelectDate(new DateTime(2026, 8, 30));

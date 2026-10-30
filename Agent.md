@@ -4,6 +4,21 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
+## Priority-Colored Calendar Todo Text (2026-10-30)
+
+Requested behavior change: the text of a Todo in the 当日日程 panel must use the same color as its priority.
+
+- New `Application/Common/PriorityColorPolicy.cs` is now the single source of the P0–P3 palette (`#D92D20` / `#B54708` / `#3B5998` / `#475467`). `MessageFeedViewModel.PriorityColor()` delegates to it, so the message feed and the calendar cannot drift apart.
+- `DesktopCalendarTodoItemViewModel.PriorityColor` exposes that palette per row; `DesktopCalendarView.xaml` binds the card title and the `P2`-style status label to it, replacing the previous `CalendarStrongText` DynamicResource that had no definition in any dictionary (it silently resolved to nothing).
+- 已办理 items keep the existing `CalendarDisabledText` gray plus strikethrough: color expresses priority only for still-active Todos. The ViewModel still returns the real priority color, the graying lives purely in the DataTrigger.
+- Scope is the right-hand 当日日程 list only; the two-line preview inside each month-grid cell still uses `CalendarText`, and the 项目 row keeps its dot + muted text.
+
+Verification at this checkpoint (2026-10-30):
+
+- `dotnet build tests/WechatDashboard.Tests` in an isolated output directory: 0 errors (NU1900 vulnerability-feed warnings are network-only).
+- `TestDesktopCalendarViewModelAsync` now asserts P1/P0/P0 colors on the three selected-day rows (including the completed one) and that `MessageFeedViewModel.PriorityColor(P1)` is still `#B54708`.
+- Full runner: only the pre-existing `Native WeChat reader matches the frozen Python oracle field by field` failure remains; every desktop-calendar test passes.
+
 ## Compact Todo Detail and Reminder Cards (2026-10-29)
 
 Current implemented behavior:

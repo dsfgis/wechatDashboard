@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using WechatDashboard.App.Presentation;
 using WechatDashboard.Application.Agent;
 using WechatDashboard.Application.Capture;
+using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Domain.Entities;
@@ -370,13 +371,8 @@ public sealed class MessageFeedViewModel : ObservableObject
         }
     }
 
-    public static string PriorityColor(PriorityLevel priority) => priority switch
-    {
-        PriorityLevel.P0 => "#D92D20",
-        PriorityLevel.P1 => "#B54708",
-        PriorityLevel.P2 => "#3B5998",
-        _ => "#475467"
-    };
+    /// <summary>保留原有入口，实际色值统一来自 <see cref="PriorityColorPolicy"/>。</summary>
+    public static string PriorityColor(PriorityLevel priority) => PriorityColorPolicy.For(priority);
 
     private static (string Text, string ToolTip) FormatTodoAction(TodoItem? todo)
     {

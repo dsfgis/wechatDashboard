@@ -305,6 +305,11 @@ public sealed record DesktopCalendarTodoItemViewModel(
     public string TimeText => DisplayAt.ToString("HH:mm");
 
     public string StatusText => IsCompleted ? "已办理" : Priority.ToString();
+
+    /// <summary>
+    /// 与消息流一致的优先级色板；已完成项在视图层另行灰化，因此这里仍返回真实优先级颜色。
+    /// </summary>
+    public string PriorityColor => PriorityColorPolicy.For(Priority);
 }
 
 public sealed class DesktopCalendarDayViewModel
