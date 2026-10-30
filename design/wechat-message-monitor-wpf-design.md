@@ -843,6 +843,38 @@ UI 验收：
 
 仍未完成：Windows Toast、免打扰与按来源/群聊通知控制、显式自定义“延后到”交互、应用恢复/系统时区变化事件、ViewModel 自动化测试和 WPF UI 自动化验收。应用事件总线与完整 `ShellViewModel` 尚未引入，当前使用范围更小的 Coordinator 回调完成页面协调。
 
+### 5.2 桌面待办日历与桌面嵌入契约（2026-10-30）
+
+`DesktopCalendarWindow` 是独立常驻窗口，复用 `DesktopCalendarView` 与 `DesktopCalendarViewModel`，与“日程概览”共享同一份待办投影；位置、大小、透明度、停靠边和主题保存在 `%LocalAppData%\WechatDashboard\desktop-calendar.json`。
+
+**两种嵌入宿主模式**。`DesktopCalendarDesktopHost` 在嵌入时先探测桌面图标层：
+
+| 模式 | 触发条件 | 挂载方式 |
+| --- | --- | --- |
+| 图标层子窗口 | 传统桌面（存在承载 `SHELLDLL_DefView` 的 WorkerW） | `WS_CHILD` + `SetParent` 到 WorkerW/Progman，随桌面一起绘制 |
+| 顶层覆盖 | 抬升桌面（Progman 带 `WS_EX_NOREDIRECTIONBITMAP`） | 顶层窗口 + `SetWindowPos` 插到图标层正上方，不改变 Explorer 窗口样式 |
+
+抬升桌面下不使用子窗口模式：该 Progman 无重定向表面，WPF 表面不参与合成，窗口能收到输入但不贡献像素（2026-10-30 在本机强制子模式实测为空画面），因此只能走顶层覆盖。
+
+**Z 序与输入契约**（覆盖模式）：
+
+1. 始终位于桌面图标层之上、所有应用窗口之下；`WM_WINDOWPOSCHANGING` 强制 `SWP_NOZORDER` 语义并重写 `InsertAfter`，任何外部置顶/抬升都不能把日历放到应用之上。
+2. 不抢焦点：`WS_EX_NOACTIVATE` + `WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE`；`SC_MOVE`/`SC_SIZE`/`SC_MINIMIZE` 一律拦截，位置由拖拽与吸附逻辑控制。
+3. 透明度使用 `SetLayeredWindowAttributes`（重定向绘制），不使用 WPF 逐像素透明度；嵌入后重新应用当前值。
+
+**“显示桌面”契约**。Win+D 与任务栏“显示桌面”按钮都不最小化窗口，而是把图标层整体抬到所有窗口之上；顶层覆盖模式的日历会被盖住。因此嵌入时安装两条 `WINEVENT_OUTOFCONTEXT` 钩子，均带 `WINEVENT_SKIPOWNPROCESS`：
+
+| 事件 | 用途 |
+| --- | --- |
+| `EVENT_OBJECT_REORDER`（0x8004） | 桌面窗口（`#32769`）子窗口重排，壳层抬高/放回图标层时触发 |
+| `EVENT_SYSTEM_FOREGROUND`（0x0003） | Progman 成为前台窗口，覆盖部分壳层路径 |
+
+回调在界面线程内同步执行一次 `SetWindowPos`，把日历复位到图标层最顶端窗口之上；`_isRestoringDesktopOrder` 防止与 `WM_WINDOWPOSCHANGING` 的 `InsertAfter` 重写互相打断。这条路径必须保持事件驱动：曾用 300ms 定时器轮询，实测日历每次 Win+D 被连续盖住 292ms 再弹回，构成可见闪烁；改为事件驱动后同一测量降到 3ms（不足一帧）。
+
+定时器只作为兜底，不承担主路径：至少一条钩子安装成功时为 1s 间隔，两条都失败（远程会话、受限桌面）时退回 300ms 轮询，保证能力不退化。`DesktopCalendarDesktopHost` 实现 `IDisposable`，窗口关闭时卸载钩子，避免 Explorer 重启销毁窗口后钩子悬挂。
+
+**验收方法**。`tests/WechatDashboard.Tests/DesktopCalendarNativeAssertions.MeasureLongestIconLayerCoverage` 在注入真实 Win+D（`SendInput`，与用户按键/任务栏按钮同一壳层路径）期间高频采样“图标层是否位于日历之上”，返回最长连续遮盖时长；`TestDesktopCalendarShowDesktopSurvivalAsync` 要求该值 < 60ms（一帧约 16ms），并同时断言窗口未最小化、仍可见、位置尺寸不变、再次切换桌面后仍在图标层之上。
+
 ## 6. SQLite 数据模型
 
 数据库文件默认存放在项目结果目录，例如 `tools\result\data\wechat-dashboard.db`。开发环境可通过配置覆盖。

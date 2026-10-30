@@ -25,6 +25,7 @@ Verification at this checkpoint (2026-10-30):
 - After the fix, same probe with 61 255 samples over 4 s: the icon layer was above the calendar in 2 samples only, longest continuous coverage **3 ms**; the in-test measurement reports **9 ms**.
 - `TestDesktopCalendarShowDesktopSurvivalAsync` (renamed to *Embedded desktop calendar survives Win+D without a visible flicker*) now samples `HasIconLayerAbove` continuously while injecting a real Win+D and fails when the longest coverage reaches `FlickerBudgetMs = 60` (one frame is ~16 ms, so 60 ms tolerates GC/scheduling but still fails a return to polling). It keeps the previous assertions: not iconic, still visible, unchanged bounds, and toggling the desktop back leaves it above the icon layer.
 - App and test projects build with 0 errors (the running debug instance locks the default `bin`; builds used `tools/result/build-check`). Full runner: only the pre-existing `Native WeChat reader matches the frozen Python oracle field by field` failure remains.
+- Docs: the contract is recorded in `design/wechat-message-monitor-wpf-design.md` §5.2 (宿主模式、Z 序与输入契约、显示桌面事件表、验收方法), README gained the 嵌入桌面 user steps, and `specs/manual-todo-and-groups/check_list.md` gained CHECK-059 (still unchecked until the taskbar 显示桌面 button is verified by hand).
 
 ## Priority-Colored Calendar Todo Text (2026-10-30)
 
