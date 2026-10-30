@@ -8,7 +8,7 @@ using System.Windows;
 namespace WechatDashboard.App.Services;
 
 /// <summary>将日历作为桌面图标层的同级窗口挂载，不修改 Explorer 的窗口样式。</summary>
-public sealed class DesktopCalendarDesktopHost
+public sealed class DesktopCalendarDesktopHost : IDisposable
 {
     private const int StyleIndex = -16;
     private const int ChildStyle = 0x40000000;
@@ -18,6 +18,12 @@ public sealed class DesktopCalendarDesktopHost
     private const int NoActivateStyle = 0x08000000;
     private const uint NoActivate = 0x10;
     private const uint FrameChanged = 0x20;
+    private const uint EventSystemForeground = 0x0003;
+    private const uint EventObjectReorder = 0x8004;
+    private const uint WinEventOutOfContext = 0x0000;
+    private const uint WinEventSkipOwnProcess = 0x0002;
+    private const long DesktopOrderFallbackIntervalMs = 1000;
+    private const long DesktopOrderPollingIntervalMs = 300;
     private readonly nint _window;
     private readonly HwndSource _source;
     private int _originalStyle;
@@ -28,7 +34,10 @@ public sealed class DesktopCalendarDesktopHost
     private bool _usesTopLevelDesktopOverlay;
     private bool _originalNoActivate;
     private nint _desktopWindow;
-    private System.Windows.Threading.DispatcherTimer? _desktopOrderTimer;
+    private System.Windows.Threading.DispatcherTimer? _desktopOrderSafetyTimer;
+    private WinEventDelegate? _shellOrderCallback;
+    private nint _foregroundHook;
+    private nint _reorderHook;
     private bool _isRestoringDesktopOrder;
 
     public void SetShape(Rect bounds, double radius)
@@ -129,11 +138,11 @@ public sealed class DesktopCalendarDesktopHost
             UpdateWindow(_window);
             RedrawWindow(_window, 0, 0, 0x0100 | 0x0200 | 0x0400 | 0x0800);
             _source.AddHook(WindowHook);
-            if (_usesTopLevelDesktopOverlay) StartDesktopOrderGuard();
+            if (_usesTopLevelDesktopOverlay) StartDesktopOrderWatch();
         }
         catch
         {
-            StopDesktopOrderGuard();
+            StopDesktopOrderWatch();
             RestoreActivationStyle();
             if (!_usesTopLevelDesktopOverlay)
             {
@@ -153,7 +162,7 @@ public sealed class DesktopCalendarDesktopHost
     public void Detach()
     {
         if (!IsEmbedded) return;
-        StopDesktopOrderGuard();
+        StopDesktopOrderWatch();
         // Resizing while embedded must survive the return to a floating window.
         Check(GetWindowRect(_window, out _screenBounds));
         _isChangingParent = true;
@@ -175,6 +184,9 @@ public sealed class DesktopCalendarDesktopHost
         }
         finally { _isChangingParent = false; }
     }
+
+    /// <summary>释放桌面 Z 序监听（窗口销毁时调用，避免 WinEvent 钩子悬挂）。</summary>
+    public void Dispose() => StopDesktopOrderWatch();
 
     private nint WindowHook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
@@ -205,27 +217,64 @@ public sealed class DesktopCalendarDesktopHost
 
     /// <summary>
     /// 「显示桌面」/Win+D 不是最小化窗口，而是把桌面图标层（Progman）整体抬到所有窗口之上；
-    /// 顶层覆盖模式的日历会被盖住。周期检查 Z 序并在被抬高时复位到图标层上方，
-    /// 使日历像桌面图标一样在显示桌面时保持可见。
+    /// 顶层覆盖模式的日历会被盖住。壳层抬高图标层时会同步发出两种通知：
+    /// EVENT_SYSTEM_FOREGROUND（Progman 成为前台窗口）与 EVENT_OBJECT_REORDER（桌面窗口子窗口重排）。
+    /// 在这里即时复位 Z 序，日历就不会出现「先被盖住、再弹回来」的闪烁；
+    /// 定时器只作为事件丢失时的兜底，间隔 1 秒且只在图标层确实盖住日历时才动作。
     /// </summary>
-    private void StartDesktopOrderGuard()
+    private void StartDesktopOrderWatch()
     {
-        if (_desktopOrderTimer == null)
+        if (_shellOrderCallback == null)
         {
-            _desktopOrderTimer = new System.Windows.Threading.DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(300)
-            };
-            _desktopOrderTimer.Tick += (_, _) => RestoreOverlayAboveDesktop();
+            _shellOrderCallback = OnShellZOrderChanged;
+            _reorderHook = SetWinEventHook(EventObjectReorder, EventObjectReorder, 0,
+                _shellOrderCallback, 0, 0, WinEventOutOfContext | WinEventSkipOwnProcess);
+            _foregroundHook = SetWinEventHook(EventSystemForeground, EventSystemForeground, 0,
+                _shellOrderCallback, 0, 0, WinEventOutOfContext | WinEventSkipOwnProcess);
         }
-        if (!_desktopOrderTimer.IsEnabled) _desktopOrderTimer.Start();
+
+        if (_desktopOrderSafetyTimer == null)
+        {
+            _desktopOrderSafetyTimer = new System.Windows.Threading.DispatcherTimer();
+            _desktopOrderSafetyTimer.Tick += (_, _) => RestoreOverlayAboveDesktop();
+        }
+
+        // 钩子装上了就无需轮询；万一两条钩子都失败（远程会话、受限桌面等），
+        // 退回 300ms 轮询，避免完全失去保护。
+        var hooksInstalled = _reorderHook != 0 || _foregroundHook != 0;
+        _desktopOrderSafetyTimer.Interval = TimeSpan.FromMilliseconds(
+            hooksInstalled ? DesktopOrderFallbackIntervalMs : DesktopOrderPollingIntervalMs);
+        if (!_desktopOrderSafetyTimer.IsEnabled) _desktopOrderSafetyTimer.Start();
     }
 
-    private void StopDesktopOrderGuard() => _desktopOrderTimer?.Stop();
+    private void StopDesktopOrderWatch()
+    {
+        _desktopOrderSafetyTimer?.Stop();
+        if (_reorderHook != 0)
+        {
+            UnhookWinEvent(_reorderHook);
+            _reorderHook = 0;
+        }
+
+        if (_foregroundHook != 0)
+        {
+            UnhookWinEvent(_foregroundHook);
+            _foregroundHook = 0;
+        }
+
+        _shellOrderCallback = null;
+    }
+
+    private void OnShellZOrderChanged(nint hook, uint eventId, nint window, int objectId, int childId, uint thread, uint time)
+    {
+        // WinEvent 回调与界面同线程（WINEVENT_OUTOFCONTEXT 投递到安装钩子的消息循环），
+        // 复位动作只是一次 SetWindowPos，可以在这里同步完成。
+        RestoreOverlayAboveDesktop();
+    }
 
     private void RestoreOverlayAboveDesktop()
     {
-        if (!IsEmbedded || !_usesTopLevelDesktopOverlay || _isChangingParent) return;
+        if (!IsEmbedded || !_usesTopLevelDesktopOverlay || _isChangingParent || _isRestoringDesktopOrder) return;
         // 沿 Z 序向上查找图标层窗口（Progman / 承载 SHELLDLL_DefView 的 WorkerW）；
         // 壁纸程序产生的普通 WorkerW 不会遮挡日历，忽略。记录最靠上的一个以便整体越过图标层。
         nint topmostIconWindow = 0;
@@ -364,6 +413,9 @@ public sealed class DesktopCalendarDesktopHost
         public uint Flags;
     }
     private delegate bool EnumWindowCallback(nint window, nint parameter);
+    private delegate void WinEventDelegate(nint hook, uint eventId, nint window, int objectId, int childId, uint thread, uint time);
+    [DllImport("user32.dll")] private static extern nint SetWinEventHook(uint eventMin, uint eventMax, nint module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
+    [DllImport("user32.dll")] private static extern bool UnhookWinEvent(nint hook);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, nint parameter);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint window, StringBuilder name, int count);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern nint FindWindowEx(nint parent, nint after, string className, string? title);

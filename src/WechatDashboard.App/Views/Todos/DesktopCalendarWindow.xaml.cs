@@ -63,6 +63,7 @@ public partial class DesktopCalendarWindow : Window
             _refreshTimer.Stop();
             _autoHideTimer.Stop();
             _retractAnimationTimer.Stop();
+            _desktopHost?.Dispose();
             _desktopHost = null;
             _hasAppliedSavedState = false;
         };

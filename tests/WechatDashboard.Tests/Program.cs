@@ -73,7 +73,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
     ("Desktop calendar list uses a theme-aware scrollbar in both themes", TestDesktopCalendarScrollBarThemeAsync),
-    ("Embedded desktop calendar stays above the raised desktop through Win+D", TestDesktopCalendarShowDesktopSurvivalAsync),
+    ("Embedded desktop calendar survives Win+D without a visible flicker", TestDesktopCalendarShowDesktopSurvivalAsync),
     ("Auto start service toggles the current user Run entry", TestAutoStartServiceAsync),
     ("SQLite message processing transaction rolls back message when Todo insert fails", TestMessageTodoTransactionRollbackAsync),
     ("Todo repository moves a checked todo to completed", TestTodoCompletionAsync),
@@ -3887,6 +3887,10 @@ static RenderedPixelSample SampleRenderedRegion(
 
 static async Task TestDesktopCalendarShowDesktopSurvivalAsync()
 {
+    // 一帧约 16ms。允许 60ms 抖动（GC、调试器、繁忙机器），但远低于轮询实现的 300ms，
+    // 这样「退回定时器轮询」的改动会立刻让测试失败。
+    const long FlickerBudgetMs = 60;
+
     // 在当前 STA 线程泵消息指定时长：Explorer 投递 SC_MINIMIZE/SC_RESTORE 依赖窗口消息循环，
     // 直接 Thread.Sleep 会让窗口收不到命令，导致「显示桌面」场景验证失效。
     void PumpMessages(int milliseconds)
@@ -3941,10 +3945,17 @@ static async Task TestDesktopCalendarShowDesktopSurvivalAsync()
                 "A freshly embedded calendar must start above the desktop icon layer.");
 
             // 端到端：注入真实 Win+D（与任务栏「显示桌面」按钮同一壳层路径）。
-            // 守卫定时器在泵消息期间应把日历复位到被抬高的图标层之上。
-            DesktopCalendarNativeAssertions.SendWinD();
-            toggledDesktop = true;
-            PumpMessages(1200);
+            // 壳层抬高图标层时会发出 WinEvent，Z 序守卫必须在同一帧内把日历复位，
+            // 否则用户会看到日历先消失再弹回的闪烁。
+            var coverage = DesktopCalendarNativeAssertions.MeasureLongestIconLayerCoverage(nativeHandle, () =>
+            {
+                DesktopCalendarNativeAssertions.SendWinD();
+                toggledDesktop = true;
+                PumpMessages(1200);
+            });
+            AssertTrue(coverage < FlickerBudgetMs,
+                $"An embedded calendar must never be covered by the raised desktop for a visible period; " +
+                $"longest coverage was {coverage}ms (budget {FlickerBudgetMs}ms, one frame is ~16ms).");
             AssertTrue(!DesktopCalendarNativeAssertions.HasIconLayerAbove(nativeHandle),
                 "An embedded calendar must stay above the raised desktop icon layer after Win+D / Show Desktop.");
             AssertTrue(DesktopCalendarNativeAssertions.IsWindowVisible(nativeHandle) && !DesktopCalendarNativeAssertions.IsIconic(nativeHandle),

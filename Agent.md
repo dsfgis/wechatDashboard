@@ -4,6 +4,28 @@
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
 
+## Desktop Calendar Must Not React to Show Desktop (2026-10-30)
+
+Requested behavior change: an embedded desktop calendar must not flash when the user presses Win+D or clicks the taskbar 显示桌面 button.
+
+Root cause measured on a real desktop (1 ms Z-order sampling, `tests/.../DesktopCalendarNativeAssertions.cs` helpers): 显示桌面 does not minimize the window. It raises the desktop icon layer (Progman) above every top-level window, so the overlay-mode calendar is covered until something puts it back. The previous guard was a 300 ms `DispatcherTimer`, which left the calendar covered for **up to 292 ms** — that gap is the flicker.
+
+Fix in `Services/DesktopCalendarDesktopHost.cs`:
+
+- The polling guard became an event-driven watch. While embedded in overlay mode the host installs two out-of-context WinEvent hooks: `EVENT_OBJECT_REORDER` (0x8004, delivered for the desktop window `#32769` when the shell reorders top level windows) and `EVENT_SYSTEM_FOREGROUND` (0x0003, delivered when Progman becomes foreground). Both carry `WINEVENT_SKIPOWNPROCESS`, so the host never reacts to its own `SetWindowPos`.
+- `RestoreOverlayAboveDesktop` runs directly inside the callback (same UI thread, one `SetWindowPos`), instead of waiting for a timer tick. A re-entrancy flag (`_isRestoringDesktopOrder`) prevents the `WM_WINDOWPOSCHANGING` handler from overwriting the `InsertAfter` the restore just chose.
+- The timer survives only as a fallback: 1 s interval when at least one hook installed, 300 ms when both hooks failed (remote sessions, restricted shells) so the old behavior is preserved rather than lost.
+- `DesktopCalendarDesktopHost` is now `IDisposable`; `DesktopCalendarWindow.Closed` disposes it so the WinEvent hooks cannot outlive the window when Explorer restarts and destroys the calendar window.
+
+Rejected alternative: parenting the calendar into the raised desktop (child mode). Forcing that path on this machine (`parent=Progman`, `WS_CHILD`) makes the window contribute no pixels — the WPF surface is not composited under a no-redirection Progman — so overlay mode plus an immediate Z-order restore remains the only workable approach.
+
+Verification at this checkpoint (2026-10-30):
+
+- Timeline probe before the fix: icon layer above the calendar for 292 ms after Win+D (window never minimized, `IsIconic=false`).
+- After the fix, same probe with 61 255 samples over 4 s: the icon layer was above the calendar in 2 samples only, longest continuous coverage **3 ms**; the in-test measurement reports **9 ms**.
+- `TestDesktopCalendarShowDesktopSurvivalAsync` (renamed to *Embedded desktop calendar survives Win+D without a visible flicker*) now samples `HasIconLayerAbove` continuously while injecting a real Win+D and fails when the longest coverage reaches `FlickerBudgetMs = 60` (one frame is ~16 ms, so 60 ms tolerates GC/scheduling but still fails a return to polling). It keeps the previous assertions: not iconic, still visible, unchanged bounds, and toggling the desktop back leaves it above the icon layer.
+- App and test projects build with 0 errors (the running debug instance locks the default `bin`; builds used `tools/result/build-check`). Full runner: only the pre-existing `Native WeChat reader matches the frozen Python oracle field by field` failure remains.
+
 ## Priority-Colored Calendar Todo Text (2026-10-30)
 
 Requested behavior change: the text of a Todo in the 当日日程 panel must use the same color as its priority.

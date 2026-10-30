@@ -150,6 +150,55 @@ internal static class DesktopCalendarNativeAssertions
             throw new InvalidOperationException("Failed to inject the Win+D key sequence.");
     }
 
+    /// <summary>
+    /// 在高频采样下执行 <paramref name="action"/>，返回图标层连续盖住日历的最长时长（毫秒）。
+    /// 一帧约 16ms：该值只要接近一帧，用户就会看到「先消失再弹回」的闪烁；
+    /// 因此它必须远小于一帧，而不是像轮询实现那样达到几百毫秒。
+    /// </summary>
+    internal static long MeasureLongestIconLayerCoverage(nint window, Action action)
+    {
+        var samples = new List<(long Elapsed, bool Covered)>();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var running = true;
+        var sampler = new System.Threading.Thread(() =>
+        {
+            while (Volatile.Read(ref running))
+                samples.Add((clock.ElapsedMilliseconds, HasIconLayerAbove(window)));
+        }) { IsBackground = true };
+
+        sampler.Start();
+        try
+        {
+            action();
+        }
+        finally
+        {
+            Volatile.Write(ref running, false);
+            sampler.Join(2000);
+        }
+
+        if (samples.Count == 0) throw new InvalidOperationException("No Z-order samples were collected.");
+        long longest = 0;
+        long? runStart = null;
+        long lastCovered = 0;
+        foreach (var sample in samples)
+        {
+            if (sample.Covered)
+            {
+                runStart ??= sample.Elapsed;
+                lastCovered = sample.Elapsed;
+            }
+            else if (runStart is { } startedAt)
+            {
+                longest = Math.Max(longest, lastCovered - startedAt);
+                runStart = null;
+            }
+        }
+
+        if (runStart is { } openStart) longest = Math.Max(longest, lastCovered - openStart);
+        return longest;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public nint dwExtraInfo; }
     [StructLayout(LayoutKind.Sequential)]
