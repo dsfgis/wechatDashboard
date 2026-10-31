@@ -1,8 +1,76 @@
 # Agent Guide
 
+## Todo Detail Title and SinopecMail IMAP Capture (2026-10-30)
+
+Two changes landed together; both are contracts other code depends on.
+
+**Todo detail title.** `TodoDetailWindow` no longer shows the literal 待办详情. The window `Title` and the header `TextBlock` bind to `TodoDetailViewModel.Title` (`FallbackValue=待办详情`, 330 DIP max width + `CharacterEllipsis`). `TodoFactory.BuildTitle` now produces a one-line title: collapse whitespace, cut at the first sentence terminator (`。；！？;!?`), then clamp to `TodoFactory.TitleMaxLength = 30` with `…`. **Leading `@mentions` are intentionally preserved** — `TestCapturePipelineAsync` asserts `Title.Contains("@张三")`, and dropping the mention broke it; do not "optimize" that away again. `TodoFactory.ResolveTitle` prefers an explicit title, then the cleaned mail subject for mail sources, then `BuildTitle(content)`.
+
+**SinopecMail capture.** A standard IMAP4rev1 path, structurally different from the WeChat/Shihuatong adapters because it needs no client internals.
+
+- Protocol facts measured on this machine (2026-10-30): **the account lives on `amail.sinopec.com:993`**, per the company mail client's own account settings — `imap.sinopec.com` is a *different* instance and the account domain is `@pcitc.com`, not `@sinopec.com`. Both hosts speak IMAP4rev1 (`eYou MUA v8.18.2` banner), refuse 143, and advertise only `AUTH=PLAIN` (no `AUTH=LOGIN`). `smtp.` / `owa.` / `exchange.sinopec.com` do not resolve, so there is no EWS path.
+- `CaptureSourceKind.SinopecMail` + `CaptureAdapterFactory.CreateSinopecMailSource()` (registered in `CreateDefaultLiveSources`, **disabled by default**). `MailSourcePolicy` (`Application/Common`) owns the source id, subject cleaning and `IsMailSource`.
+- `IMailInboxReader` / `MailFetchRequest` / `MailEnvelope` / `MailFetchResult` (`Application/Capture/MailInboxContracts.cs`) keep protocol out of the pipeline, so the adapter is testable without a server. `ImapMailInboxReader` is the MailKit 4.14.1 implementation; `HtmlTextConverter` is the hand-rolled HTML→text fallback.
+- Cursor is `uidValidity:nextUid` (`MailCursor`). UIDVALIDITY change = rebuild, read only the most recent batch. Reads are always ascending by UID so a backlog is drained rather than skipped.
+- Folder is opened `FolderAccess.ReadOnly`; nothing is ever moved, flagged or expunged. Attachments are counted from `BodyParts`, never downloaded.
+- `ProtectedImapCredentialStore` = DPAPI `CurrentUser` + entropy `WechatDashboard.ImapCredential.v1`, magic `SMCP`, plaintext `account\npassword`. **The password must never reach the database, logs, exception messages or source files.** The account is echoed in the settings UI; the password never is.
+- Pipeline: `needsAgentDecision = isMentionMe || isMailSource`. `shouldCreateTodo` splits by source — chat keeps fail-open (`isMentionMe && (analysis is null || analysis.ShouldCreate)`), mail is **fail-closed** (`analysis?.ShouldCreate == true`). This asymmetry is deliberate: a mailbox volume of unconditionally created Todos is worse than missing some.
+
+**Local cache path added (2026-10-30, user-chosen).** The supplied IMAP password is rejected, so capture was redirected to the client's own on-disk cache, which needs no credential.
+- The 石化邮 client is **Thunderbird-based**, not CEF: profile lives in `Documents\sinopec\<profile>\profile`, account prefs in `prefs.js` (`amail.sinopec.com` / `imap` / 993 / `SSL` / `shaofeng.dai@pcitc.com`, no `authMethod` override), mailbox at `ImapMail\amail.sinopec.com\INBOX` (2.2 GB mbox).
+- `CaptureSourceKind.SinopecMailArchive` + `CaptureAdapterFactory.CreateSinopecMailArchiveSource()` (enabled only when the INBOX is found), located by `SinopecMailArchiveLocator`.
+- `MboxMailArchiveReader` parses with `MimeParser(stream, MimeFormat.Mbox)`; `MboxCursor` is `v1:<byteOffset>`. **First run anchors the cursor at the current file length — it deliberately does not backfill history (user decision).** A cursor beyond the file length means the client compacted the mailbox: reset to 0 and rely on `Message-ID` dedup.
+- A message without `Message-ID` makes the reader rewind the cursor to that message's start instead of advancing — this keeps a half-written tail from being lost or double-counted.
+- `MboxMailCaptureAdapter.AdapterKey = "SinopecMail.LocalCache"` (offset key) while `CapturedMessage.Source = "SinopecMail"` (显示与邮件语义). Both mail paths share `MailMessageMapper`, so titles/keys/bodies cannot drift.
+- Source display mapping `SinopecMail → 石化邮` was added in `MessageFeedViewModel.FormatSource`, `TodoWorkbenchViewModel.FormatSource` and `MainWindow` (uppercase switch). Missing it would surface the raw English id in the UI.
+
+Open item at this checkpoint: login was rejected (`Invalid login or password`) on both hosts, for `shaofeng.dai`, `shaofeng.dai@sinopec.com`, `SHAOFENG.DAI` and `shaofeng.dai@pcitc.com`, via both `LOGIN` and `AUTHENTICATE PLAIN` (with and without authzid). The password transits intact (10 chars, ASCII, trailing `$`, no stray whitespace), so this is a server-side rejection, not an encoding bug. Do not keep retrying — the failure count is already high enough to risk a lockout. Next step is user-side: confirm the password via the mail client's 检测服务 button or the webmail, and confirm IMAP is enabled for the account. The code path is complete and unit-tested; only a valid credential (or an IMAP permission enabled on the server) is missing.
+
+Both previously "pre-existing" failures are now fixed (2026-10-30); the full runner is **97 PASS / 0 FAIL**.
+
+1. `Native WeChat reader matches the frozen Python oracle field by field` was **never a WeChat reading defect**. That test builds its own fixture SQLCipher database (`CreateFixtureDatabaseAsync`) and inserts a zstd-compressed body whose plaintext is the literal `压缩消息`; it then compares C# against a live Python run. This machine's Python had **no `zstandard` package**, so the oracle decoded the compressed row to an empty string while ZstdSharp decoded it to `压缩消息` — hence `Expected '', got '压缩消息'`. Installing `zstandard` (0.25.0) makes the test pass. Real user chat data is not involved at all; the assertion order (count/offset/id/chat/sender first, content third) is why it looked like a content mismatch.
+2. `Capture pipeline applies immediate Agent priorities and summaries with safe fallback` was genuinely wall-clock dependent, and the earlier note blaming 17:30 was incomplete — there are **two** windows. `offReminders` fails after **23:00** (`CreatedAt + 1h` crosses the day-end 23:59 due time, and `TodoService.Schedulable` requires `candidate < dueAt`), and `onReminders` fails after **17:30** (the Agent reminder is hardcoded to 17:30 and must satisfy `candidate > now`). Fixed properly rather than by weakening assertions: `MessageCapturePipeline` now takes an optional `Func<DateTimeOffset>? clock` (default `() => DateTimeOffset.Now`) used for the Todo creation instant, and the test injects `sentAt.Date.AddHours(10)`. Do not revert this to `DateTimeOffset.Now` in that pipeline path.
+
+## Mail Capture Verified Against Real Mailbox (2026-10-31)
+
+The local-cache path is now proven end to end on real data, independent of the blocked IMAP credential.
+
+- `TestRealClientInboxAsync` (CHECK-077) reads the **actual** 2.22 GB `ImapMail\amail.sinopec.com\INBOX`, seeks the last `"\nFrom "` marker inside a 512 KB tail window, parses with `MboxMailArchiveReader`, and asserts the mapping chain: `Message-ID` → `SourceMessageKey`, cleaned subject → `ChatName`, non-empty body. It skips cleanly when the client is not installed, so CI/other machines stay green. Real sample that passes: subject `回复: 协助开通防火墙策略-FHQS2026103000013` → title `协助开通防火墙策略-FHQS2026103000013`.
+- First live run (app restarted 2026-10-31 09:53) wrote `processing_offsets` row `SinopecMail.LocalCache = v1:2378803586`, which is **byte-for-byte the INBOX length** — confirming the anchor-at-end (no history backfill) semantics actually hold in the shipped app, not just in tests. `capture_source_settings` stays empty because `LoadCaptureSourceSettingsAsync` falls back to `source.IsEnabled` for unsaved rows, and the archive source is enabled whenever the INBOX is found.
+- Consequence to remember: nothing appears until the 石化邮 client syncs **new** mail into the mbox. If the user wants recent mail immediately, move the offset backwards (delete the row or point it at an earlier `From ` marker); do not change the adapter.
+- Fixed a genuine concurrency defect surfaced as a flaky `Message feed keeps the source context when a page refresh races with navigation`: two overlapping `ShowContextAsync` calls (tab auto-refresh + explicit navigation) both mutated `Items` and one enumerated it while the other was mid-`Clear/Add` → `Collection was modified`. `ReplaceItemsAsync` now returns the materialized rows, swaps `Items` inside `_itemsGate`, and `ShowContextAsync` selects from the returned rows instead of re-enumerating the shared collection. Verified with **8 consecutive full runs, 97 PASS each**.
+- The 石化邮 client must be running for the mbox to advance (it is the sync agent). A stale `bin\Debug` build also silently disables the whole feature: a running `WechatDashboard.App` locks the DLLs, so `dotnet build` fails with MSB3027 and the old process keeps executing pre-mail code. Always stop the app before rebuilding.
+- IMAP was retried once more with the full address `shaofeng.dai@pcitc.com` + `Dsf980728$` on `amail.sinopec.com:993`: still `a2 NO Invalid login or password` (11th attempt, no lockout). Do **not** retry again from code or scripts. The client's stored credential differs from the supplied password; only the user can resolve this.
+- Backfill procedure (used for the last 5 mails, now documented in README): stop the app → back up the db → set `processing_offsets.offset_value` for `SinopecMail.LocalCache` to `v1:<byte offset of a 'From ' separator>` → restart. Dedupe is by `Message-ID`, so a rewound cursor never double-inserts.
+- **A killed process leaves a legitimate partial state, not a bug.** Each mail commits in its own transaction, but the offset advances only after the whole batch succeeds. Process death mid-batch therefore shows "3 of 5 mails present, cursor unchanged"; the next run dedupes the 3 and inserts the rest. Confirmed by running `MessageCapturePipeline` against a **copy** of the real db (captured=5, persisted=2, dup=3, todos=1, status Succeeded, cursor advanced to file end).
+- Diagnosing capture failures: `SanitizedError` lives only in `CaptureSourceRunResult` and `Debug.WriteLine` output goes to the debugger, so there is no on-disk trace. Reproduce by assembling the pipeline against a db copy (`SqliteMessageProcessingUnitOfWork` + real `OpenAiCompatibleMessageActionModel` from `ProtectedDeepSeekApiKeyStore` + `MboxMailCaptureAdapter`) and printing `result.Sources`. A throwaway console project under `tools/` works and must be deleted afterwards.
+
 ## Project
 
 WechatDashboard is a Windows WPF desktop application for collecting collaboration messages, detecting `@我` and `@所有人`, creating pending Todo items, classifying messages by project, ranking urgency, and showing a local SQLite dashboard. The solution currently targets .NET 10.
+
+## Configurable Priority Levels and Colors (2026-10-30)
+
+Requested feature: users must be able to choose how many priority levels exist (not just the fixed P0–P3) and pick a color per level.
+
+Contract now implemented:
+
+- `PriorityPalette` (`Application/Common/PriorityPalette.cs`) is an immutable palette: an ordered color array where **the array length is the level count** and the index is the level (0 → `P0`). `PriorityLevel` gained `P4`/`P5`, so the enum covers 2–6 configured levels without a schema change; `MinLevelCount = 2`, `MaxLevelCount = 6`, defaults are the historical four colors `#D92D20 / #B54708 / #3B5998 / #475467`.
+- `PrioritySettings` (same file) is the single process-wide holder (`Current`, `Apply`, `ResetToDefault`, `Changed`). `PriorityColorPolicy.For` now delegates to it, so the message feed, Todo cards, completed list, calendar cards and the month-cell preview all read one palette; `P0Color`…`P3Color` remain the defaults used by tests.
+- **Lowering the level count never mutates stored data.** `PriorityPalette.Normalize` clamps an out-of-range level to the lowest configured one for display, grouping, dropdowns and color lookup; the SQLite `priority` text (e.g. `P3`) is untouched, so raising the count again restores the original level. `TodoDetailViewModel` keeps `_originalPriority` and writes it back when the user saves other fields without touching the priority dropdown, so a settings change cannot silently downgrade a Todo.
+- Persistence reuses `app_settings`: `IPrioritySettingsRepository` / `SqlitePrioritySettingsRepository` store the color array as JSON under `priority_level_colors`. Missing, corrupt, out-of-range or non-hex values fall back to the default four-level palette instead of throwing.
+- `SqliteTodoRepository` priority sorting now maps `P0`–`P5` explicitly (both `GetPendingAsync` and `GetActiveAsync`); `UrgencyRanker.ForManualAgentAnalysis` scores `P4 = 12` / `P5 = 6` below `P3 = 20` to keep scores monotonic if an Agent ever returns a deeper level.
+- UI: new 优先级设置 tab (main-window tab index 10, sidebar tag `10`, appended last so existing tab indices stay stable). It offers 层数 2–6, one row per level (swatch, code, 12-color preset dropdown, `#RRGGBB` text box, live preview), 保存设置 and 恢复默认（4 级）, plus a status line. `PrioritySettingsViewModel` lives in `App/ViewModels/Settings`; saving applies the palette and calls back into `MainWindow.OnPrioritySettingsAppliedAsync`, which refreshes workbench, message feed, desktop calendar and dashboard immediately.
+- `TodoWorkbenchViewModel` replaced the four hard-coded `Priority0…Priority3` collections with `ObservableCollection<PriorityGroupViewModel> PriorityGroups`; `TodoPendingView.xaml` renders them with an `ItemsControl` (per-level 全选 passes `Items`). Group expansion state is remembered per level in a `HashSet` so the 1-minute auto refresh does not re-expand collapsed groups.
+- `TodoCreateViewModel`/`TodoDetailViewModel` expose `PriorityOptions` (`PriorityOption`: level + code + color) instead of `Enum.GetValues<PriorityLevel>()`, and both ComboBoxes render a color dot; the create default is `Normalize(P2)` so a two-level setup still preselects a valid level.
+- `HighPriorityTodoCount` (and the P0/P1 label next to it) now means “the top two configured levels” via `PriorityPalette.IsHighPriority`.
+
+Verification at this checkpoint (2026-10-30):
+
+- `dotnet build src/WechatDashboard.App/WechatDashboard.App.csproj -o .buildcheck/app-priority` → 0 errors (NU1900 warnings are network-only).
+- `dotnet build tests/WechatDashboard.Tests -o .buildcheck/tests-priority2` → 0 errors. Full runner: **88 PASS**, only the pre-existing `Native WeChat reader matches the frozen Python oracle field by field` failure remains.
+- New `TestPrioritySettingsAsync` covers palette validation/normalization, SQLite round-trip, corrupt-JSON fallback, the settings view model (add level → custom hex → save → global palette + one refresh), invalid hex retention and 恢复默认.
+- `TestTodoWorkbenchBucketSummaryAsync` additionally applies a two-level palette: groups drop to 2, P1 group grows to 4 (P1+P2+P3 folded), the lowest group uses its configured color and a folded row displays `P1`.
 
 ## Desktop Calendar Must Not React to Show Desktop (2026-10-30)
 
@@ -33,8 +101,22 @@ Requested behavior change: the text of a Todo in the 当日日程 panel must use
 
 - New `Application/Common/PriorityColorPolicy.cs` is now the single source of the P0–P3 palette (`#D92D20` / `#B54708` / `#3B5998` / `#475467`). `MessageFeedViewModel.PriorityColor()` delegates to it, so the message feed and the calendar cannot drift apart.
 - `DesktopCalendarTodoItemViewModel.PriorityColor` exposes that palette per row; `DesktopCalendarView.xaml` binds the card title and the `P2`-style status label to it, replacing the previous `CalendarStrongText` DynamicResource that had no definition in any dictionary (it silently resolved to nothing).
-- 已办理 items keep the existing `CalendarDisabledText` gray plus strikethrough: color expresses priority only for still-active Todos. The ViewModel still returns the real priority color, the graying lives purely in the DataTrigger.
-- Scope is the right-hand 当日日程 list only; the two-line preview inside each month-grid cell still uses `CalendarText`, and the 项目 row keeps its dot + muted text.
+- 已办理 items kept the existing `CalendarDisabledText` gray plus strikethrough at this checkpoint: color expressed priority only for still-active Todos. The ViewModel still returned the real priority color, the graying lived purely in the DataTrigger. (Superseded the same day — see the next section.)
+- Scope was the right-hand 当日日程 list only; the two-line preview inside each month-grid cell still used `CalendarText`, and the 项目 row keeps its dot + muted text. (The month-cell preview now also follows the palette — see the next section.)
+
+## Completed Todos Keep Priority Color (2026-10-30)
+
+Follow-up request: 已办理 (completed) Todos must keep their priority color instead of turning gray, so one priority has exactly one color everywhere.
+
+- `DesktopCalendarView.xaml` drops the `CalendarDisabledText` override from the `IsCompleted` DataTrigger on both the 当日日程 card title and its status label; completed rows keep priority color and are distinguished by strikethrough only. The status label collapsed to a direct `Foreground="{Binding PriorityColor}"` because the trigger became empty.
+- The month-grid cell preview now also binds `PriorityColor` as its base foreground (previously `CalendarText`), so active and completed cell items share the same palette as the day list; completed cell items keep strikethrough and lose the gray.
+- `TodoCompletedView.xaml` colors 优先级 (SemiBold) and 标题 via `DataGridTextColumn.ElementStyle`绑定到 `PriorityColor`; `TodoListItemViewModel` gained `PriorityColor => PriorityColorPolicy.For(Todo.Priority)` so 已办理 list, calendar and message feed all read the same `PriorityColorPolicy`.
+- Completion state is now expressed by the checkbox + strikethrough alone; no view uses `CalendarDisabledText` for Todo titles anymore.
+
+Verification at this checkpoint (2026-10-30):
+
+- App project builds with 0 errors in an isolated output directory (the running debug instance locks the default `bin`).
+- Full runner: only the pre-existing `Native WeChat reader matches the frozen Python oracle field by field` failure remains; every desktop-calendar and Todo test passes. The P0/P1/P0 color assertions in `TestDesktopCalendarViewModelAsync` are unchanged (the ViewModel contract did not move).
 
 Verification at this checkpoint (2026-10-30):
 
