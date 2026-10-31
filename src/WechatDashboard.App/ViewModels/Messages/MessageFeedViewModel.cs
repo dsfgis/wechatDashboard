@@ -30,6 +30,9 @@ public sealed class MessageFeedViewModel : ObservableObject
     private int _pageBeforeContext = 1;
     private long? _pendingContextMessageId;
 
+    /// <summary>串行化对 <see cref="Items"/> 的整批替换，避免并发刷新与上下文跳转互相撕裂集合。</summary>
+    private readonly object _itemsGate = new();
+
     public MessageFeedViewModel(
         IMessageRepository messages,
         ITodoRepository todoRepository,
@@ -152,8 +155,9 @@ public sealed class MessageFeedViewModel : ObservableObject
             }
 
             IsContextMode = true;
-            await ReplaceItemsAsync(context.Messages);
-            SelectedMessage = Items.FirstOrDefault(item => item.MessageId == messageId);
+            var rows = await ReplaceItemsAsync(context.Messages);
+            // 从本次载入的行里定位，而不是再枚举共享集合：并发刷新正在改写 Items 时不会抛“集合已被修改”。
+            SelectedMessage = rows.FirstOrDefault(item => item.MessageId == messageId);
             StatusText = "正在查看原始消息上下文；当前关注群过滤已临时忽略。";
             OnPropertyChanged(nameof(PageText));
         }
@@ -330,7 +334,7 @@ public sealed class MessageFeedViewModel : ObservableObject
 
     private int PageCount => Math.Max(1, (int)Math.Ceiling(_totalCount / (double)_pageSize));
 
-    private async Task ReplaceItemsAsync(IEnumerable<Message> messages)
+    private async Task<IReadOnlyList<MessageListItemViewModel>> ReplaceItemsAsync(IEnumerable<Message> messages)
     {
         var messageList = messages.ToArray();
         var aliases = _aliases().ToArray();
@@ -359,16 +363,23 @@ public sealed class MessageFeedViewModel : ObservableObject
                     MessageHighlighter.HighlightMentions(message.Content, detector.ExtractMentionedAliases(message.Content)),
                     todoAction.Text,
                     todoAction.ToolTip,
-                    priority.ToString(),
+                    PrioritySettings.Current.CodeFor(priority),
                     PriorityColor(priority));
             }).ToArray();
         });
 
-        Items.Clear();
-        foreach (var item in itemRows)
+        // Clear + 逐条 Add 视为一个整体，必须在同一把锁内完成；否则并发的一批会在中途清空，
+        // 既丢失这一批的行，也会让正在枚举集合的一方抛“集合已被修改”。
+        lock (_itemsGate)
         {
-            Items.Add(item);
+            Items.Clear();
+            foreach (var item in itemRows)
+            {
+                Items.Add(item);
+            }
         }
+
+        return itemRows;
     }
 
     /// <summary>保留原有入口，实际色值统一来自 <see cref="PriorityColorPolicy"/>。</summary>
@@ -405,6 +416,7 @@ public sealed class MessageFeedViewModel : ObservableObject
     {
         "WeChat" => "微信",
         "Shihuatong" => "石化通",
+        "SinopecMail" => "石化邮",
         "Feishu" => "飞书",
         "DingTalk" => "钉钉",
         "Sample" => "示例",

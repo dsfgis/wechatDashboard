@@ -1,4 +1,5 @@
 using WechatDashboard.Application.Capture;
+using WechatDashboard.Application.Common;
 using System.IO;
 
 namespace WechatDashboard.Infrastructure.Capture;
@@ -43,6 +44,8 @@ public static class CaptureAdapterFactory
                 CreateWeChatLocalExportSource(captureRootPath),
                 CreateWeChatLocalDatabaseSource(readerService),
                 CreateShihuatongLocalDatabaseSource(),
+                CreateSinopecMailArchiveSource(),
+                CreateSinopecMailSource(),
             })
             .ToArray();
     }
@@ -132,6 +135,35 @@ public static class CaptureAdapterFactory
             IsEnabled: true);
     }
 
+    /// <summary>
+    /// 创建石化邮本地缓存采集源：读取客户端已同步到本机的 mbox 收件箱，不需要账号口令。
+    /// 未找到缓存文件时置为未启用，避免每轮采集都产生一条失败记录。
+    /// </summary>
+    public static CaptureSourceDefinition CreateSinopecMailArchiveSource()
+    {
+        var inbox = SinopecMailArchiveLocator.FindInbox();
+        return new CaptureSourceDefinition(
+            Source: MboxMailCaptureAdapter.AdapterKey,
+            DisplayName: "石化邮（本地缓存）",
+            Kind: CaptureSourceKind.SinopecMailArchive,
+            Location: inbox ?? "未找到客户端邮件缓存",
+            IsEnabled: inbox is not null);
+    }
+
+    /// <summary>
+    /// 创建石化邮 IMAP 采集源。默认不启用：未保存账号密码时启用只会在每轮采集产生一条
+    /// “尚未配置”失败记录，等用户在设置中填写后由界面改为启用。
+    /// </summary>
+    public static CaptureSourceDefinition CreateSinopecMailSource()
+    {
+        return new CaptureSourceDefinition(
+            Source: MailSourcePolicy.SinopecMail,
+            DisplayName: "石化邮（IMAP）",
+            Kind: CaptureSourceKind.SinopecMail,
+            Location: "amail.sinopec.com:993",
+            IsEnabled: false);
+    }
+
     /// <summary>获取微信本地数据库配置文件路径。</summary>
     public static string GetWeChatLocalDatabaseConfigPath()
     {
@@ -167,8 +199,35 @@ public static class CaptureAdapterFactory
                 : new WeChatLocalDatabaseCaptureAdapter(weChatLocalDatabaseReader),
             CaptureSourceKind.WindowText => CreateWindowTextAdapter(source, windowTextSnapshotProvider),
             CaptureSourceKind.ShihuatongLocalDatabase => new ShihuatongLocalDatabaseCaptureAdapter(),
+            CaptureSourceKind.SinopecMail => CreateSinopecMailAdapter(),
+            CaptureSourceKind.SinopecMailArchive => CreateSinopecMailArchiveAdapter(),
             _ => throw new NotSupportedException($"Capture source kind '{source.Kind}' is not implemented for source '{source.Source}'.")
         };
+    }
+
+    /// <summary>
+    /// 创建石化邮本地缓存适配器。每次创建时重新定位缓存文件，客户端换账户目录后无需重启。
+    /// </summary>
+    private static IMessageCaptureAdapter CreateSinopecMailArchiveAdapter()
+    {
+        var inbox = SinopecMailArchiveLocator.FindInbox()
+            ?? throw new InvalidOperationException(
+                "未找到石化邮客户端的本地邮件缓存，请先登录石化邮并完成一次收信。");
+        return new MboxMailCaptureAdapter(new MboxMailArchiveReader(inbox), MailSourcePolicy.SinopecMail);
+    }
+
+    /// <summary>
+    /// 创建石化邮适配器。凭据在每次采集时由密文存储读取，因此用户在运行期更换密码
+    /// 只需重新保存凭据，无需重启应用或重建适配器。
+    /// </summary>
+    private static IMessageCaptureAdapter CreateSinopecMailAdapter()
+    {
+        var store = new ProtectedImapCredentialStore();
+        var options = new SinopecMailOptions
+        {
+            Account = store.Load()?.Account ?? string.Empty
+        };
+        return new SinopecMailCaptureAdapter(new ImapMailInboxReader(options, store.Load), options);
     }
 
     /// <summary>创建微信可见窗口文本采集适配器。</summary>

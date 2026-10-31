@@ -84,6 +84,7 @@ public sealed class UrgencyRanker
     /// <summary>
     /// 为手动转待办的 Agent 结果生成一条新评分；自动采集仍只使用 Calculate 的本地结果。
     /// 固定分值与现有阈值一致，确保分数和优先级不会相互矛盾。
+    /// P4/P5 只会在“优先级设置”把层数调到 5/6 级时出现，分值低于 P3 以保持单调。
     /// </summary>
     public static UrgencyScore ForManualAgentAnalysis(long messageId, PriorityLevel priority)
     {
@@ -93,6 +94,8 @@ public sealed class UrgencyRanker
             PriorityLevel.P1 => 75,
             PriorityLevel.P2 => 50,
             PriorityLevel.P3 => 20,
+            PriorityLevel.P4 => 12,
+            PriorityLevel.P5 => 6,
             _ => throw new ArgumentOutOfRangeException(nameof(priority))
         };
         return new UrgencyScore(messageId, score, priority, "Agent 手动转待办分析");

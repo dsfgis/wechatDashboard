@@ -16,7 +16,17 @@
                 <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
                 <StackPanel Margin="0,0,8,0">
                     <TextBlock Text="优先级" Foreground="#6B7280" />
-                    <ComboBox ItemsSource="{Binding Priorities}" SelectedItem="{Binding Priority}" Margin="0,4,0,0" />
+                    <ComboBox ItemsSource="{Binding PriorityOptions}" SelectedValuePath="Level"
+                              SelectedValue="{Binding Priority, Mode=TwoWay}" Margin="0,4,0,0">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,6,0" />
+                                    <TextBlock Text="{Binding Code}" Foreground="{Binding Color}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Margin="8,0,0,0">
                     <TextBlock Text="项目" Foreground="#6B7280" />

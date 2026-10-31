@@ -304,10 +304,11 @@ public sealed record DesktopCalendarTodoItemViewModel(
     /// <summary>优先展示消息发送时间；无来源消息时回退到到期时间。</summary>
     public string TimeText => DisplayAt.ToString("HH:mm");
 
-    public string StatusText => IsCompleted ? "已办理" : Priority.ToString();
+    public string StatusText => IsCompleted ? "已办理" : PrioritySettings.Current.CodeFor(Priority);
 
     /// <summary>
-    /// 与消息流一致的优先级色板；已完成项在视图层另行灰化，因此这里仍返回真实优先级颜色。
+    /// 与消息流一致的优先级色板。已办理项同样按优先级着色（仅额外加删除线），
+    /// 因此这里始终返回该待办的真实优先级颜色。
     /// </summary>
     public string PriorityColor => PriorityColorPolicy.For(Priority);
 }

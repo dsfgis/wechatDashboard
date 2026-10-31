@@ -115,6 +115,9 @@ public sealed class SqliteTodoRepository : ITodoRepository
                     WHEN 'P0' THEN 0
                     WHEN 'P1' THEN 1
                     WHEN 'P2' THEN 2
+                    WHEN 'P3' THEN 3
+                    WHEN 'P4' THEN 4
+                    WHEN 'P5' THEN 5
                     ELSE 3
                 END;
             """;
@@ -140,7 +143,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
             FROM todo_items
             WHERE status IN ($pending, $inProgress, $waiting)
             ORDER BY is_pinned DESC, due_at IS NULL, due_at,
-                CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
+                CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2
+                    WHEN 'P3' THEN 3 WHEN 'P4' THEN 4 WHEN 'P5' THEN 5 ELSE 3 END,
                 updated_at DESC;
             """;
         command.Parameters.AddWithValue("$pending", TodoStatus.Pending.ToString());

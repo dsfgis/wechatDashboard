@@ -24,7 +24,8 @@ public sealed class TodoCreateViewModel : ObservableObject
     private readonly Func<Task> _onCreated;
     private string _title = "";
     private string? _description;
-    private PriorityLevel _priority = PriorityLevel.P2;
+    // 默认中优先级；用户把层数改到 2 级时按当前最低一级收敛，避免下拉出现不存在的选项。
+    private PriorityLevel _priority = PrioritySettings.Current.Normalize(PriorityLevel.P2);
     private DateTime? _dueDate;
     private int _dueHour = 23;
     private int _dueMinute = 59;
@@ -58,7 +59,8 @@ public sealed class TodoCreateViewModel : ObservableObject
 
     public event EventHandler? RequestClose;
     public ObservableCollection<TodoProjectOption> ProjectOptions { get; } = new();
-    public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
+    /// <summary>可选优先级，数量与颜色跟随“优先级设置”。</summary>
+    public IReadOnlyList<PriorityOption> PriorityOptions { get; } = PriorityOption.FromCurrentPalette();
     public IReadOnlyList<int> DueHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> DueMinutes { get; } = Enumerable.Range(0, 60).ToArray();
     public IReadOnlyList<int> ReminderHours { get; } = Enumerable.Range(0, 24).ToArray();

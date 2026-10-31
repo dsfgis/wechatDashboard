@@ -25,6 +25,8 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private readonly Func<Task> _onTodoCreated;
     private string _statusText = "正在加载待办...";
     private int _activeCount;
+    // 刷新会重建优先级分组，折叠状态按层级记住，避免每分钟自动刷新把用户折叠的分组重新展开。
+    private readonly HashSet<PriorityLevel> _collapsedPriorityLevels = new();
 
     public TodoWorkbenchViewModel(
         ITodoRepository todos,
@@ -67,11 +69,11 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     public ObservableCollection<TodoListItemViewModel> Upcoming { get; } = new();
     public ObservableCollection<TodoListItemViewModel> NoDueDate { get; } = new();
 
-    /// <summary>按 P0–P3 展示全部活动待办；已办记录不进入优先级分组。</summary>
-    public ObservableCollection<TodoListItemViewModel> Priority0 { get; } = new();
-    public ObservableCollection<TodoListItemViewModel> Priority1 { get; } = new();
-    public ObservableCollection<TodoListItemViewModel> Priority2 { get; } = new();
-    public ObservableCollection<TodoListItemViewModel> Priority3 { get; } = new();
+    /// <summary>
+    /// 按当前配置的优先级层数展示全部活动待办（默认 P0–P3，可在“优先级设置”中改为 2–6 级）；
+    /// 已办记录不进入优先级分组。
+    /// </summary>
+    public ObservableCollection<PriorityGroupViewModel> PriorityGroups { get; } = new();
     public ObservableCollection<TodoListItemViewModel> Completed { get; } = new();
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand AddTodoCommand { get; }
@@ -128,10 +130,22 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         Replace(NoDueDate, activeRows.Where(row => row.Bucket == TodoDueBucket.NoDueDate).OrderByDescending(row => row.IsPinned));
 
         // 优先级是独立查看维度，包含置顶活动待办，但不读取已办记录。
-        Replace(Priority0, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P0));
-        Replace(Priority1, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P1));
-        Replace(Priority2, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P2));
-        Replace(Priority3, activeRows.Where(row => row.Todo.Priority == PriorityLevel.P3));
+        // 分组数量与颜色跟随“优先级设置”，超出当前层数的历史待办按最低一级归组。
+        var palette = PrioritySettings.Current;
+        var groups = palette.Levels
+            .Select(definition => new PriorityGroupViewModel(
+                definition.Level,
+                definition.Code,
+                definition.Color,
+                !_collapsedPriorityLevels.Contains(definition.Level),
+                OnPriorityGroupExpandedChanged))
+            .ToArray();
+        foreach (var group in groups)
+        {
+            Replace(group.Items, activeRows.Where(row => palette.Normalize(row.Todo.Priority) == group.Level));
+        }
+
+        ReplaceGroups(groups);
         Replace(Completed, rows.Where(row => !activeIds.Contains(row.Todo.Id))
             .OrderByDescending(row => row.Todo.CompletedAt ?? row.Todo.UpdatedAt));
         StatusText = $"活动待办 {ActiveCount} 条（去重）：已置顶 {Pinned.Count} 条（同时计入所属截止时间分组）、已逾期 {Overdue.Count} 条、今日到期 {DueToday.Count} 条、后续到期 {Upcoming.Count} 条、无截止时间 {NoDueDate.Count} 条。";
@@ -349,6 +363,29 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         }
     }
 
+    /// <summary>整体替换优先级分组集合；分组对象在每次刷新时按当前层数与颜色重建。</summary>
+    private void ReplaceGroups(IEnumerable<PriorityGroupViewModel> groups)
+    {
+        PriorityGroups.Clear();
+        foreach (var group in groups)
+        {
+            PriorityGroups.Add(group);
+        }
+    }
+
+    /// <summary>记录用户对优先级分组的折叠操作，供下一次刷新还原。</summary>
+    private void OnPriorityGroupExpandedChanged(PriorityLevel level, bool isExpanded)
+    {
+        if (isExpanded)
+        {
+            _collapsedPriorityLevels.Remove(level);
+        }
+        else
+        {
+            _collapsedPriorityLevels.Add(level);
+        }
+    }
+
     /// <summary>全部活动待办行；置顶行会同时存在于置顶组和截止时间组，故按引用去重后再参与选择与统计。</summary>
     private IEnumerable<TodoListItemViewModel> ActiveRows() =>
         Pinned.Concat(Overdue).Concat(DueToday).Concat(Upcoming).Concat(NoDueDate).Distinct();
@@ -422,7 +459,15 @@ public sealed class TodoListItemViewModel : ObservableObject
             }
         }
     }
-    public string Priority => Todo.Priority.ToString();
+    /// <summary>优先级代码文本，按当前配置层数归一化（超出层数的历史值显示为最低一级）。</summary>
+    public string Priority => PrioritySettings.Current.CodeFor(Todo.Priority);
+
+    /// <summary>
+    /// 与消息流、桌面日历共用的优先级色板。已办理记录同样按优先级着色，
+    /// 不再置灰，避免同一优先级在不同视图出现两种颜色。
+    /// </summary>
+    public string PriorityColor => PriorityColorPolicy.For(Todo.Priority);
+
     public string Status => Todo.Status.ToString();
     public string Title => Todo.Title;
     public string DueAt => Todo.DueAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";
@@ -442,6 +487,7 @@ public sealed class TodoListItemViewModel : ObservableObject
     {
         "WeChat" => "微信",
         "Shihuatong" => "石化通",
+        "SinopecMail" => "石化邮",
         "Feishu" => "飞书",
         "DingTalk" => "钉钉",
         "Sample" => "示例",

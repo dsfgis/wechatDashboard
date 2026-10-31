@@ -12,6 +12,7 @@ using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.App.Services;
+using WechatDashboard.App.ViewModels.Settings;
 using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.App.Views.Todos;
 using WechatDashboard.Domain.Entities;
@@ -45,6 +46,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteFollowedChatRepository _followedChatRepository;
     private readonly SqliteFollowedProjectRepository _followedProjectRepository;
     private readonly SqliteFollowedProjectKeywordRepository _followedProjectKeywordRepository;
+    // 优先级层数/颜色配置（app_settings 中的一段 JSON）
+    private readonly SqlitePrioritySettingsRepository _prioritySettingsRepository;
     // JSONL 采集收件箱路径
     private readonly string _captureInboxPath;
     // 当前生效的 @我 别名集合（默认兜底）
@@ -122,6 +125,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _modelConfigStatusText = "尚未保存本机 DeepSeek API Key。";
     public TodoFeatureCoordinator TodoFeature { get; }
     public DesktopCalendarViewModel ScheduleOverview { get; }
+    /// <summary>“优先级设置”页视图模型：层数 2–6 与每级颜色。</summary>
+    public PrioritySettingsViewModel PriorityLevelSettings { get; }
 
     public MainWindow()
     {
@@ -141,6 +146,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _followedChatRepository = new SqliteFollowedChatRepository(_databasePath);
         _followedProjectRepository = new SqliteFollowedProjectRepository(_databasePath);
         _followedProjectKeywordRepository = new SqliteFollowedProjectKeywordRepository(_databasePath);
+        _prioritySettingsRepository = new SqlitePrioritySettingsRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
 
@@ -186,6 +192,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;
+        // 优先级设置页与全局色板共享同一仓储：保存后立即影响待办、消息流与日程。
+        PriorityLevelSettings = new PrioritySettingsViewModel(
+            _prioritySettingsRepository,
+            OnPrioritySettingsAppliedAsync);
         // 设置数据上下文为本窗口，使 XAML 绑定生效
         DataContext = this;
 
@@ -418,6 +428,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ApplyBootstrapRange();
         await Task.Run(() => _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None));
         await LoadCaptureSourceSettingsAsync();
+        LoadMailCredentialState();
         if (_readerService.IsInitialized)
         {
             WeChatMessageStatusText = "微信读取器已就绪；打开“微信消息”页时加载当天消息。";
@@ -813,6 +824,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task InitializeAndRefreshAsync(bool seedIfEmpty)
     {
         await Task.Run(() => _databaseInitializer.InitializeAsync(CancellationToken.None));
+        // 优先级层数与颜色必须先于任何待办/消息渲染载入，否则首帧会用默认色板。
+        await PriorityLevelSettings.LoadAsync(CancellationToken.None);
         await LoadUserAliasesAsync();
         await LoadFollowedChatsAsync();
         await LoadFollowedProjectsAsync();
@@ -918,7 +931,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         TodayMessageCount = recentMessages.Count(message => message.SentAt.LocalDateTime.Date == DateTime.Today);
         MentionCount = recentMessages.Count(message => message.IsMentionMe);
         PendingTodoCount = pendingTodos.Count;
-        HighPriorityTodoCount = pendingTodos.Count(todo => todo.Priority is PriorityLevel.P0 or PriorityLevel.P1);
+        HighPriorityTodoCount = pendingTodos.Count(todo => PrioritySettings.Current.IsHighPriority(todo.Priority));
 
         // 刷新项目看板图表和消息流分页（强制重新计算总数）
         ApplyDashboardSnapshot(dashboard);
@@ -1683,6 +1696,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>在监听启动前读取模型分析开关，读取失败时安全保持关闭。</summary>
+    /// <summary>
+    /// 优先级设置保存成功后的统一刷新入口：色板已替换，
+    /// 这里重绘待办分组、消息流正文颜色、日程卡片与顶部“高优先级”统计。
+    /// </summary>
+    private async Task OnPrioritySettingsAppliedAsync()
+    {
+        await TodoFeature.RefreshAsync();
+        await ScheduleOverview.RefreshAsync();
+        await RefreshAsync();
+    }
+
     private async Task LoadModelSettingsAsync()
     {
         try
@@ -1772,6 +1796,55 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>保存采集源设置：清空旧设置后批量写入当前 UI 列表中的设置项。</summary>
+    /// <summary>保存石化邮 IMAP 凭据：经 DPAPI 加密写入当前用户的密文文件，密码不回显也不落库。</summary>
+    private void SaveSinopecMailCredentialButton_Click(object sender, RoutedEventArgs e)
+    {
+        var account = MailAccountTextBox.Text.Trim();
+        var password = MailPasswordBox.Password;
+        if (account.Length == 0 || password.Length == 0)
+        {
+            MailCredentialStatusText.Text = "账号和密码都不能为空。";
+            return;
+        }
+
+        try
+        {
+            new ProtectedImapCredentialStore().Save(new ImapCredential(account, password));
+            MailPasswordBox.Clear();
+            MailCredentialStatusText.Text = $"已保存：{account}（密文存储）";
+            SummaryText = "石化邮账号已保存；勾选“石化邮（IMAP）”并保存设置后开始采集";
+        }
+        catch (Exception exception)
+        {
+            MailCredentialStatusText.Text = $"保存失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>清除本机保存的石化邮凭据。</summary>
+    private void ClearSinopecMailCredentialButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            new ProtectedImapCredentialStore().Clear();
+            MailPasswordBox.Clear();
+            MailCredentialStatusText.Text = "已清除石化邮账号";
+        }
+        catch (Exception exception)
+        {
+            MailCredentialStatusText.Text = $"清除失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>回显已保存的石化邮账号；密码永不回显。</summary>
+    private void LoadMailCredentialState()
+    {
+        var credential = new ProtectedImapCredentialStore().Load();
+        MailAccountTextBox.Text = credential?.Account ?? string.Empty;
+        MailCredentialStatusText.Text = credential is null
+            ? "尚未保存账号密码"
+            : $"已保存：{credential.Account}（密文存储）";
+    }
+
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var now = DateTimeOffset.Now;
@@ -2207,6 +2280,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             "WECHAT" => "微信",
             "SHIHUATONG" => "石化通",
+            "SINOPECMAIL" => "石化邮",
             "FEISHU" => "飞书",
             "DINGTALK" => "钉钉",
             "SAMPLE" => "示例",

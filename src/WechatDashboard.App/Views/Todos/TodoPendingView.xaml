@@ -46,7 +46,7 @@
                                     </Style>
                                 </TextBlock.Style>
                             </TextBlock>
-                            <TextBlock Text="{Binding Priority}" Foreground="#DC2626" FontWeight="SemiBold" Margin="0,0,8,0" />
+                            <TextBlock Text="{Binding Priority}" Foreground="{Binding PriorityColor}" FontWeight="SemiBold" Margin="0,0,8,0" />
                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         </DockPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
@@ -172,55 +172,30 @@
                         </StackPanel>
                     </Border>
                 </Expander>
-                <!-- 顶级分组：优先级。P0–P3 同样收纳在引导线容器内，从属于"优先级"父级。 -->
+                <!-- 顶级分组：优先级。层级数量与颜色来自“优先级设置”，故用 ItemsControl 数据驱动。 -->
                 <!-- 优先级是独立查看维度，统计全部活动待办（含置顶），不包含已办。 -->
                 <Expander IsExpanded="True">
                     <Expander.Header>
                         <TextBlock Style="{StaticResource TopLevelGroupTextStyle}"><Run Text="优先级（"/><Run Text="{Binding ActiveCount, Mode=OneWay}"/><Run Text="）"/></TextBlock>
                     </Expander.Header>
                     <Border Style="{StaticResource NestedGroupPanelStyle}">
-                        <StackPanel>
-                            <Expander IsExpanded="True" Margin="0,0,0,6">
-                                <Expander.Header>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Foreground="#DC2626" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P0（"/><Run Text="{Binding Priority0.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority0}" />
-                                    </StackPanel>
-                                </Expander.Header>
-                                <ItemsControl ItemsSource="{Binding Priority0}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
-                            </Expander>
-                            <Expander IsExpanded="True" Margin="0,0,0,6">
-                                <Expander.Header>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Foreground="#D97706" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P1（"/><Run Text="{Binding Priority1.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority1}" />
-                                    </StackPanel>
-                                </Expander.Header>
-                                <ItemsControl ItemsSource="{Binding Priority1}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
-                            </Expander>
-                            <Expander IsExpanded="True" Margin="0,0,0,6">
-                                <Expander.Header>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Foreground="#2563EB" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P2（"/><Run Text="{Binding Priority2.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority2}" />
-                                    </StackPanel>
-                                </Expander.Header>
-                                <ItemsControl ItemsSource="{Binding Priority2}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
-                            </Expander>
-                            <Expander IsExpanded="True">
-                                <Expander.Header>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Foreground="#4B5563" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="P3（"/><Run Text="{Binding Priority3.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
-                                        <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
-                                                Command="{Binding SelectCategoryCommand}" CommandParameter="{Binding Priority3}" />
-                                    </StackPanel>
-                                </Expander.Header>
-                                <ItemsControl ItemsSource="{Binding Priority3}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
-                            </Expander>
-                        </StackPanel>
+                        <ItemsControl ItemsSource="{Binding PriorityGroups}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Expander IsExpanded="{Binding IsExpanded, Mode=TwoWay}" Margin="0,0,0,6">
+                                        <Expander.Header>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Foreground="{Binding Color}" FontWeight="SemiBold" VerticalAlignment="Center"><Run Text="{Binding Code, Mode=OneWay}"/><Run Text="（"/><Run Text="{Binding Items.Count, Mode=OneWay}"/><Run Text="）"/></TextBlock>
+                                                <Button Content="全选" Margin="10,0,0,0" Padding="9,2"
+                                                        Command="{Binding DataContext.SelectCategoryCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                        CommandParameter="{Binding Items}" />
+                                            </StackPanel>
+                                        </Expander.Header>
+                                        <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource TodoCardTemplate}" Style="{StaticResource NestedCardListStyle}" />
+                                    </Expander>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
                     </Border>
                 </Expander>
             </StackPanel>

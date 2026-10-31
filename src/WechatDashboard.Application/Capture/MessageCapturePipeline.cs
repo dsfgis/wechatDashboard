@@ -1,4 +1,5 @@
 using WechatDashboard.Application.Classification;
+using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
@@ -40,6 +41,8 @@ public sealed class MessageCapturePipeline
     private readonly Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? _analyzeMentionAsync;
     // 跨群去重：命中既有待办时把消息合并进去，不再重复建待办。
     private readonly Func<Message, CancellationToken, Task<TodoItem?>>? _detectDuplicateAsync;
+    // 待办创建时刻的可注入时钟；默认取系统当前时间，测试可注入固定时刻消除时间敏感性。
+    private readonly Func<DateTimeOffset> _clock;
 
     public MessageCapturePipeline(
         IEnumerable<IMessageCaptureAdapter> adapters,
@@ -52,7 +55,8 @@ public sealed class MessageCapturePipeline
         IMessageRepository? messageRepository = null,
         Func<bool>? analyzeMessageContent = null,
         Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? analyzeMentionAsync = null,
-        Func<Message, CancellationToken, Task<TodoItem?>>? detectDuplicateAsync = null)
+        Func<Message, CancellationToken, Task<TodoItem?>>? detectDuplicateAsync = null,
+        Func<DateTimeOffset>? clock = null)
     {
         _adapters = adapters.ToArray();
         _messageProcessingUnitOfWork = messageProcessingUnitOfWork;
@@ -65,6 +69,7 @@ public sealed class MessageCapturePipeline
         _analyzeMessageContent = analyzeMessageContent ?? (() => false);
         _analyzeMentionAsync = analyzeMentionAsync;
         _detectDuplicateAsync = detectDuplicateAsync;
+        _clock = clock ?? (() => DateTimeOffset.Now);
     }
 
     /// <summary>
@@ -162,12 +167,17 @@ public sealed class MessageCapturePipeline
 
             // 判断是否 @我
             var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
+            var isMailSource = MailSourcePolicy.IsMailSource(capturedMessage.Source);
             var message = ToMessage(capturedMessage, isMentionMe);
             // 网络分析必须在数据库事务之前完成，失败时以 null 回退本地优先级和默认说明。
-            var mentionAnalysis = await PrepareMentionAnalysisAsync(message, isMentionMe, cancellationToken);
-            // 仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
-            var shouldCreateTodo = isMentionMe
-                && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
+            // 邮件没有 @提及 语义，一律交给 Agent 判定是否需要行动；聊天消息仍只在 @我 时调用。
+            var needsAgentDecision = isMentionMe || isMailSource;
+            var mentionAnalysis = await PrepareMentionAnalysisAsync(message, needsAgentDecision, cancellationToken);
+            // 聊天消息：仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
+            // 邮件：默认不进待办，只有模型明确判定需要行动才创建，否则收件箱会淹没待办列表。
+            var shouldCreateTodo = isMailSource
+                ? mentionAnalysis?.ShouldCreate == true
+                : isMentionMe && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
             // 语义去重同样在事务之前完成：命中既有待办时只追加来源消息，不再新建待办。
             var mergeIntoTodoId = shouldCreateTodo
                 ? await PrepareDuplicateTargetAsync(message, cancellationToken)
@@ -185,7 +195,7 @@ public sealed class MessageCapturePipeline
                             savedMessage,
                             classification,
                             urgency,
-                            DateTimeOffset.Now,
+                            _clock(),
                             TimeZoneInfo.Local,
                             managedProjectId: _managedProjectMatcher(savedMessage),
                             description: mentionAnalysis?.Description,
@@ -257,13 +267,16 @@ public sealed class MessageCapturePipeline
         }
     }
 
-    /// <summary>为新的 @我 消息准备 Agent 筛选与内容分析；任何模型故障都回退本地规则，不阻断自动待办。</summary>
+    /// <summary>
+    /// 为需要判定的消息准备 Agent 筛选与内容分析。聊天消息由 @我 触发，邮件由来源触发；
+    /// 任何模型故障都返回 null，由调用方按来源采取各自的回退策略。
+    /// </summary>
     private async Task<MentionMessageAnalysis?> PrepareMentionAnalysisAsync(
         Message message,
-        bool isMentionMe,
+        bool needsAgentDecision,
         CancellationToken cancellationToken)
     {
-        if (!isMentionMe
+        if (!needsAgentDecision
             || !_analyzeMessageContent()
             || _messageRepository is null
             || _analyzeMentionAsync is null)

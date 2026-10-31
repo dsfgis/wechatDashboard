@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using WechatDashboard.App.Services;
 using WechatDashboard.App.ViewModels.Messages;
+using WechatDashboard.App.ViewModels.Settings;
 using WechatDashboard.App.ViewModels.Todos;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
@@ -36,6 +37,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Auto Todo parses an explicit clock time from the message body", TestTodoClockTimeParsingAsync),
     ("Todo due bucket policy separates overdue, today, upcoming and undated items", TestTodoDueBucketPolicyAsync),
     ("Todo workbench shows pinned Todos in both the pinned group and their due-date group", TestTodoWorkbenchBucketSummaryAsync),
+    ("Priority level count and colors are configurable and applied globally", TestPrioritySettingsAsync),
     ("Any persisted message converts to one Todo with an optional reminder", TestManualMessageToTodoAsync),
     ("Todo repository reports existing Todo state for message feed rows", TestMessageTodoStateLookupAsync),
     ("A reminder from another chat merges into the existing Todo and only later times reschedule it", TestTodoMergeAcrossChatsAsync),
@@ -86,6 +88,14 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Capture adapter factory creates live WeChat visible-window adapters", TestLiveCaptureAdapterFactoryAsync),
     ("Shihuatong decoder and referenced meeting content are preserved", TestShihuatongMessageContentDecoderAsync),
     ("Shihuatong source stamp ignores volatile shared-memory changes", TestShihuatongSourceStampAsync),
+    ("SinopecMail adapter maps envelopes and advances the UID cursor", MailCaptureTests.TestSinopecMailAdapterMapsEnvelopeAndCursorAsync),
+    ("SinopecMail adapter falls back for missing Message-ID and truncates long bodies", MailCaptureTests.TestSinopecMailAdapterFallbacksAsync),
+    ("SinopecMail subject cleaning strips stacked prefixes and truncates", MailCaptureTests.TestMailSubjectCleaningAsync),
+    ("Todo title comes from the mail subject and stays short for chat messages", MailCaptureTests.TestTodoTitleSourceAsync),
+    ("Protected IMAP credential store round-trips under DPAPI protection", MailCaptureTests.TestProtectedImapCredentialStoreAsync),
+    ("SinopecMail mbox reader only reads appended messages and decodes Chinese headers", MailCaptureTests.TestMboxIncrementalReadAsync),
+    ("SinopecMail mbox cursor recovers when the cache file is rewritten", MailCaptureTests.TestMboxCursorAndResetAsync),
+    ("SinopecMail local cache decodes the newest mail from the installed client", MailCaptureTests.TestRealClientInboxAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
     ("Window text adapter ignores dashboard status when inferring chat name", TestWindowTextCaptureAdapterSkipsStatusChatNameAsync),
@@ -528,15 +538,131 @@ static async Task TestTodoWorkbenchBucketSummaryAsync()
     workbench.Overdue[0].IsSelected = false;
 
     // 优先级是独立维度，包含置顶活动待办，但不得包含上面的已办 P0。
-    AssertEqual(2, workbench.Priority0.Count, "P0 should include active pinned and unpinned Todos, but exclude completed Todos.");
-    AssertEqual(2, workbench.Priority1.Count, "P1 should contain only active Todos.");
-    AssertEqual(1, workbench.Priority2.Count, "P2 should contain only active Todos.");
-    AssertEqual(1, workbench.Priority3.Count, "P3 should contain only active Todos.");
+    AssertEqual(4, workbench.PriorityGroups.Count, "The default palette should expose four priority groups.");
+    AssertEqual(2, GroupCount(workbench, PriorityLevel.P0), "P0 should include active pinned and unpinned Todos, but exclude completed Todos.");
+    AssertEqual(2, GroupCount(workbench, PriorityLevel.P1), "P1 should contain only active Todos.");
+    AssertEqual(1, GroupCount(workbench, PriorityLevel.P2), "P2 should contain only active Todos.");
+    AssertEqual(1, GroupCount(workbench, PriorityLevel.P3), "P3 should contain only active Todos.");
     AssertEqual(1, workbench.Completed.Count, "The completed Todo should remain only in the completed history.");
     AssertEqual(
         "活动待办 6 条（去重）：已置顶 1 条（同时计入所属截止时间分组）、已逾期 2 条、今日到期 2 条、后续到期 1 条、无截止时间 1 条。",
         workbench.StatusText,
         "The summary should report the de-duplicated total and the overlapping group sizes.");
+
+    // 层数减到 2 级：分组只剩 P0/P1，P2/P3 的历史待办按最低一级归组并取该级颜色。
+    try
+    {
+        PrioritySettings.Apply(PriorityPalette.Create(new[] { "#111111", "#222222" })!);
+        await workbench.RefreshAsync();
+        AssertEqual(2, workbench.PriorityGroups.Count, "A two-level palette should expose exactly two groups.");
+        AssertEqual(2, GroupCount(workbench, PriorityLevel.P0), "P0 group should be unchanged by the level count.");
+        AssertEqual(4, GroupCount(workbench, PriorityLevel.P1),
+            "P1/P2/P3 Todos should fold into the lowest configured level after reducing the level count.");
+        AssertEqual("#222222", workbench.PriorityGroups[1].Color, "The lowest level should use its configured color.");
+        AssertEqual("P1", workbench.PriorityGroups[1].Items[0].Priority,
+            "A folded Todo should display the lowest configured code instead of its stored P2/P3.");
+    }
+    finally
+    {
+        PrioritySettings.ResetToDefault();
+    }
+}
+
+/// <summary>
+/// 优先级层数与颜色的完整链路：色板校验 → 归一化 → SQLite 往返 → 设置页保存后立即生效。
+/// </summary>
+static async Task TestPrioritySettingsAsync()
+{
+    // 1. 色板校验：层数只能 2–6，颜色必须是可解析的 #RRGGBB，允许省略 #。
+    AssertNotNull(PriorityPalette.Create(new[] { "#D92D20", "#B54708" }), "Two colors should form a valid palette.");
+    AssertNotNull(PriorityPalette.Create(Enumerable.Repeat("#123456", 6)), "Six colors should form a valid palette.");
+    AssertTrue(PriorityPalette.Create(new[] { "#D92D20" }) is null, "A single level must be rejected.");
+    AssertTrue(PriorityPalette.Create(Enumerable.Repeat("#123456", 7)) is null, "Seven levels must be rejected.");
+    AssertTrue(PriorityPalette.Create(new[] { "#D92D20", "红色" }) is null, "A non-hex color must be rejected.");
+    var normalizedPalette = PriorityPalette.Create(new[] { "d92d20", "#b54708" })!;
+    AssertEqual("#D92D20", normalizedPalette.Colors[0], "A missing # and lowercase hex should be normalized.");
+
+    // 2. 归一化：超出层数的层级按最低一级取代码与颜色。
+    var twoLevels = PriorityPalette.Create(new[] { "#111111", "#222222" })!;
+    AssertEqual(PriorityLevel.P1, twoLevels.Normalize(PriorityLevel.P3), "Out-of-range levels should clamp to the lowest level.");
+    AssertEqual("P1", twoLevels.CodeFor(PriorityLevel.P3), "Out-of-range levels should display the clamped code.");
+    AssertEqual("#222222", twoLevels.ColorFor(PriorityLevel.P5), "Out-of-range levels should use the clamped color.");
+    AssertTrue(twoLevels.IsHighPriority(PriorityLevel.P3), "Folded levels are still counted as high priority when they are the top two.");
+
+    // 3. SQLite 往返：未配置时返回默认 4 级，保存后可读回，损坏值回退默认而不是抛错。
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var repository = new SqlitePrioritySettingsRepository(databasePath);
+    AssertEqual(4, (await repository.GetColorsAsync(CancellationToken.None)).Count,
+        "An unconfigured database should report the default four levels.");
+    var fiveColors = new[] { "#D92D20", "#B54708", "#3B5998", "#475467", "#7C3AED" };
+    await repository.SaveColorsAsync(fiveColors, CancellationToken.None);
+    var reloaded = await repository.GetColorsAsync(CancellationToken.None);
+    AssertEqual(5, reloaded.Count, "Five saved colors should read back as five levels.");
+    AssertEqual("#7C3AED", reloaded[4], "The stored color order must be preserved.");
+
+    // 已保存的层数与颜色必须原样出现在设置页，而不是被内存里的默认值覆盖。
+    var loadedViewModel = new PrioritySettingsViewModel(repository, () => Task.CompletedTask);
+    await loadedViewModel.LoadAsync(CancellationToken.None);
+    AssertEqual(5, loadedViewModel.Levels.Count, "Loading should restore the saved level count.");
+    AssertEqual("#7C3AED", loadedViewModel.Levels[4].Color, "Loading must show the saved color of each level.");
+    AssertEqual(5, PrioritySettings.Current.Count, "Loading must apply the saved palette to the global color source.");
+
+    await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+    {
+        await connection.OpenAsync(CancellationToken.None);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE app_settings SET value = 'not-json' WHERE key = 'priority_level_colors';";
+        await command.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    AssertEqual(4, (await repository.GetColorsAsync(CancellationToken.None)).Count,
+        "A corrupt saved value must fall back to the default palette instead of throwing.");
+
+    // 4. 设置页：改层数与颜色后保存，全局色板与仓储同时更新，并触发一次界面刷新。
+    var refreshCount = 0;
+    var viewModel = new PrioritySettingsViewModel(
+        repository,
+        () =>
+        {
+            refreshCount++;
+            return Task.CompletedTask;
+        });
+    try
+    {
+        await viewModel.LoadAsync(CancellationToken.None);
+        AssertEqual(4, viewModel.LevelCount, "Loading with no valid saved value should show four levels.");
+        AssertEqual(4, viewModel.Levels.Count, "The rows must match the level count.");
+
+        viewModel.LevelCount = 5;
+        AssertEqual(5, viewModel.Levels.Count, "Increasing the level count should add a row immediately.");
+        viewModel.Levels[4].Color = "#ABCDEF";
+        await viewModel.SaveAsync();
+
+        AssertEqual(5, PrioritySettings.Current.Count, "Saving should apply the palette globally.");
+        AssertEqual("#ABCDEF", PrioritySettings.Current.ColorFor(PriorityLevel.P4),
+            "The custom color should be used for its own level.");
+        AssertTrue(viewModel.StatusText.Contains("已保存", StringComparison.Ordinal),
+            "The status text should confirm the save.");
+        AssertEqual(1, refreshCount, "Applying the palette should request exactly one refresh.");
+        AssertEqual(5, (await repository.GetColorsAsync(CancellationToken.None)).Count,
+            "Saving should persist the new level count.");
+
+        viewModel.Levels[0].Color = "not-a-color";
+        AssertEqual("#D92D20", viewModel.Levels[0].Color, "An invalid hex input should keep the previous color.");
+
+        await viewModel.ResetAsync();
+        AssertEqual(4, PrioritySettings.Current.Count, "Reset should restore the four default levels.");
+        AssertEqual(PriorityColorPolicy.P0Color, PrioritySettings.Current.ColorFor(PriorityLevel.P0),
+            "Reset should restore the default P0 color.");
+        AssertEqual(4, (await repository.GetColorsAsync(CancellationToken.None)).Count,
+            "Reset should persist the default level count.");
+    }
+    finally
+    {
+        PrioritySettings.ResetToDefault();
+    }
 }
 
 static async Task TestManualMessageToTodoAsync()
@@ -3153,7 +3279,7 @@ static async Task TestDesktopCalendarViewModelAsync()
     AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[1].PriorityColor,
         "当日日程卡片的文字颜色应取该待办的优先级色（P0）。");
     AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[2].PriorityColor,
-        "已办理待办仍保留自身优先级色值，灰化由视图层负责。");
+        "已办理待办仍保留自身优先级色值，视图层不再置灰，仅加删除线。");
     AssertEqual("#B54708", MessageFeedViewModel.PriorityColor(PriorityLevel.P1),
         "消息流与日历必须共用同一份优先级色板，消息流色值不得漂移。");
     AssertTrue(viewModel.StatusText.Contains("另有 1 条未设置截止日期"), "Calendar status should report unscheduled Todos honestly.");
@@ -4874,7 +5000,10 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
         urgencyRanker: new UrgencyRanker(),
         messageRepository: messageRepository,
         analyzeMessageContent: () => analyzeMessageContent,
-        analyzeMentionAsync: Analyze);
+        analyzeMentionAsync: Analyze,
+        // 固定待办创建时刻为当天 10:00：既早于 Agent 的 17:30 提醒，也早于日终截止，
+        // 使“收到后一小时”的回退提醒始终可调度，测试不再随运行时刻（尤其 23:00 之后）失败。
+        clock: () => sentAt.Date.AddHours(10));
 
     // 默认关闭时必须保持零模型调用，同时仍创建原自动待办。
     var offResult = await pipeline.ProcessAsync(
@@ -5914,6 +6043,10 @@ static void AssertTrue(bool condition, string message)
         throw new InvalidOperationException(message);
     }
 }
+
+/// <summary>取指定层级分组的待办条数，用于断言动态优先级分组。</summary>
+static int GroupCount(TodoWorkbenchViewModel workbench, PriorityLevel level) =>
+    workbench.PriorityGroups.Single(group => group.Level == level).Items.Count;
 
 static void AssertFalse(bool condition, string message)
 {

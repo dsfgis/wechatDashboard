@@ -197,6 +197,7 @@
                     <ListBoxItem Content="&#x6D88;&#x606F;&#x6D41;" Tag="2" />
                     <ListBoxItem Content="&#x5FAE;&#x4FE1;&#x6D88;&#x606F;" Tag="3" />
                     <ListBoxItem Content="&#x5173;&#x6CE8;&#x8BBE;&#x7F6E;" Tag="5" />
+                    <ListBoxItem Content="优先级设置" Tag="10" />
                     <ListBoxItem Content="&#x91C7;&#x96C6;&#x6E90;&#x8BBE;&#x7F6E;" Tag="6" />
                     <ListBoxItem Content="&#x91C7;&#x96C6;&#x8BCA;&#x65AD;" Tag="7" />
                     <!-- 模型配置固定使用 DeepSeek，页面只维护 API Key。 -->
@@ -590,6 +591,24 @@
                 </TabItem>
                 <TabItem Header="采集源设置">
                     <DockPanel>
+                        <!-- 石化邮凭据：密码只经 DPAPI 加密保存在本机，不进入数据库或配置文件 -->
+                        <Border DockPanel.Dock="Top" Background="White" BorderBrush="#E5E7EB" BorderThickness="1"
+                                CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="石化邮账号（IMAP）" FontWeight="SemiBold" Margin="0,0,0,8" />
+                                <WrapPanel>
+                                    <TextBlock Text="账号" Foreground="#6B7280" VerticalAlignment="Center" />
+                                    <TextBox x:Name="MailAccountTextBox" Width="170" Margin="6,0,14,0" VerticalContentAlignment="Center" />
+                                    <TextBlock Text="密码" Foreground="#6B7280" VerticalAlignment="Center" />
+                                    <PasswordBox x:Name="MailPasswordBox" Width="150" Margin="6,0,14,0" VerticalContentAlignment="Center" />
+                                    <Button Content="保存账号" Click="SaveSinopecMailCredentialButton_Click" Padding="12,4" Margin="0,0,8,0" />
+                                    <Button Content="清除" Click="ClearSinopecMailCredentialButton_Click" Padding="12,4" Margin="0,0,12,0" />
+                                    <TextBlock x:Name="MailCredentialStatusText" Foreground="#6B7280" VerticalAlignment="Center" Text="尚未保存账号密码" />
+                                </WrapPanel>
+                                <TextBlock Foreground="#9CA3AF" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"
+                                           Text="密码使用 Windows DPAPI 以当前用户身份加密保存在 %LocalAppData%\WechatDashboard\Mail，不写入数据库、日志或配置文件。保存账号后，在上表勾选“石化邮（IMAP）”并点击“保存设置”才会开始采集。" />
+                            </StackPanel>
+                        </Border>
                         <Button DockPanel.Dock="Top" Content="保存设置" Click="SaveCaptureSourceSettingsButton_Click" HorizontalAlignment="Right" Margin="0,0,0,10" />
                         <DataGrid ItemsSource="{Binding CaptureSourceSettings}" IsReadOnly="False" CanUserAddRows="False" CanUserDeleteRows="False">
                             <DataGrid.Columns>
@@ -688,6 +707,84 @@
                                        Foreground="#6B7280"
                                        TextWrapping="Wrap" />
                         </StackPanel>
+                    </Border>
+                </TabItem>
+                <!-- 优先级设置：层数与配色写 app_settings，保存后立即刷新待办、消息流与日程。 -->
+                <TabItem Header="优先级设置">
+                    <Border Background="White" Padding="16">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel MaxWidth="860" HorizontalAlignment="Left">
+                                <TextBlock Text="优先级设置" FontSize="17" FontWeight="SemiBold" Foreground="#111827" />
+                                <TextBlock Text="自定义优先级层数（2–6 级）与每级颜色。层数决定新建/编辑待办时可选的层级；颜色同时用于待办列表、消息流正文与日程卡片。"
+                                           Foreground="#6B7280" TextWrapping="Wrap" Margin="0,4,0,14" />
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <TextBlock Text="优先级层数" VerticalAlignment="Center" Foreground="#374151" />
+                                    <ComboBox Width="90" Margin="8,0,0,0" VerticalAlignment="Center"
+                                              ItemsSource="{Binding PriorityLevelSettings.LevelCountOptions}"
+                                              SelectedItem="{Binding PriorityLevelSettings.LevelCount, Mode=TwoWay}"
+                                              ToolTip="层数决定可选的优先级个数" />
+                                    <TextBlock Text="代码固定为 P0（最高）到 P(n-1)；减少层数不会删除已有数据。"
+                                               VerticalAlignment="Center" Foreground="#9CA3AF" FontSize="12" Margin="10,0,0,0" />
+                                </StackPanel>
+                                <ItemsControl ItemsSource="{Binding PriorityLevelSettings.Levels}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="#F9FAFB" BorderBrush="#E5E7EB" BorderThickness="1"
+                                                    CornerRadius="8" Padding="12,10" Margin="0,0,0,8">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="52" />
+                                                        <ColumnDefinition Width="150" />
+                                                        <ColumnDefinition Width="112" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="14" Height="14" CornerRadius="7"
+                                                            Background="{Binding Color}" BorderBrush="#D1D5DB" BorderThickness="1"
+                                                            VerticalAlignment="Center" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Code}" Foreground="{Binding Color}"
+                                                               FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                    <ComboBox Grid.Column="2" Margin="8,0,10,0" VerticalAlignment="Center"
+                                                              ItemsSource="{Binding ColorOptions}"
+                                                              SelectedValuePath="Color"
+                                                              SelectedValue="{Binding Color, Mode=TwoWay}"
+                                                              ToolTip="从预设颜色中选择">
+                                                        <ComboBox.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <StackPanel Orientation="Horizontal">
+                                                                    <Border Width="10" Height="10" CornerRadius="5"
+                                                                            Background="{Binding Color}" Margin="0,0,6,0" />
+                                                                    <TextBlock Text="{Binding Name}" />
+                                                                </StackPanel>
+                                                            </DataTemplate>
+                                                        </ComboBox.ItemTemplate>
+                                                    </ComboBox>
+                                                    <TextBox Grid.Column="3" VerticalContentAlignment="Center"
+                                                             Text="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                                             ToolTip="也可直接输入十六进制颜色，如 #D92D20" />
+                                                    <TextBlock Grid.Column="4" Text="{Binding PreviewText}" Foreground="{Binding Color}"
+                                                               FontSize="12" VerticalAlignment="Center" Margin="10,0,0,0"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <Button Content="保存设置" Padding="16,4"
+                                            Command="{Binding PriorityLevelSettings.SaveCommand}" />
+                                    <Button Content="恢复默认（4 级）" Padding="16,4" Margin="8,0,0,0"
+                                            Command="{Binding PriorityLevelSettings.ResetCommand}" />
+                                </StackPanel>
+                                <TextBlock Text="{Binding PriorityLevelSettings.StatusText}" Foreground="#2563EB"
+                                           TextWrapping="Wrap" Margin="0,10,0,0" />
+                                <Separator Margin="0,14,0,10" />
+                                <TextBlock Text="说明" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                <TextBlock Text="1. 层数最少 2 级、最多 6 级，保存后立即生效，无需重启。" FontSize="13" Foreground="#4B5563" Margin="0,0,0,2" />
+                                <TextBlock Text="2. 颜色同时作用于待办卡片、已办理列表、消息流正文与日程卡片，保证同一层级只有一种颜色。" FontSize="13" Foreground="#4B5563" Margin="0,0,0,2" />
+                                <TextBlock Text="3. 减少层数只改变显示与可选项：超出层数的历史待办按最低一级显示，原始值仍保存在库中，调回层数即可恢复。" FontSize="13" Foreground="#4B5563" />
+                            </StackPanel>
+                        </ScrollViewer>
                     </Border>
                 </TabItem>
             </TabControl>

@@ -26,6 +26,9 @@ public sealed class TodoDetailViewModel : ObservableObject
     private string _title;
     private string? _description;
     private PriorityLevel _priority;
+    // 记录打开时的原始层级：超出当前配置层数的旧待办显示为最低一级，
+    // 但只要用户没有真的改过下拉，保存时仍写回原值，不因设置变化悄悄改数据。
+    private PriorityLevel _originalPriority;
     private TodoStatus _status;
     private DateTime? _dueDate;
     private int _dueHour = 23;
@@ -62,7 +65,8 @@ public sealed class TodoDetailViewModel : ObservableObject
         _dialogs = dialogs;
         _title = _todo.Title;
         _description = _todo.Description;
-        _priority = _todo.Priority;
+        _originalPriority = _todo.Priority;
+        _priority = PrioritySettings.Current.Normalize(_todo.Priority);
         _status = _todo.Status;
         SetDueSelection(_todo.DueAt);
         var reminderSelection = _currentReminder?.ScheduledAt.LocalDateTime ?? GetDefaultReminderTime(_clock.Now);
@@ -94,7 +98,8 @@ public sealed class TodoDetailViewModel : ObservableObject
     }
 
     public event EventHandler? RequestClose;
-    public IReadOnlyList<PriorityLevel> Priorities { get; } = Enum.GetValues<PriorityLevel>();
+    /// <summary>可选优先级，数量与颜色跟随“优先级设置”。</summary>
+    public IReadOnlyList<PriorityOption> PriorityOptions { get; } = PriorityOption.FromCurrentPalette();
     public IReadOnlyList<TodoStatus> Statuses { get; } = Enum.GetValues<TodoStatus>();
     public ObservableCollection<TodoProjectOption> ProjectOptions { get; } = new();
     public IReadOnlyList<int> DueHours { get; } = Enumerable.Range(0, 24).ToArray();
@@ -176,6 +181,13 @@ public sealed class TodoDetailViewModel : ObservableObject
         set => SetProperty(ref _priority, value);
     }
 
+    /// <summary>
+    /// 实际提交的层级：用户没有改动下拉时写回打开时的原值，
+    /// 避免“减少优先级层数”把历史 P3 待办在保存其它字段时顺手降级。
+    /// </summary>
+    private PriorityLevel SubmittedPriority =>
+        _priority == PrioritySettings.Current.Normalize(_originalPriority) ? _originalPriority : _priority;
+
     public TodoStatus Status
     {
         get => _status;
@@ -245,7 +257,7 @@ public sealed class TodoDetailViewModel : ObservableObject
             $"标题：{Title}",
             $"项目：{ProjectName}",
             $"置顶：{(IsPinned ? "是" : "否")}",
-            $"优先级：{Priority}",
+            $"优先级：{PrioritySettings.Current.CodeFor(Priority)}",
             $"状态：{Status}",
             $"截止时间：{FormatDueText()}",
             $"提醒：{CurrentReminderText}",
@@ -335,7 +347,7 @@ public sealed class TodoDetailViewModel : ObservableObject
                 Title,
                 NormalizeDescription(),
                 _todo.ProjectId,
-                Priority,
+                SubmittedPriority,
                 dueAt,
                 Status,
                 _todo.UpdatedAt,

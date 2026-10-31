@@ -30,6 +30,14 @@ public static class ProjectToolPaths
         "Agent",
         "protected-deepseek-api-key.bin");
 
+    /// <summary>石化邮 IMAP 采集的状态目录。</summary>
+    public static string MailDirectory => Path.Combine(UserDataRoot, "Mail");
+
+    /// <summary>当前 Windows 用户可解密的 IMAP 账号密文文件。</summary>
+    public static string MailProtectedCredentialPath => Path.Combine(
+        MailDirectory,
+        "protected-imap-credential.bin");
+
     /// <summary>原生微信读取器的稳定快照目录。</summary>
     public static string WeChatNativeSnapshotDirectory => Path.Combine(
         WeChatNativeReaderDirectory,

@@ -234,11 +234,11 @@
                                                                 <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="11">
                                                                     <TextBlock.Style>
                                                                         <Style TargetType="TextBlock">
-                                                                            <Setter Property="Foreground" Value="{DynamicResource CalendarText}" />
+                                                                            <!-- 月视图条目同样跟随优先级颜色；已办理仅加删除线，不再置灰。 -->
+                                                                            <Setter Property="Foreground" Value="{Binding PriorityColor}" />
                                                                             <Style.Triggers>
                                                                                 <DataTrigger Binding="{Binding IsCompleted}" Value="True">
                                                                                     <Setter Property="TextDecorations" Value="Strikethrough" />
-                                                                                    <Setter Property="Foreground" Value="{DynamicResource CalendarDisabledText}" />
                                                                                 </DataTrigger>
                                                                             </Style.Triggers>
                                                                         </Style>
@@ -341,12 +341,11 @@
                                                             <TextBlock Text="{Binding Title}" TextWrapping="Wrap" FontWeight="SemiBold">
                                                                 <TextBlock.Style>
                                                                     <Style TargetType="TextBlock">
-                                                                        <!-- 标题正文跟随优先级颜色，与消息流的着色规则保持一致。 -->
+                                                                        <!-- 标题正文跟随优先级颜色，与消息流的着色规则保持一致；已办理不置灰，只加删除线。 -->
                                                                         <Setter Property="Foreground" Value="{Binding PriorityColor}" />
                                                                         <Style.Triggers>
                                                                             <DataTrigger Binding="{Binding IsCompleted}" Value="True">
                                                                                 <Setter Property="TextDecorations" Value="Strikethrough" />
-                                                                                <Setter Property="Foreground" Value="{DynamicResource CalendarDisabledText}" />
                                                                             </DataTrigger>
                                                                         </Style.Triggers>
                                                                     </Style>
@@ -355,18 +354,7 @@
                                                             <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                                                                 <TextBlock Text="{Binding TimeText}" Foreground="{DynamicResource CalendarMutedText}" FontSize="11" />
                                                                 <TextBlock Text="　" Foreground="{DynamicResource CalendarMutedText}" FontSize="11" />
-                                                                <TextBlock Text="{Binding StatusText}" FontSize="11">
-                                                                    <TextBlock.Style>
-                                                                        <Style TargetType="TextBlock">
-                                                                            <Setter Property="Foreground" Value="{Binding PriorityColor}" />
-                                                                            <Style.Triggers>
-                                                                                <DataTrigger Binding="{Binding IsCompleted}" Value="True">
-                                                                                    <Setter Property="Foreground" Value="{DynamicResource CalendarDisabledText}" />
-                                                                                </DataTrigger>
-                                                                            </Style.Triggers>
-                                                                        </Style>
-                                                                    </TextBlock.Style>
-                                                                </TextBlock>
+                                                                <TextBlock Text="{Binding StatusText}" FontSize="11" Foreground="{Binding PriorityColor}" />
                                                             </StackPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
                                                                 <Border Width="8" Height="8" CornerRadius="4" Background="{Binding ProjectColor}" Margin="0,0,5,0" VerticalAlignment="Center" />
