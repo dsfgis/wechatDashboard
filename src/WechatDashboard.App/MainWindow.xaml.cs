@@ -188,7 +188,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             TodoFeature.Workbench.OpenTodoAsync,
             TodoFeature.RefreshAsync,
             _followedProjectRepository,
-            _messageRepository);
+            _messageRepository,
+            new SqliteReminderRepository(_databasePath));
 
         DatabasePath = _databasePath;
         CaptureInboxPath = _captureInboxPath;

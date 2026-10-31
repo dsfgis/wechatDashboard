@@ -71,6 +71,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Desktop calendar groups scheduled Todos by local due date", TestDesktopCalendarViewModelAsync),
     ("Calendar checkbox and detail button persist Todo completion", TestTodoCompletionEntryPointsAsync),
     ("Detail completion keeps the finished Todo visible in the calendar", TestDetailCompletionKeepsTodoVisibleInCalendarAsync),
+    ("Desktop calendar daily list orders by priority, active project, reminder and message time", TestDesktopCalendarDailyOrderingAsync),
     ("Desktop calendar window preferences round-trip", TestDesktopCalendarStateStoreAsync),
     ("Desktop calendar edge retraction preserves its size", TestDesktopCalendarDockLayoutAsync),
     ("Desktop calendar window renders readonly Todo bindings", TestDesktopCalendarWindowRenderingAsync),
@@ -3267,19 +3268,19 @@ static async Task TestDesktopCalendarViewModelAsync()
     AssertEqual(42, viewModel.Days.Count, "A desktop calendar month should always render six complete weeks.");
     AssertEqual(new DateTime(2026, 7, 27), viewModel.Days.First().Date, "The August 2026 grid should begin on the preceding Monday.");
     AssertEqual(3, viewModel.SelectedTodos.Count, "The selected day should show active and completed scheduled Todos.");
-    AssertEqual(todayActive.Id, viewModel.SelectedTodos[0].Id,
-        "同一完成状态内应按时间升序排列，先排当天最早的未完成待办。");
+    AssertEqual(todayCompleted.Id, viewModel.SelectedTodos[0].Id,
+        "当日日程第一排序键是优先级：P0 的已办待办排在 P1 待办之前，完成状态不影响位置。");
     AssertEqual(todayLateActive.Id, viewModel.SelectedTodos[1].Id,
-        "优先级不再参与排序：时间更晚的高优先级待办应排在时间更早的低优先级待办之后。");
-    AssertEqual(todayCompleted.Id, viewModel.SelectedTodos[2].Id,
-        "已办待办应排在所有未完成待办之后，而不是按优先级插到最前面。");
-    AssertTrue(viewModel.SelectedTodos[2].IsCompleted, "Completed daily Todo should remain visible with completed state.");
-    AssertEqual(PriorityColorPolicy.P1Color, viewModel.SelectedTodos[0].PriorityColor,
-        "当日日程卡片的文字颜色应取该待办的优先级色（P1）。");
+        "同为 P0 时按截止时间升序排列。");
+    AssertEqual(todayActive.Id, viewModel.SelectedTodos[2].Id,
+        "P1 待办排在所有 P0 待办之后。");
+    AssertTrue(viewModel.SelectedTodos[0].IsCompleted, "Completed daily Todo should remain visible with completed state.");
+    AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[0].PriorityColor,
+        "已办理待办仍保留自身优先级色值，视图层不再置灰，仅加删除线。");
     AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[1].PriorityColor,
         "当日日程卡片的文字颜色应取该待办的优先级色（P0）。");
-    AssertEqual(PriorityColorPolicy.P0Color, viewModel.SelectedTodos[2].PriorityColor,
-        "已办理待办仍保留自身优先级色值，视图层不再置灰，仅加删除线。");
+    AssertEqual(PriorityColorPolicy.P1Color, viewModel.SelectedTodos[2].PriorityColor,
+        "当日日程卡片的文字颜色应取该待办的优先级色（P1）。");
     AssertEqual("#B54708", MessageFeedViewModel.PriorityColor(PriorityLevel.P1),
         "消息流与日历必须共用同一份优先级色板，消息流色值不得漂移。");
     AssertTrue(viewModel.StatusText.Contains("另有 1 条未设置截止日期"), "Calendar status should report unscheduled Todos honestly.");
@@ -3393,8 +3394,12 @@ static async Task TestDetailCompletionKeepsTodoVisibleInCalendarAsync()
     var todoService = new TodoApplicationService(unitOfWork, clock);
     var reminderService = new ReminderApplicationService(unitOfWork, clock);
     var completedTodo = (await todoService.CreateManualAsync(
-        new CreateManualTodoRequest("详情完成必须保留在日历", null, PriorityLevel.P1, now.AddHours(3), null, null),
+        new CreateManualTodoRequest("详情完成必须保留在日历", null, PriorityLevel.P1, now.AddHours(3), now.AddHours(1), null),
         CancellationToken.None)).Todo!;
+    // 同一天再放一条低优先级待办，使位置稳定性断言有实际意义。
+    await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("同一天的其他待办", null, PriorityLevel.P3, now.AddHours(4), null, null),
+        CancellationToken.None);
 
     // 与 MainWindow 相同的接线：日历通过工作台打开详情，详情完成后日历自行刷新。
     var workbenchRefreshCount = 0;
@@ -3407,7 +3412,8 @@ static async Task TestDetailCompletionKeepsTodoVisibleInCalendarAsync()
         {
             workbenchRefreshCount++;
             return Task.CompletedTask;
-        });
+        },
+        reminders: new SqliteReminderRepository(databasePath));
 
     await calendar.RefreshAsync();
     var beforeCompletion = calendar.SelectedTodos.Single(item => item.Id == completedTodo.Id);
@@ -3449,11 +3455,68 @@ static async Task TestDetailCompletionKeepsTodoVisibleInCalendarAsync()
     AssertTrue(afterCompletion is not null, "详情完成后的待办必须仍出现在日历当天列表中，不能消失。");
     AssertTrue(afterCompletion!.IsCompleted, "日历中的已完成待办应通过勾选复选框区分，而不是从日历移除。");
     AssertEqual(indexBeforeCompletion, calendar.SelectedTodos.IndexOf(afterCompletion),
-        "同一天只有这一条待办时，完成前后位置不变；排序规则是先按完成状态、再按时间。");
+        "完成会取消提醒，但位置仍应保持不变；列表只通过复选框勾选状态区分待办与已办。");
 
     // 数据库中的截止时间必须保留——这是日历分组的依据。
     var persisted = (await repository.GetByIdAsync(completedTodo.Id, CancellationToken.None))!;
     AssertTrue(persisted.DueAt.HasValue, "完成待办不得丢失截止时间，否则日历无法按日期分组显示。");
+}
+
+/// <summary>
+/// 当日日程排序契约：第一优先级、第二是否在建项目、
+/// 第三消息提醒时间、第四消息发送时间。
+/// </summary>
+static async Task TestDesktopCalendarDailyOrderingAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 10, 15, 8, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var repository = new SqliteTodoRepository(databasePath);
+    var messages = new SqliteMessageRepository(databasePath);
+    var projects = new SqliteFollowedProjectRepository(databasePath);
+    var service = new TodoApplicationService(new SqliteTodoUnitOfWork(databasePath), clock);
+    var project = await projects.SaveAsync("拓锐能源", "#2563EB", CancellationToken.None);
+    var dueAt = now.AddHours(10);
+
+    // 优先级最高（P1）、无项目、无提醒：应排第一。
+    var noProjectHighPriority = (await service.CreateManualAsync(
+        new CreateManualTodoRequest("无项目高优先级", null, PriorityLevel.P1, dueAt, null, null),
+        CancellationToken.None)).Todo!;
+    // 在建项目 + 提醒时间：排在同优先级但无提醒的待办之前。
+    var projectWithReminder = (await service.CreateManualAsync(
+        new CreateManualTodoRequest("项目待办带提醒", null, PriorityLevel.P2, dueAt, now.AddHours(8), null, project.Id),
+        CancellationToken.None)).Todo!;
+    // 同为在建项目、无提醒：消息发送时间早的排前面。
+    var projectEarlierMessage = await CreateMessageTodoAsync(
+        messages, repository, "项目较早消息", now.AddHours(2), dueAt, project.Id);
+    var projectLaterMessage = await CreateMessageTodoAsync(
+        messages, repository, "项目较晚消息", now.AddHours(3), dueAt, project.Id);
+    // 无在建项目：即使消息更早，也排在所有在建项目待办之后。
+    var noProjectLater = await CreateMessageTodoAsync(
+        messages, repository, "无项目待办", now.AddHours(1), dueAt, managedProjectId: null);
+
+    var calendar = new DesktopCalendarViewModel(
+        repository,
+        clock,
+        timeZone,
+        _ => Task.CompletedTask,
+        projects: projects,
+        messages: messages,
+        reminders: new SqliteReminderRepository(databasePath));
+
+    await calendar.RefreshAsync();
+
+    var orderedIds = calendar.SelectedTodos.Select(item => item.Id).ToArray();
+    AssertEqual(5, orderedIds.Length, "当日日程应加载当天全部已设置截止时间的待办。");
+    AssertEqual(noProjectHighPriority.Id, orderedIds[0], "第一排序键是优先级，P1 应排在所有 P2 之前。");
+    AssertEqual(projectWithReminder.Id, orderedIds[1], "第二排序键是在建项目，第三是提醒时间。");
+    AssertEqual(projectEarlierMessage.Id, orderedIds[2], "同为在建项目且无提醒时，消息发送时间早的排前面。");
+    AssertEqual(projectLaterMessage.Id, orderedIds[3], "消息发送时间晚的排在其后。");
+    AssertEqual(noProjectLater.Id, orderedIds[4], "无在建项目的待办排在所有在建项目待办之后。");
 }
 
 static Task TestDesktopCalendarStateStoreAsync()
@@ -6034,6 +6097,51 @@ static Message CreateMessage(long id, string chatName, string senderName, string
         CapturedAt: DateTimeOffset.Now,
         MessageType: MessageType.Text,
         IsMentionMe: false);
+}
+
+/// <summary>
+/// 保存一条来源消息并创建指向它的待办，用于验证"消息发送时间"排序键。
+/// </summary>
+static async Task<TodoItem> CreateMessageTodoAsync(
+    SqliteMessageRepository messages,
+    SqliteTodoRepository todos,
+    string title,
+    DateTimeOffset sentAt,
+    DateTimeOffset dueAt,
+    long? managedProjectId)
+{
+    var message = await messages.SaveAsync(
+        new Message(
+            Id: 0,
+            Source: "ManualImport",
+            SourceMessageKey: $"ordering-{Guid.NewGuid():N}",
+            ChatSessionId: 1,
+            ChatName: "拓锐能源群",
+            SenderName: "张三",
+            Content: title,
+            SentAt: sentAt,
+            CapturedAt: sentAt,
+            MessageType: MessageType.Text,
+            IsMentionMe: false),
+        CancellationToken.None);
+    return await todos.SaveAsync(
+        new TodoItem(
+            Id: 0,
+            SourceMessageId: message.Id,
+            ProjectId: null,
+            Title: title,
+            Description: null,
+            Status: TodoStatus.Pending,
+            Priority: PriorityLevel.P2,
+            DueAt: dueAt,
+            CreatedAt: sentAt,
+            UpdatedAt: sentAt,
+            CompletedAt: null,
+            IsAutoCreated: false)
+        {
+            ManagedProjectId = managedProjectId
+        },
+        CancellationToken.None);
 }
 
 static void AssertTrue(bool condition, string message)

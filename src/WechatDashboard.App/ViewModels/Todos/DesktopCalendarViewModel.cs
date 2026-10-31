@@ -3,6 +3,7 @@ using System.Globalization;
 using WechatDashboard.App.Presentation;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Common;
+using WechatDashboard.Application.Reminders;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
@@ -18,6 +19,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
     private readonly Func<Task> _onTodoCompleted;
     private readonly IFollowedProjectRepository? _projects;
     private readonly IMessageRepository? _messages;
+    private readonly IReminderRepository? _reminders;
     private IReadOnlyDictionary<DateTime, IReadOnlyList<DesktopCalendarTodoItemViewModel>> _todosByDate =
         new Dictionary<DateTime, IReadOnlyList<DesktopCalendarTodoItemViewModel>>();
     private DateTime _displayMonth;
@@ -31,7 +33,8 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         Func<long, Task> openTodo,
         Func<Task>? onTodoCompleted = null,
         IFollowedProjectRepository? projects = null,
-        IMessageRepository? messages = null)
+        IMessageRepository? messages = null,
+        IReminderRepository? reminders = null)
     {
         _todos = todos;
         _clock = clock;
@@ -40,6 +43,7 @@ public sealed class DesktopCalendarViewModel : ObservableObject
         _onTodoCompleted = onTodoCompleted ?? (() => Task.CompletedTask);
         _projects = projects;
         _messages = messages;
+        _reminders = reminders;
         var today = LocalDate(clock.Now);
         _displayMonth = new DateTime(today.Year, today.Month, 1);
         _selectedDate = today;
@@ -89,29 +93,40 @@ public sealed class DesktopCalendarViewModel : ObservableObject
             // 展示时间取消息发送时间（SentAt），而不是待办的到期时间；
             // 手动创建、无来源消息的待办才回退到 DueAt。
             var sentAtByMessageId = await LoadSentAtLookupAsync(allItems);
+            var reminderAtByTodoId = await LoadActiveReminderLookupAsync(allItems);
             var byDate = allItems
                 .Where(todo => todo.DueAt.HasValue)
                 .Select(todo => new
                 {
                     Date = LocalDate(todo.DueAt!.Value),
-                    Item = CreateTodoItem(todo, projectLookup, sentAtByMessageId)
+                    Item = CreateTodoItem(todo, projectLookup, sentAtByMessageId),
+                    todo.Priority,
+                    // 在建项目：待办关联的项目仍处于启用状态。
+                    IsManagedProject = todo.ManagedProjectId is { } projectId
+                        && projectLookup.ContainsKey(projectId),
+                    ReminderAt = reminderAtByTodoId.TryGetValue(todo.Id, out var reminderAt)
+                        ? (DateTimeOffset?)reminderAt
+                        : null,
+                    SentAt = todo.SourceMessageId is { } messageId
+                        && sentAtByMessageId.TryGetValue(messageId, out var sentAt)
+                        ? (DateTimeOffset?)sentAt
+                        : null
                 })
                 .GroupBy(entry => entry.Date)
                 .ToDictionary(
                     group => group.Key,
                     group => (IReadOnlyList<DesktopCalendarTodoItemViewModel>)group
+                        // 当日日程排序：优先级 → 是否在建项目 → 消息提醒时间 → 消息发送时间。
+                        // 完成状态不参与排序，因此勾选完成前后位置保持不变，
+                        // 待办与已办只通过复选框勾选状态区分。
+                        // 没有提醒时间或来源消息时间的待办排在同级别之后。
+                        .OrderBy(entry => entry.Priority)
+                        .ThenBy(entry => entry.IsManagedProject ? 0 : 1)
+                        .ThenBy(entry => entry.ReminderAt ?? DateTimeOffset.MaxValue)
+                        .ThenBy(entry => entry.SentAt ?? DateTimeOffset.MaxValue)
+                        .ThenBy(entry => entry.Item.DueAt)
+                        .ThenBy(entry => entry.Item.Id)
                         .Select(entry => entry.Item)
-                        // 排序契约：第一关键字是“是否完成”（未完成在前、已办在后），
-                        // 第二关键字是时间。日期格子里的两行预览（PreviewTodos 只取前两条）
-                        // 因此始终优先展示当天还没办的事项；已办事项靠后但仍保留在
-                        // “当日日程”列表中，不会从日历消失。
-                        // 时间取展示时间（DisplayAt：有来源消息时为消息发送时间，
-                        // 否则回退到截止时间），保证右栏时间列自上而下单调递增；
-                        // DueAt 与 Id 仅用于同一时刻的稳定排序，优先级不再参与排序。
-                        .OrderBy(item => item.IsCompleted)
-                        .ThenBy(item => item.DisplayAt)
-                        .ThenBy(item => item.DueAt)
-                        .ThenBy(item => item.Id)
                         .ToArray());
             return (AllCount: allItems.Length, ByDate: byDate);
         });
@@ -263,6 +278,43 @@ public sealed class DesktopCalendarViewModel : ObservableObject
 
         var messages = await _messages.GetByIdsAsync(messageIds, CancellationToken.None);
         return messages.ToDictionary(message => message.Id, message => message.SentAt);
+    }
+
+    /// <summary>
+    /// 批量读取每条待办的提醒时间，用于当日日程排序。
+    /// 优先取仍待触发（已排期/派发中）的最早提醒；已完成待办的提醒会被取消，
+    /// 此时回退到最后一次提醒时间，保证完成前后排序位置不变。
+    /// </summary>
+    private async Task<IReadOnlyDictionary<long, DateTimeOffset>> LoadActiveReminderLookupAsync(
+        IReadOnlyCollection<TodoItem> todoItems)
+    {
+        if (_reminders is null || todoItems.Count == 0)
+        {
+            return new Dictionary<long, DateTimeOffset>();
+        }
+
+        var remindersByTodo = await _reminders.GetForTodosAsync(
+            todoItems.Select(todo => todo.Id).ToArray(),
+            CancellationToken.None);
+        var activeReminderAt = new Dictionary<long, DateTimeOffset>();
+        foreach (var (todoId, reminders) in remindersByTodo)
+        {
+            if (reminders.Count == 0)
+            {
+                continue;
+            }
+
+            var activeReminders = reminders
+                .Where(reminder => reminder.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching)
+                .ToArray();
+            // 完成待办会取消提醒；此时回退到最近一次提醒时间，
+            // 保证勾选完成前后排序键不变，待办不会在列表里跳动。
+            activeReminderAt[todoId] = activeReminders.Length > 0
+                ? activeReminders.Min(reminder => reminder.ScheduledAt)
+                : reminders.Max(reminder => reminder.ScheduledAt);
+        }
+
+        return activeReminderAt;
     }
 
     private DesktopCalendarTodoItemViewModel CreateTodoItem(
