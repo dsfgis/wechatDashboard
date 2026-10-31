@@ -279,9 +279,9 @@
 
 - [x] CHECK-042：日历本地日期投影、排序和详情刷新正确
   - 引用：REQ-012；AC-051、AC-052、AC-053、AC-054；D-016；TASK-016、TASK-018。
-  - 验证方法：使用固定时钟/时区、活动/已办理及无截止 fixture 刷新 ViewModel；核对 42 日网格、日期分组、排序、状态计数和详情回调后刷新。
-  - 预期结果：网格从星期一开始；有截止记录按本地日期进入日历；无截止只计数；未办理优先；点击详情复用现有回调并重新加载。
-  - 证据：2026-08-30 `Desktop calendar groups scheduled Todos by local due date` 通过，覆盖活动/已办/无截止记录、跨月网格、日期选择、月份导航和详情回调；完整运行器 61/61。
+  - 验证方法：使用固定时钟/时区、活动/已办理及无截止 fixture 刷新 ViewModel；核对 42 日网格、日期分组、四级排序、状态计数和详情回调后刷新。
+  - 预期结果：网格从星期一开始；有截止记录按本地日期进入日历；无截止只计数；组内按优先级 → 是否在建项目 → 消息提醒时间 → 消息发送时间排序，完成状态不参与排序；详情完成后的待办仍在原位置并显示为勾选；点击详情复用现有回调并重新加载。
+  - 证据：2026-08-30 `Desktop calendar groups scheduled Todos by local due date` 通过，覆盖活动/已办/无截止记录、跨月网格、日期选择、月份导航和详情回调；2026-10-15 新增 `Desktop calendar daily list orders by priority, active project, reminder and message time` 与 `Detail completion keeps the finished Todo visible in the calendar` 通过，覆盖四级排序键和完成前后位置稳定；完整运行器 98/98。
 
 - [x] CHECK-043：日历偏好保存和四边缩进纯逻辑正确
   - 引用：REQ-012；AC-055、AC-056；D-018、D-019；TASK-017、TASK-018。

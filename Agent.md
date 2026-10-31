@@ -142,21 +142,23 @@ Verification at this checkpoint (2026-10-29):
 
 - App project builds with 0 errors in an isolated output directory (default `bin` remains locked by the running debug instance; NuGet vulnerability-data warnings are network-only).
 
-## Desktop Calendar Todo Ordering (2026-10-28)
+## Desktop Calendar Todo Ordering (2026-10-15)
 
-`DesktopCalendarViewModel` (shared by the main-window 日程概览 and the desktop calendar window) orders each day's Todos with an explicit sort contract:
+`DesktopCalendarViewModel` (shared by the main-window 日程概览 and the desktop calendar window) orders each day's Todos with a fixed four-level sort contract:
 
-- First key: `IsCompleted` — active items first, completed items after them.
-- Second key: `DisplayAt` — the source-message send time when the Todo has one, otherwise `DueAt`. This keeps the right-hand time column monotonically increasing.
-- Tie-breakers: `DueAt`, then `Id`, for stable order at the same instant.
-- Priority no longer participates in within-day ordering.
-- Consequence: the two-line date-cell preview (`PreviewTodos`) now prefers active items; a completed item may drop out of the cell preview but stays in the full 当日日程 list.
+- First key: `Priority` — P0 first.
+- Second key: has an active project (`ManagedProjectId` points at a still-enabled followed project) — with-project items first.
+- Third key: reminder time — earliest still-pending (`Scheduled`/`Dispatching`) reminder, ascending; items without an active reminder go last. A completed Todo has its reminders cancelled, so the key falls back to its latest reminder time to keep the row from jumping.
+- Fourth key: source-message `SentAt`, ascending; manual Todos without a source message go last.
+- Tie-breakers: `DueAt`, then `Id`, for a stable order.
+- Completion state no longer participates in ordering. Checking a Todo complete leaves it in place; the checkbox and strikethrough are the only difference. A completed item therefore cannot be pushed out of the two-line date-cell preview the way it could under the older "completed last" contract.
 
-Verification at this checkpoint (2026-10-28):
+Verification at this checkpoint (2026-10-15):
 
-- `TestDesktopCalendarViewModelAsync` covers same-day order `active 15:00 → active 18:00 (P0) → completed 17:00 (P0)`, proving both the completion-first rule and that priority is ignored.
-- The detail-completion visibility test keeps its guarantee that a completed Todo stays on the calendar; its position assertion wording was adjusted to the new contract (single-item days are unaffected).
-- Tests project builds in an isolated output directory; the full runner reports only the two pre-existing/environmental failures (Python oracle dependency, XAML relative paths outside the default bin layout).
+- `TestDesktopCalendarViewModelAsync` asserts the new priority-first order (`completed P0 17:00 → active P0 18:00 → active P1 15:00`).
+- New `TestDesktopCalendarDailyOrderingAsync` covers all four keys: priority, active project, reminder time and source-message time.
+- `TestDetailCompletionKeepsTodoVisibleInCalendarAsync` now completes a Todo that has a reminder and a same-day sibling, proving the row keeps its index after completion cancels the reminder.
+- Full runner: 98/98 passing.
 
 ## Reminder Notification Queue (2026-10-28)
 
