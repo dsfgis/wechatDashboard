@@ -17,6 +17,9 @@ namespace WechatDashboard.Domain.Entities;
 /// <param name="CapturedAt">消息被采集入库的时间。</param>
 /// <param name="MessageType">消息类型（文本、图片、文件等）。</param>
 /// <param name="IsMentionMe">是否 @ 到当前用户。</param>
+/// <param name="SenderExternalId">来源系统的发送人稳定 ID，例如微信 wxid 或邮件地址。</param>
+/// <param name="ChatType">会话类型；历史数据和证据不足的来源保持 Unknown。</param>
+/// <param name="Direction">相对当前采集账号的收发方向；证据不足时保持 Unknown。</param>
 public sealed record Message(
     long Id,
     string Source,
@@ -28,4 +31,7 @@ public sealed record Message(
     DateTimeOffset SentAt,
     DateTimeOffset CapturedAt,
     MessageType MessageType,
-    bool IsMentionMe);
+    bool IsMentionMe,
+    string? SenderExternalId = null,
+    ChatType ChatType = ChatType.Unknown,
+    Direction Direction = Direction.Unknown);

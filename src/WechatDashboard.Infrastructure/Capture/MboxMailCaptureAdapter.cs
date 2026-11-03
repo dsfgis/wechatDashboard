@@ -19,17 +19,21 @@ public sealed class MboxMailCaptureAdapter : IMessageCaptureAdapter
     private readonly string _source;
     private readonly int _maxMessagesPerRun;
     private readonly int _maxBodyLength;
+    private readonly string? _currentAccount;
 
     public MboxMailCaptureAdapter(
         MboxMailArchiveReader reader,
         string source,
         int maxMessagesPerRun = 20,
-        int maxBodyLength = 4000)
+        int maxBodyLength = 4000,
+        string? currentAccount = null)
     {
         _reader = reader;
         _source = source;
         _maxMessagesPerRun = maxMessagesPerRun;
         _maxBodyLength = maxBodyLength;
+        // 未配置账号时保留 null，映射层会安全地将无法判别的邮件标为 Unknown。
+        _currentAccount = currentAccount;
     }
 
     public string Name => AdapterKey;
@@ -46,7 +50,7 @@ public sealed class MboxMailCaptureAdapter : IMessageCaptureAdapter
         var messages = new List<CapturedMessage>(result.Messages.Count);
         foreach (var envelope in result.Messages)
         {
-            messages.Add(MailMessageMapper.Map(_source, envelope, _maxBodyLength));
+            messages.Add(MailMessageMapper.Map(_source, envelope, _maxBodyLength, _currentAccount));
         }
 
         return Task.FromResult(new CaptureBatch(Name, messages, MboxCursor.Format(result.NextOffset)));

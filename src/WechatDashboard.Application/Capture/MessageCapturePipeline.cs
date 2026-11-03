@@ -165,10 +165,29 @@ public sealed class MessageCapturePipeline
         {
             captured++;
 
-            // 判断是否 @我
+            var message = ToMessage(capturedMessage, isMentionMe: false);
+            if (_messageRepository is not null
+                && await _messageRepository.ExistsAsync(
+                    message.Source,
+                    message.SourceMessageKey,
+                    cancellationToken))
+            {
+                // 重复消息只允许用新证据回填 Unknown 路由，直接跳过后续分析与待办流程。
+                await _messageRepository.UpdateRoutingMetadataIfUnknownAsync(
+                    message.Source,
+                    message.SourceMessageKey,
+                    message.SenderExternalId,
+                    message.ChatType,
+                    message.Direction,
+                    cancellationToken);
+                duplicates++;
+                continue;
+            }
+
+            // 判断是否 @我；只有新消息才进入项目分类、评分和自动待办流程。
             var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
+            message = message with { IsMentionMe = isMentionMe };
             var isMailSource = MailSourcePolicy.IsMailSource(capturedMessage.Source);
-            var message = ToMessage(capturedMessage, isMentionMe);
             // 网络分析必须在数据库事务之前完成，失败时以 null 回退本地优先级和默认说明。
             // 邮件没有 @提及 语义，一律交给 Agent 判定是否需要行动；聊天消息仍只在 @我 时调用。
             var needsAgentDecision = isMentionMe || isMailSource;
@@ -229,6 +248,18 @@ public sealed class MessageCapturePipeline
 
             if (!writeResult.Persisted)
             {
+                // 处理期间被另一采集任务抢先写入时，同样只补路由元数据。
+                if (_messageRepository is not null)
+                {
+                    await _messageRepository.UpdateRoutingMetadataIfUnknownAsync(
+                        message.Source,
+                        message.SourceMessageKey,
+                        message.SenderExternalId,
+                        message.ChatType,
+                        message.Direction,
+                        cancellationToken);
+                }
+
                 duplicates++;
                 continue;
             }
@@ -334,7 +365,11 @@ public sealed class MessageCapturePipeline
             SentAt: capturedMessage.SentAt,
             CapturedAt: DateTimeOffset.Now,
             MessageType: capturedMessage.MessageType,
-            IsMentionMe: isMentionMe);
+            IsMentionMe: isMentionMe,
+            // 采集器提供的路由证据原样进入持久化层，默认仍为 Unknown。
+            SenderExternalId: capturedMessage.SenderExternalId,
+            ChatType: capturedMessage.ChatType,
+            Direction: capturedMessage.Direction);
     }
 
     /// <summary>

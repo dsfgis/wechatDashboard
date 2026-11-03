@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Application.Capture;
+using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Infrastructure.Capture;
 
@@ -61,7 +62,9 @@ public sealed class WeChatV4MessageQueryService
             {
                 using var connection = _accessor.OpenReadOnly(shard.FullPath, masterKeyLease);
                 var shardNameMap = new Dictionary<string, string>(contactNames, StringComparer.Ordinal);
-                foreach (var item in ReadName2IdMap(connection))
+                // 显示名映射与 Name2Id 原始映射分别保留，防止把联系人昵称误存成 wxid。
+                var name2IdMap = ReadName2IdMap(connection);
+                foreach (var item in name2IdMap)
                 {
                     shardNameMap[item.Key] = item.Value;
                 }
@@ -82,6 +85,7 @@ public sealed class WeChatV4MessageQueryService
                                  session,
                                  tableName,
                                  shardNameMap,
+                                 name2IdMap,
                                  startTimestamp,
                                  endTimestamp,
                                  cancellationToken))
@@ -149,6 +153,7 @@ public sealed class WeChatV4MessageQueryService
         WeChatSession session,
         string tableName,
         IReadOnlyDictionary<string, string> nameMap,
+        IReadOnlyDictionary<string, string> name2IdMap,
         long startTimestamp,
         long? endTimestamp,
         CancellationToken cancellationToken)
@@ -158,6 +163,8 @@ public sealed class WeChatV4MessageQueryService
         var serverIdColumn = PickColumn(columns, "server_id", "MsgSvrID", "msg_svr_id");
         var localTypeColumn = PickColumn(columns, "local_type", "type", "Type");
         var realSenderIdColumn = PickColumn(columns, "real_sender_id", "TalkerId");
+        var statusColumn = PickColumn(columns, "status");
+        var isSendColumn = PickColumn(columns, "is_send", "IsSend", "IsSender");
         var createTimeColumn = PickColumn(columns, "create_time", "CreateTime", "nTime");
         var messageContentColumn = PickColumn(columns, "message_content", "StrContent", "content");
         var compressedContentColumn = PickColumn(columns, "compress_content", "CompressContent");
@@ -175,6 +182,8 @@ public sealed class WeChatV4MessageQueryService
             SelectExpression(serverIdColumn, "server_id"),
             SelectExpression(localTypeColumn, "local_type", "1"),
             SelectExpression(realSenderIdColumn, "real_sender_id"),
+            SelectExpression(statusColumn, "status"),
+            SelectExpression(isSendColumn, "is_send"),
             SelectExpression(createTimeColumn, "create_time"),
             SelectExpression(messageContentColumn, "message_content", "''"),
             SelectExpression(compressedContentColumn, "compress_content")
@@ -200,6 +209,9 @@ public sealed class WeChatV4MessageQueryService
             var localType = ReadInt32(reader, "local_type", 1);
             var createTime = ReadInt64(reader, "create_time", 0);
             var realSenderId = ReadInvariantString(reader, "real_sender_id");
+            // 缺少字段或值为 NULL 时使用 -1，避免把 is_send=0 的明确收件误判为缺失。
+            var status = ReadInt64(reader, "status", -1);
+            var isSend = ReadInt64(reader, "is_send", -1);
             var messageContent = reader["message_content"];
             var compressedContent = reader["compress_content"];
             var decoded = _contentDecoder.DecodeContent(messageContent, 0);
@@ -220,6 +232,18 @@ public sealed class WeChatV4MessageQueryService
                 senderFromContent,
                 session.DisplayName,
                 nameMap);
+            var direction = ResolveDirection(status, isSend);
+            // 只有 Incoming 且 Name2Id 解析成功，才形成 Private + Incoming + wxid 的完整证据；
+            // 单聊 Outgoing 可明确记录，status 或 wxid 不明时 ChatType 保持 Unknown。
+            var senderExternalId = !isGroup && direction == Direction.Incoming
+                ? ResolveSenderExternalId(realSenderId, name2IdMap)
+                : null;
+            var chatType = isGroup
+                ? ChatType.Group
+                : direction == Direction.Outgoing
+                    || (direction == Direction.Incoming && senderExternalId is not null)
+                    ? ChatType.Private
+                    : ChatType.Unknown;
             var stableId = $"{session.Username}:{Path.GetFileName(shard.FullPath)}:" +
                            $"{(serverId.Length > 0 ? serverId : localId)}:{createTime}";
             messages.Add(new CapturedMessage(
@@ -230,10 +254,49 @@ public sealed class WeChatV4MessageQueryService
                 SenderName: senderName.Length > 0 ? senderName : "Unknown sender",
                 Content: content,
                 SentAt: DateTimeOffset.FromUnixTimeSeconds(Math.Max(0, createTime)),
-                MessageType: WeChatMessageContentDecoder.ToMessageType(localType)));
+                MessageType: WeChatMessageContentDecoder.ToMessageType(localType),
+                SenderExternalId: senderExternalId,
+                ChatType: chatType,
+                Direction: direction));
         }
 
         return messages;
+    }
+
+    /// <summary>
+    /// 解析微信收发方向。语义明确的is_send字段可用0/1区分接收和发送；
+    /// 现有fixture只有群聊status=4，尚未实证单聊status映射，因此status单独存在时仍保持Unknown。
+    /// 后续取得真实单聊fixture后再启用status规则，避免把群消息或本人发出内容误归到成员周报。
+    /// </summary>
+    private static Direction ResolveDirection(long status, long isSend)
+    {
+        // status仍从原库读取并保留给后续实证，但当前绝不凭常见经验值提升为可靠方向。
+        _ = status;
+        return isSend switch
+        {
+            0 => Direction.Incoming,
+            1 => Direction.Outgoing,
+            _ => Direction.Unknown
+        };
+    }
+
+    /// <summary>
+    /// 仅通过 Name2Id 把 real_sender_id 解析为来源用户名；联系人显示名和消息昵称都不能充当 wxid。
+    /// 解析失败时返回 null，使私聊消息不会被成员归集逻辑精确匹配。
+    /// </summary>
+    private static string? ResolveSenderExternalId(
+        string realSenderId,
+        IReadOnlyDictionary<string, string> name2IdMap)
+    {
+        if (realSenderId.Length == 0
+            || !name2IdMap.TryGetValue(realSenderId, out var userName)
+            || string.IsNullOrWhiteSpace(userName))
+        {
+            return null;
+        }
+
+        var normalized = userName.Trim();
+        return normalized.Contains("@chatroom", StringComparison.Ordinal) ? null : normalized;
     }
 
     private IReadOnlyDictionary<string, string> ReadContactNames(

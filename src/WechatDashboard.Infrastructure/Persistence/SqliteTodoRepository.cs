@@ -160,6 +160,44 @@ public sealed class SqliteTodoRepository : ITodoRepository
         return result;
     }
 
+    /// <summary>读取本周完成及活动待办，供项目周报汇总真实执行状态。</summary>
+    public async Task<IReadOnlyList<TodoItem>> GetWeeklyReportAsync(
+        long projectId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, source_message_id, project_id, title, description, status,
+                   priority, due_at, created_at, updated_at, completed_at, is_auto_created, is_pinned, group_id, managed_project_id
+            FROM todo_items
+            WHERE managed_project_id = $projectId
+              AND (
+                  (status = $done AND julianday(completed_at) BETWEEN julianday($from) AND julianday($to))
+                  OR status IN ($pending, $inProgress, $waiting)
+              )
+            ORDER BY CASE WHEN status = $done THEN 0 ELSE 1 END,
+                     due_at IS NULL, due_at, updated_at DESC, id;
+            """;
+        command.Parameters.AddWithValue("$projectId", projectId);
+        command.Parameters.AddWithValue("$from", from.ToString("O"));
+        command.Parameters.AddWithValue("$to", to.ToString("O"));
+        command.Parameters.AddWithValue("$done", TodoStatus.Done.ToString());
+        command.Parameters.AddWithValue("$pending", TodoStatus.Pending.ToString());
+        command.Parameters.AddWithValue("$inProgress", TodoStatus.InProgress.ToString());
+        command.Parameters.AddWithValue("$waiting", TodoStatus.Waiting.ToString());
+        var result = new List<TodoItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadTodo(reader));
+        }
+
+        return result;
+    }
+
     public async Task<TodoItem?> GetByIdAsync(long id, CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
@@ -324,7 +362,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
             var placeholders = AddIdParameters(command, batch);
             command.CommandText = $"""
                 SELECT l.todo_id, m.id, m.source, m.source_message_key, m.chat_session_id, m.chat_name,
-                       m.sender_name, m.content, m.message_type, m.sent_at, m.captured_at, m.is_mention_me
+                       m.sender_name, m.content, m.message_type, m.sent_at, m.captured_at, m.is_mention_me,
+                       m.sender_external_id, m.chat_type, m.direction
                 FROM todo_source_messages l
                 JOIN messages m ON m.id = l.message_id
                 WHERE l.todo_id IN ({placeholders})
@@ -334,7 +373,7 @@ public sealed class SqliteTodoRepository : ITodoRepository
             while (await reader.ReadAsync(cancellationToken))
             {
                 var todoId = reader.GetInt64(0);
-                // 跳过 todo_id 列后复用消息表的列映射（0..10）。
+                // 跳过 todo_id 列后复用消息表的列映射（含三个路由字段）。
                 var message = SqliteMessageRepository.ReadMessage(reader, offset: 1);
                 if (!result.TryGetValue(todoId, out var list))
                 {
@@ -354,7 +393,8 @@ public sealed class SqliteTodoRepository : ITodoRepository
             var placeholders = AddIdParameters(command, batch);
             command.CommandText = $"""
                 SELECT t.id, m.id, m.source, m.source_message_key, m.chat_session_id, m.chat_name,
-                       m.sender_name, m.content, m.message_type, m.sent_at, m.captured_at, m.is_mention_me
+                       m.sender_name, m.content, m.message_type, m.sent_at, m.captured_at, m.is_mention_me,
+                       m.sender_external_id, m.chat_type, m.direction
                 FROM todo_items t
                 JOIN messages m ON m.id = t.source_message_id
                 WHERE t.id IN ({placeholders})

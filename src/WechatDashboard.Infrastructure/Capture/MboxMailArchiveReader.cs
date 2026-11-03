@@ -145,7 +145,20 @@ public sealed class MboxMailArchiveReader
             SentAt: message.Date == default ? DateTimeOffset.Now : message.Date,
             Body: body,
             AttachmentCount: CountAttachments(message),
-            IsUnread: !message.Headers.Contains(HeaderId.Status) || !IsSeen(message));
+            IsUnread: !message.Headers.Contains(HeaderId.Status) || !IsSeen(message),
+            // mbox 与 IMAP 保留相同的 To/Cc/Bcc 证据，确保两条路径路由一致。
+            To: ReadAddresses(message.To),
+            Cc: ReadAddresses(message.Cc),
+            Bcc: ReadAddresses(message.Bcc));
+    }
+
+    /// <summary>只保留可用于精确匹配的有效邮箱地址，不把显示名当作账号。</summary>
+    private static IReadOnlyList<string> ReadAddresses(InternetAddressList addresses)
+    {
+        return addresses.Mailboxes
+            .Select(mailbox => mailbox.Address?.Trim() ?? string.Empty)
+            .Where(address => address.Length > 0)
+            .ToArray();
     }
 
     /// <summary>优先 text/plain；仅当没有纯文本时才把 HTML 转成文本。</summary>

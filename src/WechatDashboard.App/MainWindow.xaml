@@ -466,6 +466,183 @@
                                 </WrapPanel>
                             </DockPanel>
 
+                            <!-- 项目周报：只生成Excel文件，不提供邮件草稿或自动发送入口。 -->
+                            <Expander x:Name="WeeklyReportExpander"
+                                      DockPanel.Dock="Bottom"
+                                      Header="项目周报（成员私聊周报 + 项目消息与待办）"
+                                      IsExpanded="False"
+                                      Margin="0,14,0,0"
+                                      Background="#F9FAFB">
+                                <StackPanel Margin="4,10,4,0">
+                                    <WrapPanel Margin="0,0,0,8">
+                                        <TextBlock Text="项目" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
+                                        <ComboBox x:Name="WeeklyReportProjectComboBox" Width="190" DisplayMemberPath="ProjectName" Margin="0,0,12,8" />
+                                        <DatePicker x:Name="WeeklyReportFromDatePicker" Width="125" Margin="0,0,6,8" ToolTip="周报开始日期" />
+                                        <TextBlock Text="至" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
+                                        <DatePicker x:Name="WeeklyReportToDatePicker" Width="125" Margin="0,0,12,8" ToolTip="周报结束日期" />
+                                        <Button x:Name="GenerateWeeklyReportButton" Content="生成 Excel" Click="GenerateWeeklyReportButton_Click"
+                                                Padding="16,4" Margin="0,0,0,8" />
+                                    </WrapPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="模板" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,0" />
+                                        <TextBox x:Name="WeeklyReportTemplatePathTextBox" Width="520" VerticalContentAlignment="Center"
+                                                 Text="D:\work\00_部门文档\周报月报\周报\10月周报\【智能化管线管理系统】项目周报20261031.xlsx" />
+                                        <Button Content="浏览" Click="BrowseWeeklyReportTemplateButton_Click" Margin="6,0,0,0" Padding="12,4" />
+                                    </StackPanel>
+                                    <TextBlock x:Name="WeeklyReportStatusText"
+                                               Text="选择项目和周期后生成Excel；系统不发送邮件，最终周报请人工发送。"
+                                               Foreground="#6B7280" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                    <TextBox x:Name="WeeklyReportResultTextBox"
+                                             IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                                             MinHeight="90" MaxHeight="180" VerticalScrollBarVisibility="Auto"
+                                             Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="8" />
+                                </StackPanel>
+                            </Expander>
+
+                            <Expander x:Name="ProjectBriefingExpander"
+                                      DockPanel.Dock="Bottom"
+                                      Header="项目简报（跨微信、石化通、石化邮汇总）"
+                                      IsExpanded="False"
+                                      Margin="0,14,0,0"
+                                      Background="#F9FAFB">
+                                <StackPanel Margin="4,10,4,0">
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="项目" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,0" />
+                                        <ComboBox x:Name="BriefingProjectComboBox" Width="180" DisplayMemberPath="ProjectName" />
+                                        <TextBlock Text="时间范围" VerticalAlignment="Center" Foreground="#4B5563" Margin="14,0,6,0" />
+                                        <ComboBox x:Name="BriefingWindowComboBox" Width="110" SelectedIndex="1">
+                                            <ComboBoxItem Content="今天" Tag="1" />
+                                            <ComboBoxItem Content="近 3 天" Tag="3" />
+                                            <ComboBoxItem Content="近 7 天" Tag="7" />
+                                            <ComboBoxItem Content="近 30 天" Tag="30" />
+                                        </ComboBox>
+                                        <Button x:Name="GenerateBriefingButton" Content="生成简报" Click="GenerateProjectBriefingButton_Click" Margin="14,0,0,0" Padding="16,4" />
+                                    </StackPanel>
+                                    <TextBlock x:Name="BriefingStatusText"
+                                               Text="选择项目后生成跨来源简报；模型不可用时自动回退本地统计摘要。"
+                                               Foreground="#6B7280" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                    <TextBox x:Name="BriefingResultTextBox"
+                                             IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                                             MinHeight="120" MaxHeight="280"
+                                             VerticalScrollBarVisibility="Auto"
+                                             Background="White" BorderBrush="#E5E7EB" BorderThickness="1" Padding="8" />
+                                    <!-- 模型只提出建议；勾选状态和目标状态均可在应用前人工修正。 -->
+                                    <TextBlock x:Name="MemoryProposalStatusText"
+                                               Text="生成简报后，可在这里确认新增事项和状态变化建议。"
+                                               Foreground="#6B7280" TextWrapping="Wrap" Margin="0,8,0,6" />
+                                    <DataGrid ItemsSource="{Binding MemoryProposals}"
+                                              IsReadOnly="False" CanUserDeleteRows="False"
+                                              MaxHeight="230" RowHeight="38" Margin="0,0,0,8">
+                                        <DataGrid.Columns>
+                                            <DataGridCheckBoxColumn Header="选择" Width="48"
+                                                                    Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <DataGridTextColumn Header="类别" Width="58" IsReadOnly="True" Binding="{Binding CategoryText}" />
+                                            <DataGridTextColumn Header="事项" Width="*" IsReadOnly="True" Binding="{Binding Title}" />
+                                            <DataGridTextColumn Header="当前状态" Width="76" IsReadOnly="True" Binding="{Binding BaseStatusText}" />
+                                            <DataGridTemplateColumn Header="建议状态" Width="100">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{Binding DataContext.MemoryStatusOptions, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                  DisplayMemberPath="Name" SelectedValuePath="Value"
+                                                                  SelectedValue="{Binding ProposedStatus, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                  Height="28" Margin="2" />
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn Header="原因" Width="1.4*" IsReadOnly="True" Binding="{Binding Reason}" />
+                                            <DataGridTextColumn Header="来源" Width="52" IsReadOnly="True" Binding="{Binding SourceCount}" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <Button x:Name="ApplyMemoryProposalsButton" Content="应用选中"
+                                            Click="ApplyMemoryProposalsButton_Click"
+                                            HorizontalAlignment="Left" Padding="16,4" Margin="0" />
+                                </StackPanel>
+                            </Expander>
+
+                            <!-- 项目记忆与简报共用项目数据，但不复用或更改待办生命周期。 -->
+                            <Expander x:Name="ProjectMemoryExpander"
+                                      DockPanel.Dock="Bottom"
+                                      Header="项目记忆（持续跟踪完成、阻塞、搁置与废弃）"
+                                      IsExpanded="False"
+                                      Expanded="ProjectMemoryExpander_Expanded"
+                                      Margin="0,14,0,0"
+                                      Background="#F9FAFB">
+                                <StackPanel Margin="4,10,4,0">
+                                    <WrapPanel Margin="0,0,0,8">
+                                        <TextBlock Text="项目" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
+                                        <ComboBox x:Name="MemoryProjectComboBox" Width="170" DisplayMemberPath="ProjectName"
+                                                  SelectionChanged="MemoryProjectComboBox_SelectionChanged" Margin="0,0,12,8" />
+                                        <TextBlock Text="状态" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
+                                        <ComboBox x:Name="MemoryStatusFilterComboBox" Width="105" SelectedIndex="0"
+                                                  SelectionChanged="MemoryFilter_Changed" Margin="0,0,12,8">
+                                            <ComboBoxItem Content="全部状态" Tag="" />
+                                            <ComboBoxItem Content="未开始" Tag="Open" />
+                                            <ComboBoxItem Content="进行中" Tag="InProgress" />
+                                            <ComboBoxItem Content="阻塞" Tag="Blocked" />
+                                            <ComboBoxItem Content="已搁置" Tag="Shelved" />
+                                            <ComboBoxItem Content="已完成" Tag="Completed" />
+                                            <ComboBoxItem Content="已废弃" Tag="Discarded" />
+                                        </ComboBox>
+                                        <!-- 终态默认折叠，勾选后才并入当前列表。 -->
+                                        <CheckBox x:Name="ShowTerminalMemoryCheckBox" Content="显示已完成 / 已废弃"
+                                                  Checked="MemoryFilter_Changed" Unchecked="MemoryFilter_Changed"
+                                                  VerticalAlignment="Center" Margin="0,0,12,8" />
+                                        <Button Content="刷新" Click="RefreshProjectMemoryButton_Click" Padding="14,4" Margin="0,0,0,8" />
+                                    </WrapPanel>
+                                    <TextBlock x:Name="ProjectMemoryStatusText"
+                                               Text="展开后加载项目事项；选择事项可查看来源快照和状态时间线。"
+                                               Foreground="#6B7280" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="3*" MinWidth="380" />
+                                            <ColumnDefinition Width="2*" MinWidth="280" />
+                                        </Grid.ColumnDefinitions>
+                                        <DataGrid x:Name="ProjectMemoryItemsGrid" ItemsSource="{Binding MemoryItems}"
+                                                  SelectionChanged="ProjectMemoryItemsGrid_SelectionChanged"
+                                                  MaxHeight="300" Margin="0,0,10,0">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="类别" Width="58" Binding="{Binding CategoryText}" />
+                                                <DataGridTextColumn Header="事项" Width="*" Binding="{Binding Title}" />
+                                                <DataGridTextColumn Header="状态" Width="70" Binding="{Binding StatusText}" />
+                                                <DataGridTextColumn Header="最近更新" Width="112" Binding="{Binding UpdatedAtText}" />
+                                                <DataGridTextColumn Header="最近状态原因" Width="1.2*" Binding="{Binding LastStatusReason}" />
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="来源快照（原消息删除后仍保留）" FontWeight="SemiBold" Margin="0,0,0,5" />
+                                            <DataGrid ItemsSource="{Binding MemorySources}" MaxHeight="138" RowHeight="Auto" Margin="0,0,0,10">
+                                                <DataGrid.Columns>
+                                                    <DataGridTextColumn Header="时间" Width="105" Binding="{Binding SentAtText}" />
+                                                    <DataGridTextColumn Header="来源" Width="68" Binding="{Binding Source}" />
+                                                    <DataGridTextColumn Header="会话 / 发送人" Width="125" Binding="{Binding ParticipantText}" />
+                                                    <DataGridTemplateColumn Header="正文快照" Width="*">
+                                                        <DataGridTemplateColumn.CellTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Text="{Binding ContentSnapshot}" TextWrapping="Wrap" Margin="4" />
+                                                            </DataTemplate>
+                                                        </DataGridTemplateColumn.CellTemplate>
+                                                    </DataGridTemplateColumn>
+                                                </DataGrid.Columns>
+                                            </DataGrid>
+                                            <TextBlock Text="状态时间线" FontWeight="SemiBold" Margin="0,0,0,5" />
+                                            <DataGrid ItemsSource="{Binding MemoryHistory}" MaxHeight="138" RowHeight="Auto">
+                                                <DataGrid.Columns>
+                                                    <DataGridTextColumn Header="时间" Width="105" Binding="{Binding ChangedAtText}" />
+                                                    <DataGridTextColumn Header="变化" Width="120" Binding="{Binding ChangeText}" />
+                                                    <DataGridTemplateColumn Header="原因" Width="*">
+                                                        <DataGridTemplateColumn.CellTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Text="{Binding Reason}" TextWrapping="Wrap" Margin="4" />
+                                                            </DataTemplate>
+                                                        </DataGridTemplateColumn.CellTemplate>
+                                                    </DataGridTemplateColumn>
+                                                </DataGrid.Columns>
+                                            </DataGrid>
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </Expander>
+
                             <local:DashboardChartControl ItemsSource="{Binding DashboardChartRows}"
                                                          ChartType="{Binding DashboardChartType}"
                                                          MinHeight="330" />
@@ -578,6 +755,51 @@
                                                         Tag="{Binding ElementName=InlineKeywordTextBox}"
                                                         Click="AddInlineKeywordButton_Click" />
                                             </StackPanel>
+                                            <!-- 项目成员：wxid和邮箱用于识别直接发来的周报，别名仅用于显示与诊断。 -->
+                                            <TextBlock Text="成员（直接周报归集）" FontWeight="SemiBold" Margin="0,14,0,6" />
+                                            <ItemsControl ItemsSource="{Binding Members}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border Background="#FAFBFC" BorderBrush="#E5E7EB" BorderThickness="3,0,0,0"
+                                                                Padding="10,5" Margin="0,2,0,0">
+                                                            <DockPanel LastChildFill="True">
+                                                                <Button Style="{StaticResource RowDangerButton}" DockPanel.Dock="Right" Content="删除"
+                                                                        Click="DeleteProjectMemberButton_Click" VerticalAlignment="Center" />
+                                                                <WrapPanel VerticalAlignment="Center">
+                                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                                    <CheckBox Content="周报" IsChecked="{Binding IsReporting}" Click="ProjectMemberReportingCheckBox_Click"
+                                                                              VerticalAlignment="Center" Margin="8,0,0,0" />
+                                                                    <TextBlock Text="{Binding Alias}" Foreground="#9CA3AF" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                                    <TextBlock Text="{Binding Email}" Foreground="#9CA3AF" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                                    <TextBlock Text="{Binding WeChatUserId}" Foreground="#9CA3AF" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                                </WrapPanel>
+                                                            </DockPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <!-- 输入顺序与代码读取一致：姓名、别名、邮箱、微信wxid。 -->
+                                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                <TextBlock Text="姓名" Width="100" FontSize="12" Foreground="#6B7280" />
+                                                <TextBlock Text="别名/昵称" Width="100" Margin="6,0,0,0" FontSize="12" Foreground="#6B7280" />
+                                                <TextBlock Text="邮箱" Width="160" Margin="6,0,0,0" FontSize="12" Foreground="#6B7280" />
+                                                <TextBlock Text="微信wxid" Width="150" Margin="6,0,0,0" FontSize="12" Foreground="#6B7280" />
+                                            </StackPanel>
+                                            <StackPanel x:Name="InlineMemberPanel" Orientation="Horizontal" Margin="0,2,0,0">
+                                                <TextBox x:Name="InlineMemberNameTextBox" Width="100"
+                                                         ToolTip="真实姓名：周报正文里显示的名字" />
+                                                <TextBox x:Name="InlineMemberAliasTextBox" Width="100" Margin="6,0,0,0"
+                                                         ToolTip="别名或昵称：用于显示和诊断，多个用逗号分隔" />
+                                                <TextBox x:Name="InlineMemberEmailTextBox" Width="160" Margin="6,0,0,0"
+                                                         ToolTip="邮箱：仅用于匹配成员直接发来的石化邮，不用于自动发信" />
+                                                <TextBox x:Name="InlineMemberWeChatIdTextBox" Width="150" Margin="6,0,0,0"
+                                                         ToolTip="微信wxid：用于严格匹配成员私聊，例如wxid_xxxx" />
+                                                <Button Style="{StaticResource RowMiniButton}" Content="添加成员"
+                                                        Tag="{Binding ElementName=InlineMemberPanel}"
+                                                        Click="AddInlineMemberButton_Click" />
+                                            </StackPanel>
+                                            <TextBlock Text="只有微信单聊接收消息或唯一To直接发给当前账号的石化邮才进入成员周报；邮箱和wxid均不用于自动发送邮件。"
+                                                       FontSize="12" Foreground="#9CA3AF" Margin="0,4,0,0" TextWrapping="Wrap" />
                                         </StackPanel>
                                     </Expander>
                                 </DataTemplate>

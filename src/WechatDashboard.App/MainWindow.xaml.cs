@@ -5,12 +5,15 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using Forms = System.Windows.Forms;
+using WechatDashboard.Application.Agent;
+using WechatDashboard.Application.Briefing;
 using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
+using WechatDashboard.Application.Weekly;
 using WechatDashboard.App.Services;
 using WechatDashboard.App.ViewModels.Settings;
 using WechatDashboard.App.ViewModels.Todos;
@@ -20,6 +23,7 @@ using WechatDashboard.Domain.Enums;
 using WechatDashboard.Infrastructure.Agent;
 using WechatDashboard.Infrastructure.Capture;
 using WechatDashboard.Infrastructure.Persistence;
+using WechatDashboard.Infrastructure.Weekly;
 
 namespace WechatDashboard.App;
 
@@ -46,6 +50,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteFollowedChatRepository _followedChatRepository;
     private readonly SqliteFollowedProjectRepository _followedProjectRepository;
     private readonly SqliteFollowedProjectKeywordRepository _followedProjectKeywordRepository;
+    // 简报事项的长期项目记忆；只经用户确认后写入，不参与待办状态流转。
+    private readonly SqliteProjectMemoryRepository _projectMemoryRepository;
+    // 项目成员（直接周报归集；邮箱只匹配发件人，不用于自动发信）
+    private readonly SqliteProjectMemberRepository _projectMemberRepository;
     // 优先级层数/颜色配置（app_settings 中的一段 JSON）
     private readonly SqlitePrioritySettingsRepository _prioritySettingsRepository;
     // JSONL 采集收件箱路径
@@ -59,6 +67,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 当前生效的关注项目名称集合（群名包含项目名时，该群消息重点关注）
     private IReadOnlyList<string> _currentFollowedProjects = Array.Empty<string>();
     private IReadOnlyList<FollowedProjectKeyword> _currentFollowedProjectKeywords = Array.Empty<FollowedProjectKeyword>();
+    // 当前生效的项目成员集合（用于周报归集与直接发件人匹配，不用于发信）
+    private IReadOnlyList<ProjectMember> _currentProjectMembers = Array.Empty<ProjectMember>();
     // 微信本地读取器服务
     private readonly WeChatLocalReaderService _readerService;
     // DeepSeek 密钥仅在启动时读取，界面保存后于下次重启生效。
@@ -103,6 +113,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _captureSourceBaseDetails =
         new(StringComparer.Ordinal);
+    // 当前项目记忆快照；状态和终态显示筛选均基于该快照在本地投影。
+    private IReadOnlyList<ProjectMemoryItem> _projectMemoryItems = Array.Empty<ProjectMemoryItem>();
+    // 建议所属项目用于阻止切换项目后误应用上一窗口的建议。
+    private long? _memoryProposalProjectId;
+    // 填充项目下拉时暂停选择事件，避免一次初始化触发多次数据库读取。
+    private bool _isLoadingMemoryProjects;
 
     // 顶部摘要文本
     private string _summaryText = "加载中";
@@ -146,6 +162,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _followedChatRepository = new SqliteFollowedChatRepository(_databasePath);
         _followedProjectRepository = new SqliteFollowedProjectRepository(_databasePath);
         _followedProjectKeywordRepository = new SqliteFollowedProjectKeywordRepository(_databasePath);
+        // 与简报服务共用同一仓储，确保模型只看到当前项目的稳定事项 ID。
+        _projectMemoryRepository = new SqliteProjectMemoryRepository(_databasePath);
+        _projectMemberRepository = new SqliteProjectMemberRepository(_databasePath);
         _prioritySettingsRepository = new SqlitePrioritySettingsRepository(_databasePath);
         _captureInboxPath = ProjectToolPaths.CaptureInboxDirectory;
         _readerService = new WeChatLocalReaderService();
@@ -405,6 +424,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ObservableCollection<FollowedProjectKeywordRow> FollowedProjectKeywords { get; } = new();
     // 关注项目树：项目节点下挂各自关键字，供“关注设置”可折叠层级列表绑定
     public ObservableCollection<FollowedProjectTreeRow> FollowedProjectTree { get; } = new();
+    // 本次简报产生的建议；只有勾选并点击“应用选中”的行才会入库。
+    public ObservableCollection<ProjectMemoryProposalRow> MemoryProposals { get; } = new();
+    // 当前项目及筛选条件下可见的长期事项。
+    public ObservableCollection<ProjectMemoryItemRow> MemoryItems { get; } = new();
+    // 选中事项的不可变来源快照与真实状态时间线。
+    public ObservableCollection<ProjectMemorySourceRow> MemorySources { get; } = new();
+    public ObservableCollection<ProjectMemoryHistoryRow> MemoryHistory { get; } = new();
+    // 建议状态下拉使用中文显示，但绑定值仍保留领域枚举。
+    public IReadOnlyList<ProjectMemoryStatusOption> MemoryStatusOptions { get; } =
+    [
+        new(ProjectMemoryStatus.Open, "未开始"),
+        new(ProjectMemoryStatus.InProgress, "进行中"),
+        new(ProjectMemoryStatus.Blocked, "阻塞"),
+        new(ProjectMemoryStatus.Shelved, "已搁置"),
+        new(ProjectMemoryStatus.Completed, "已完成"),
+        new(ProjectMemoryStatus.Discarded, "已废弃")
+    ];
     public IReadOnlyList<ProjectColorOption> ProjectColors { get; } =
     [
         new("灰色", ProjectColorPolicy.DefaultColor),
@@ -979,6 +1015,641 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ApplyDashboardSnapshot(snapshot);
     }
 
+    /// <summary>
+    /// 生成项目简报：跨微信、石化通、石化邮按时间窗口取数，
+    /// 复用关注项目关键词过滤，模型总结；模型不可用或失败时回退本地统计摘要。
+    /// </summary>
+    private async void GenerateProjectBriefingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (GenerateBriefingButton is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _databaseInitializer.InitializeAsync(CancellationToken.None);
+            var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+            var activeProjects = projects.Where(project => project.IsActive).ToList();
+            if (activeProjects.Count == 0)
+            {
+                BriefingProjectComboBox.ItemsSource = null;
+                BriefingStatusText.Text = "暂无启用的关注项目。请先在“关注设置”中添加项目。";
+                BriefingResultTextBox.Clear();
+                // 项目被删除后，旧建议不能再跨项目应用。
+                MemoryProposals.Clear();
+                _memoryProposalProjectId = null;
+                ProjectBriefingExpander.IsExpanded = true;
+                return;
+            }
+
+            // 每次生成前刷新项目下拉，并保留仍存在的原选择。
+            var previouslySelected = (BriefingProjectComboBox.SelectedItem as FollowedProject)?.Id;
+            BriefingProjectComboBox.ItemsSource = activeProjects;
+            BriefingProjectComboBox.SelectedItem =
+                activeProjects.FirstOrDefault(project => project.Id == previouslySelected) ?? activeProjects[0];
+
+            if (BriefingProjectComboBox.SelectedItem is not FollowedProject project)
+            {
+                BriefingStatusText.Text = "请选择要生成简报的项目。";
+                return;
+            }
+
+            if (BriefingWindowComboBox.SelectedItem is not ComboBoxItem windowItem
+                || !int.TryParse(windowItem.Tag?.ToString(), out var days)
+                || days < 1)
+            {
+                days = 3;
+            }
+
+            // “近 N 天”从 N 天前的本地零点开始，到当前时刻为止。
+            var to = DateTimeOffset.Now;
+            var from = to.LocalDateTime.Date.AddDays(-(days - 1));
+
+            ProjectBriefingExpander.IsExpanded = true;
+            BriefingStatusText.Text = $"正在生成「{project.ProjectName}」的跨来源简报…";
+            // 生成期间清掉上一批建议并禁止并发应用，避免新旧项目或基准状态混用。
+            MemoryProposals.Clear();
+            _memoryProposalProjectId = null;
+            MemoryProposalStatusText.Text = "正在生成项目记忆建议…";
+            GenerateBriefingButton.IsEnabled = false;
+            ApplyMemoryProposalsButton.IsEnabled = false;
+            try
+            {
+                var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+                var service = new ProjectBriefingService(
+                    _messageRepository,
+                    _messageActionModel,
+                    _projectMemoryRepository);
+                var outcome = await Task.Run(() => service.GenerateAsync(
+                    project.Id,
+                    project.ProjectName,
+                    keywords,
+                    from,
+                    to,
+                    CancellationToken.None));
+
+                BriefingResultTextBox.Text = FormatProjectBriefing(outcome.Briefing);
+                BriefingStatusText.Text = outcome.MatchedCount == 0
+                    ? $"时间窗口（近 {days} 天）内没有匹配「{project.ProjectName}」关键词的消息。"
+                    : outcome.FromModel
+                        ? $"已生成模型简报：匹配 {outcome.MatchedCount} 条消息，送入模型 {outcome.SentToModelCount} 条。"
+                        : $"模型不可用，已回退本地统计摘要（{outcome.MatchedCount} 条消息）。";
+
+                // 所有建议默认勾选，但这里只更新内存集合，不直接写数据库。
+                Replace(MemoryProposals, outcome.MemoryProposals.Select(proposal => new ProjectMemoryProposalRow(proposal)));
+                _memoryProposalProjectId = project.Id;
+                var newCount = outcome.MemoryProposals.Count(proposal => proposal.ItemId is null);
+                var changeCount = outcome.MemoryProposals.Count - newCount;
+                var proposalSource = outcome.FromModel ? "模型建议" : "本地规则建议（模型不可用或结果未通过校验）";
+                MemoryProposalStatusText.Text = outcome.MemoryProposals.Count == 0
+                    ? $"{proposalSource}：本次没有需要确认的新增事项或状态变化。"
+                    : $"{proposalSource}：新增 {newCount} 项，状态建议 {changeCount} 项；已默认勾选，可修改建议状态后应用。";
+            }
+            finally
+            {
+                GenerateBriefingButton.IsEnabled = true;
+                ApplyMemoryProposalsButton.IsEnabled = true;
+            }
+        }
+        catch (Exception exception)
+        {
+            BriefingStatusText.Text = $"生成简报失败：{exception.Message}";
+            MemoryProposalStatusText.Text = "本次未生成可应用的项目记忆建议。";
+            MemoryProposals.Clear();
+            _memoryProposalProjectId = null;
+            GenerateBriefingButton.IsEnabled = true;
+            ApplyMemoryProposalsButton.IsEnabled = true;
+        }
+    }
+
+    /// <summary>把简报结果格式化为带分段标题的可读文本。</summary>
+    private static string FormatProjectBriefing(ProjectBriefing briefing)
+    {
+        var sections = new List<string> { $"【总体进展】\n{briefing.Summary}" };
+        if (briefing.Highlights.Count > 0)
+        {
+            sections.Add($"【关键进展】\n{string.Join("\n", briefing.Highlights.Select(item => $"· {item}"))}");
+        }
+
+        if (briefing.Risks.Count > 0)
+        {
+            sections.Add($"【风险与阻断】\n{string.Join("\n", briefing.Risks.Select(item => $"· {item}"))}");
+        }
+
+        if (briefing.Actions.Count > 0)
+        {
+            sections.Add($"【需要我行动】\n{string.Join("\n", briefing.Actions.Select(item => $"· {item}"))}");
+        }
+
+        return string.Join("\n\n", sections);
+    }
+
+    /// <summary>
+    /// 批量应用用户选中的建议。服务层会重新读取来源消息，仓储会再次校验基准状态，
+    /// 因此确认窗口过期时不会静默覆盖其他窗口已经写入的新状态。
+    /// </summary>
+    private async void ApplyMemoryProposalsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedRows = MemoryProposals.Where(row => row.IsSelected).ToArray();
+        if (selectedRows.Length == 0)
+        {
+            MemoryProposalStatusText.Text = "请至少勾选一条项目记忆建议。";
+            return;
+        }
+
+        if (_memoryProposalProjectId is not long projectId
+            || BriefingProjectComboBox.SelectedItem is not FollowedProject briefingProject
+            || briefingProject.Id != projectId)
+        {
+            MemoryProposalStatusText.Text = "简报项目已切换，请重新生成简报后再应用建议。";
+            return;
+        }
+
+        ApplyMemoryProposalsButton.IsEnabled = false;
+        GenerateBriefingButton.IsEnabled = false;
+        try
+        {
+            await _databaseInitializer.InitializeAsync(CancellationToken.None);
+            var service = new ProjectMemoryService(_projectMemoryRepository, _messageRepository);
+            var proposals = selectedRows.Select(row => row.ToProposal()).ToArray();
+            var result = await Task.Run(() => service.ApplySelectedAsync(
+                projectId,
+                proposals,
+                CancellationToken.None));
+
+            // 已提交行从确认窗口移除；未勾选行继续保留，便于用户分批确认。
+            foreach (var row in selectedRows)
+            {
+                MemoryProposals.Remove(row);
+            }
+
+            MemoryProposalStatusText.Text =
+                $"已应用：新增 {result.Created} 项，更新 {result.Updated} 项，跳过 {result.Skipped} 项；剩余 {MemoryProposals.Count} 条未应用建议。";
+            _memoryProposalProjectId = MemoryProposals.Count == 0 ? null : projectId;
+
+            // 应用成功后立即刷新长期记忆，并展开来源与状态时间线区域。
+            await LoadMemoryProjectsAsync(projectId);
+            ProjectMemoryExpander.IsExpanded = true;
+        }
+        catch (ProjectMemoryConcurrencyException exception)
+        {
+            MemoryProposalStatusText.Text = $"建议已过期：{exception.Message} 请重新生成简报。";
+        }
+        catch (Exception exception)
+        {
+            MemoryProposalStatusText.Text = $"应用项目记忆失败：{exception.Message}";
+        }
+        finally
+        {
+            ApplyMemoryProposalsButton.IsEnabled = true;
+            GenerateBriefingButton.IsEnabled = true;
+        }
+    }
+
+    /// <summary>首次展开时填充项目下拉；再次展开时只刷新当前项目。</summary>
+    private async void ProjectMemoryExpander_Expanded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (MemoryProjectComboBox.ItemsSource is null)
+            {
+                var preferredProjectId = (BriefingProjectComboBox.SelectedItem as FollowedProject)?.Id;
+                await LoadMemoryProjectsAsync(preferredProjectId);
+            }
+            else
+            {
+                await RefreshProjectMemoryAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            ProjectMemoryStatusText.Text = $"加载项目记忆失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>刷新项目下拉并尽量保留原选择，随后读取所选项目的全部事项。</summary>
+    private async Task LoadMemoryProjectsAsync(long? preferredProjectId = null)
+    {
+        await _databaseInitializer.InitializeAsync(CancellationToken.None);
+        var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+        var activeProjects = projects.Where(project => project.IsActive).ToArray();
+        var selectedProjectId = preferredProjectId
+            ?? (MemoryProjectComboBox.SelectedItem as FollowedProject)?.Id;
+
+        // 赋值期间屏蔽 SelectionChanged，统一在本方法末尾执行一次读取。
+        _isLoadingMemoryProjects = true;
+        try
+        {
+            MemoryProjectComboBox.ItemsSource = activeProjects;
+            MemoryProjectComboBox.SelectedItem = activeProjects.FirstOrDefault(project => project.Id == selectedProjectId)
+                ?? activeProjects.FirstOrDefault();
+        }
+        finally
+        {
+            _isLoadingMemoryProjects = false;
+        }
+
+        if (activeProjects.Length == 0)
+        {
+            _projectMemoryItems = Array.Empty<ProjectMemoryItem>();
+            MemoryItems.Clear();
+            ClearMemoryDetails();
+            ProjectMemoryStatusText.Text = "暂无启用的关注项目。";
+            return;
+        }
+
+        await RefreshProjectMemoryAsync();
+    }
+
+    /// <summary>切换项目后立即刷新事项，避免界面继续展示上一项目的数据。</summary>
+    private async void MemoryProjectComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isLoadingMemoryProjects || !IsLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            await RefreshProjectMemoryAsync();
+        }
+        catch (Exception exception)
+        {
+            ProjectMemoryStatusText.Text = $"加载项目记忆失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>手动刷新当前项目，保留现有状态和终态显示筛选。</summary>
+    private async void RefreshProjectMemoryButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await LoadMemoryProjectsAsync((MemoryProjectComboBox.SelectedItem as FollowedProject)?.Id);
+        }
+        catch (Exception exception)
+        {
+            ProjectMemoryStatusText.Text = $"刷新项目记忆失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>后台读取事项快照；若等待期间用户切换项目，则丢弃过期结果。</summary>
+    private async Task RefreshProjectMemoryAsync()
+    {
+        if (MemoryProjectComboBox.SelectedItem is not FollowedProject project)
+        {
+            _projectMemoryItems = Array.Empty<ProjectMemoryItem>();
+            ApplyMemoryFilters();
+            return;
+        }
+
+        ProjectMemoryStatusText.Text = $"正在加载「{project.ProjectName}」的项目记忆…";
+        var service = new ProjectMemoryService(_projectMemoryRepository, _messageRepository);
+        var items = await Task.Run(() => service.GetByProjectAsync(project.Id, CancellationToken.None));
+        if ((MemoryProjectComboBox.SelectedItem as FollowedProject)?.Id != project.Id)
+        {
+            return;
+        }
+
+        _projectMemoryItems = items;
+        ApplyMemoryFilters();
+    }
+
+    /// <summary>状态筛选和终态折叠都只改变界面投影，不修改事项本身。</summary>
+    private void MemoryFilter_Changed(object sender, RoutedEventArgs e)
+    {
+        if (IsLoaded)
+        {
+            ApplyMemoryFilters();
+        }
+    }
+
+    /// <summary>按所选状态和“显示终态”开关重新填充事项表格。</summary>
+    private void ApplyMemoryFilters()
+    {
+        ProjectMemoryStatus? selectedStatus = null;
+        if (MemoryStatusFilterComboBox?.SelectedItem is ComboBoxItem statusItem
+            && Enum.TryParse(statusItem.Tag?.ToString(), out ProjectMemoryStatus parsedStatus))
+        {
+            selectedStatus = parsedStatus;
+        }
+
+        var showTerminal = ShowTerminalMemoryCheckBox?.IsChecked == true;
+        var visibleItems = _projectMemoryItems.Where(item =>
+                (selectedStatus is null || item.Status == selectedStatus)
+                && (showTerminal || !ProjectMemoryDisplay.IsTerminal(item.Status)))
+            .Select(item => new ProjectMemoryItemRow(
+                item.Id,
+                ProjectMemoryDisplay.Category(item.Category),
+                item.Title,
+                ProjectMemoryDisplay.Status(item.Status),
+                item.UpdatedAt.LocalDateTime.ToString("MM-dd HH:mm"),
+                item.LastStatusReason ?? "—"))
+            .ToArray();
+        Replace(MemoryItems, visibleItems);
+        ClearMemoryDetails();
+        ProjectMemoryStatusText.Text = _projectMemoryItems.Count == 0
+            ? "当前项目还没有已确认的记忆事项。"
+            : $"共 {_projectMemoryItems.Count} 项，当前显示 {visibleItems.Length} 项；终态默认{(showTerminal ? "显示" : "折叠")}。";
+    }
+
+    /// <summary>读取选中事项的来源快照和状态历史，并防止迟到的结果覆盖新选择。</summary>
+    private async void ProjectMemoryItemsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ProjectMemoryItemsGrid.SelectedItem is not ProjectMemoryItemRow row
+            || MemoryProjectComboBox.SelectedItem is not FollowedProject project)
+        {
+            ClearMemoryDetails();
+            return;
+        }
+
+        try
+        {
+            var service = new ProjectMemoryService(_projectMemoryRepository, _messageRepository);
+            var details = await Task.Run(() => service.GetDetailsAsync(project.Id, row.Id, CancellationToken.None));
+            if ((ProjectMemoryItemsGrid.SelectedItem as ProjectMemoryItemRow)?.Id != row.Id
+                || (MemoryProjectComboBox.SelectedItem as FollowedProject)?.Id != project.Id)
+            {
+                return;
+            }
+
+            if (details is null)
+            {
+                ClearMemoryDetails();
+                ProjectMemoryStatusText.Text = "该事项已删除，请刷新项目记忆。";
+                return;
+            }
+
+            Replace(MemorySources, details.Sources.Select(source => new ProjectMemorySourceRow(
+                source.Source,
+                $"{source.ChatName} / {source.SenderName}",
+                source.ContentSnapshot,
+                source.SentAt.LocalDateTime.ToString("MM-dd HH:mm"))));
+            Replace(MemoryHistory, details.History.Select(history => new ProjectMemoryHistoryRow(
+                history.ChangedAt.LocalDateTime.ToString("MM-dd HH:mm"),
+                $"{ProjectMemoryDisplay.Status(history.PreviousStatus)} → {ProjectMemoryDisplay.Status(history.NewStatus)}",
+                history.Reason)));
+            ProjectMemoryStatusText.Text = $"事项「{details.Item.Title}」：{details.Sources.Count} 条来源，{details.History.Count} 次状态记录。";
+        }
+        catch (Exception exception)
+        {
+            ClearMemoryDetails();
+            ProjectMemoryStatusText.Text = $"读取事项详情失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>切换事项或筛选条件时清空详情，避免来源证据错配。</summary>
+    private void ClearMemoryDetails()
+    {
+        MemorySources.Clear();
+        MemoryHistory.Clear();
+    }
+
+    /// <summary>选择现有周报模板；只读取模板副本，绝不把生成内容写回原文件。</summary>
+    private void BrowseWeeklyReportTemplateButton_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择项目周报模板",
+            Filter = "Excel 工作簿 (*.xlsx)|*.xlsx",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (dialog.ShowDialog(this) == true)
+        {
+            WeeklyReportTemplatePathTextBox.Text = dialog.FileName;
+        }
+    }
+
+    /// <summary>
+    /// 生成项目周报 Excel：汇总成员直接周报、项目消息和待办。
+    /// 这里只编排取数、确认与导出，不创建邮件草稿，也不调用任何邮件发送能力。
+    /// </summary>
+    private async void GenerateWeeklyReportButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (GenerateWeeklyReportButton is null) return;
+        WeeklyReportExpander.IsExpanded = true;
+        GenerateWeeklyReportButton.IsEnabled = false;
+        try
+        {
+            await _databaseInitializer.InitializeAsync(CancellationToken.None);
+            var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+            var activeProjects = projects.Where(project => project.IsActive).ToArray();
+            if (activeProjects.Length == 0)
+            {
+                WeeklyReportProjectComboBox.ItemsSource = null;
+                WeeklyReportStatusText.Text = "暂无启用的关注项目，请先在“关注设置”中添加项目。";
+                WeeklyReportResultTextBox.Clear();
+                return;
+            }
+
+            // 每次生成前刷新项目列表，并尽量保留用户上次选择。
+            var previousProjectId = (WeeklyReportProjectComboBox.SelectedItem as FollowedProject)?.Id;
+            WeeklyReportProjectComboBox.ItemsSource = activeProjects;
+            WeeklyReportProjectComboBox.SelectedItem =
+                activeProjects.FirstOrDefault(project => project.Id == previousProjectId) ?? activeProjects[0];
+            if (WeeklyReportProjectComboBox.SelectedItem is not FollowedProject project)
+            {
+                WeeklyReportStatusText.Text = "请选择要生成周报的项目。";
+                return;
+            }
+
+            SetDefaultWeeklyReportDates();
+            if (WeeklyReportFromDatePicker.SelectedDate is not DateTime fromDate
+                || WeeklyReportToDatePicker.SelectedDate is not DateTime toDate)
+            {
+                WeeklyReportStatusText.Text = "请选择完整的周报开始和结束日期。";
+                return;
+            }
+            if (toDate.Date < fromDate.Date)
+            {
+                WeeklyReportStatusText.Text = "周报结束日期不得早于开始日期。";
+                return;
+            }
+
+            var templatePath = WeeklyReportTemplatePathTextBox.Text.Trim();
+            if (!File.Exists(templatePath))
+            {
+                WeeklyReportStatusText.Text = "周报模板不存在，请重新选择有效的 .xlsx 文件。";
+                return;
+            }
+
+            // 日期选择按本地自然日处理，结束时刻覆盖所选日期的最后一Tick。
+            var from = new DateTimeOffset(fromDate.Date);
+            var to = new DateTimeOffset(toDate.Date.AddDays(1).AddTicks(-1));
+            var reportDate = DateTimeOffset.Now;
+            var safeProjectName = MakeSafeFilePart(project.ProjectName);
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "保存项目周报 Excel",
+                Filter = "Excel 工作簿 (*.xlsx)|*.xlsx",
+                DefaultExt = ".xlsx",
+                AddExtension = true,
+                OverwritePrompt = true,
+                FileName = $"【{safeProjectName}】项目周报{reportDate:yyyyMMdd}.xlsx",
+                InitialDirectory = Path.GetDirectoryName(Path.GetFullPath(templatePath))
+            };
+            if (dialog.ShowDialog(this) != true)
+            {
+                WeeklyReportStatusText.Text = "已取消周报生成，未写出文件。";
+                return;
+            }
+
+            var outputPath = dialog.FileName;
+            if (string.Equals(
+                    Path.GetFullPath(templatePath),
+                    Path.GetFullPath(outputPath),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                WeeklyReportStatusText.Text = "输出文件不能覆盖周报模板，请选择另一个文件路径。";
+                return;
+            }
+
+            WeeklyReportStatusText.Text = $"正在归集并总结「{project.ProjectName}」周报素材…";
+            WeeklyReportResultTextBox.Text = "仅生成 Excel，不发送邮件。";
+            var outcome = await Task.Run(async () =>
+            {
+                // 首次处理智能管线项目时只补缺失姓名，既有成员配置与周报开关不覆盖。
+                await EnsureDefaultWeeklyReportMembersAsync(project);
+                var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+                var allMembers = await _projectMemberRepository.GetAllAsync(CancellationToken.None);
+                var projectMembers = allMembers.Where(member => member.ProjectId == project.Id).ToArray();
+                var service = new WeeklyReportService(
+                    new WeeklyReportCollector(_messageRepository),
+                    _todoRepository,
+                    _messageActionModel);
+                return await service.GenerateAsync(
+                    project.Id,
+                    project.ProjectName,
+                    projectMembers,
+                    keywords,
+                    from,
+                    to,
+                    reportDate,
+                    _currentAliases,
+                    CancellationToken.None);
+            });
+
+            var diagnostics = BuildWeeklyReportDiagnostics(outcome);
+            WeeklyReportResultTextBox.Text = diagnostics.Text;
+            if (diagnostics.NeedsConfirmation)
+            {
+                var answer = MessageBox.Show(
+                    this,
+                    diagnostics.Text + "\n\n检测到缺失素材、路由排除或模型回退，是否仍继续导出 Excel？",
+                    "周报导出确认",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+                if (answer != MessageBoxResult.Yes)
+                {
+                    WeeklyReportStatusText.Text = "已取消导出，未写出文件。";
+                    return;
+                }
+            }
+
+            WeeklyReportStatusText.Text = "正在写入模板副本并校验 Excel…";
+            await Task.Run(() => new OpenXmlWeeklyReportExporter().Export(
+                outcome.Draft,
+                templatePath,
+                outputPath));
+            WeeklyReportStatusText.Text = $"周报已生成：{outputPath}；请检查 Excel 后人工发送邮件。";
+            WeeklyReportResultTextBox.Text = diagnostics.Text
+                + $"\n输出文件：{outputPath}\n邮件：系统未发送，由用户人工发送。";
+        }
+        catch (Exception exception)
+        {
+            WeeklyReportStatusText.Text = $"生成周报失败：{exception.Message}";
+        }
+        finally
+        {
+            GenerateWeeklyReportButton.IsEnabled = true;
+        }
+    }
+
+    /// <summary>默认选择最近一个已经完整结束的周一至周五，避免把本周未发生内容写入周报。</summary>
+    private void SetDefaultWeeklyReportDates()
+    {
+        if (WeeklyReportFromDatePicker.SelectedDate.HasValue && WeeklyReportToDatePicker.SelectedDate.HasValue)
+        {
+            return;
+        }
+
+        var today = DateTime.Today;
+        var daysFromMonday = ((int)today.DayOfWeek + 6) % 7;
+        // 周六、周日时本周工作日已经完整结束，应选本周；周一至周五仍选上一完整周。
+        var isCompletedWeekend = today.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+        var lastMonday = today.AddDays(-daysFromMonday - (isCompletedWeekend ? 0 : 7));
+        WeeklyReportFromDatePicker.SelectedDate = lastMonday;
+        WeeklyReportToDatePicker.SelectedDate = lastMonday.AddDays(4);
+    }
+
+    /// <summary>智能管线项目只补齐四个默认成员的缺失姓名，保存仓储负责保持同名成员已有字段。</summary>
+    private async Task EnsureDefaultWeeklyReportMembersAsync(FollowedProject project)
+    {
+        if (!string.Equals(project.ProjectName, "智能化管线管理系统", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var defaultNames = new[] { "沈佳奇", "张欣宇", "张彬", "赵岑东" };
+        var members = await _projectMemberRepository.GetAllAsync(CancellationToken.None);
+        var existingNames = members
+            .Where(member => member.ProjectId == project.Id)
+            .Select(member => member.DisplayName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in defaultNames.Where(name => !existingNames.Contains(name)))
+        {
+            // 新成员使用仓储默认的IsReporting=true；空身份字段留待用户在设置页补齐。
+            await _projectMemberRepository.SaveAsync(
+                project.Id,
+                name,
+                null,
+                null,
+                (string?)null,
+                CancellationToken.None);
+        }
+    }
+
+    /// <summary>把采用条数、身份缺口、排除路由和模型回退整理成导出前确认文本。</summary>
+    private static (string Text, bool NeedsConfirmation) BuildWeeklyReportDiagnostics(WeeklyReportOutcome outcome)
+    {
+        var lines = new List<string>
+        {
+            $"项目：{outcome.Draft.Metadata.ProjectName}",
+            $"周期：{outcome.Draft.Metadata.From:yyyy-MM-dd} 至 {outcome.Draft.Metadata.To:yyyy-MM-dd}",
+            $"项目消息：{outcome.Diagnostics.ProjectMessageCount} 条；项目待办：{outcome.TodoCount} 条。"
+        };
+        if (outcome.Diagnostics.Members.Count == 0)
+        {
+            lines.Add("成员周报：当前项目没有启用周报的成员。");
+        }
+        else
+        {
+            lines.AddRange(outcome.Diagnostics.Members.Select(member =>
+                $"成员 {member.MemberName}：采用 {member.AdoptedCount} 条"
+                + (member.HasDirectIdentity ? "。" : "；缺少 wxid/邮箱，无法可靠归集私聊。")));
+        }
+
+        lines.Add($"路由排除：Unknown {outcome.Diagnostics.UnknownRouteExcluded} 条，群聊/非直接消息 {outcome.Diagnostics.NonPrivateExcluded} 条。");
+        lines.Add(outcome.FromModel
+            ? "总结方式：大模型结构化总结，来源 ID 校验已通过。"
+            : $"总结方式：模型不可用，已回退本地有依据摘要（{outcome.FallbackReason ?? "未知原因"}）。");
+        var needsConfirmation = !outcome.FromModel
+            || outcome.Diagnostics.Members.Count == 0
+            || outcome.Diagnostics.Members.Any(member => member.AdoptedCount == 0 || !member.HasDirectIdentity)
+            || outcome.Diagnostics.UnknownRouteExcluded > 0
+            || outcome.Diagnostics.NonPrivateExcluded > 0;
+        return (string.Join("\n", lines), needsConfirmation);
+    }
+
+    /// <summary>把项目名转换为安全文件名片段，避免用户配置中的非法字符阻断保存。</summary>
+    private static string MakeSafeFilePart(string value)
+    {
+        var parts = value.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries);
+        var result = string.Join("_", parts).Trim();
+        return string.IsNullOrWhiteSpace(result) ? "项目" : result;
+    }
+
     private Task<DashboardSnapshot> CreateDashboardSnapshotAsync(string dimension, string chartType) =>
         Task.Run(async () =>
         {
@@ -1520,6 +2191,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
             var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
+            var members = await _projectMemberRepository.GetAllAsync(CancellationToken.None);
             var addedDefaultKeyword = false;
             foreach (var project in projects.Where(project => keywords.All(keyword => keyword.ProjectId != project.Id)))
             {
@@ -1530,18 +2202,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             {
                 keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
             }
-            return (Projects: projects, Keywords: keywords);
+            return (Projects: projects, Keywords: keywords, Members: members);
         });
         var projects = snapshot.Projects;
         var keywords = snapshot.Keywords;
+        var members = snapshot.Members;
 
         _currentFollowedProjects = projects.Select(project => project.ProjectName).ToArray();
         _currentFollowedProjectKeywords = keywords;
+        _currentProjectMembers = members;
         var projectRows = projects
             .Select(project => new FollowedProjectRow(project.Id, project.ProjectName, project.Color))
             .ToArray();
         var keywordRows = keywords
             .Select(keyword => new FollowedProjectKeywordRow(keyword.Id, keyword.ProjectId, keyword.ProjectName, keyword.Keyword))
+            .ToArray();
+        var memberRows = members
+            .Select(member => new ProjectMemberRow(
+                member.Id,
+                member.ProjectId,
+                member.DisplayName,
+                member.Alias,
+                member.Email,
+                member.WeChatUserId,
+                member.IsReporting))
             .ToArray();
         Replace(FollowedProjects, projectRows);
         Replace(FollowedProjectKeywords, keywordRows);
@@ -1553,12 +2237,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 var projectKeywords = keywordRows
                     .Where(keyword => keyword.ProjectId == project.Id)
                     .ToArray();
+                var projectMembers = memberRows
+                    .Where(member => member.ProjectId == project.Id)
+                    .ToArray();
                 return new FollowedProjectTreeRow(
                     project.Id,
                     project.ProjectName,
                     project.Color,
                     $"{projectKeywords.Length} 个关键字",
-                    projectKeywords);
+                    $"{projectMembers.Length} 位成员",
+                    projectKeywords,
+                    projectMembers);
             }));
     }
 
@@ -1637,6 +2326,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         await _followedProjectKeywordRepository.DeleteByProjectIdAsync(row.Id, CancellationToken.None);
+        await _projectMemberRepository.DeleteByProjectIdAsync(row.Id, CancellationToken.None);
         await _followedProjectRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedProjectsAsync();
         await TodoFeature.Workbench.RefreshAsync();
@@ -1687,6 +2377,78 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadFollowedProjectsAsync();
         await LoadProjectDashboardAsync();
         SummaryText = $"已删除项目「{row.ProjectName}」的关键字「{row.Keyword}」。";
+    }
+
+    /// <summary>追加项目成员；wxid和邮箱只用于识别直接发来的周报，别名仅用于显示与诊断。</summary>
+    private async void AddInlineMemberButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: FollowedProjectTreeRow project } button)
+        {
+            return;
+        }
+
+        // 按钮Tag指向同节点输入行，固定顺序为姓名、别名、邮箱、微信wxid。
+        var panel = button.Tag as StackPanel;
+        var inputs = panel?.Children.OfType<TextBox>().ToArray() ?? Array.Empty<TextBox>();
+        var displayName = inputs.Length > 0 ? inputs[0].Text.Trim() : string.Empty;
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            SummaryText = "请输入成员姓名。";
+            if (inputs.Length > 0)
+            {
+                inputs[0].Focus();
+            }
+
+            return;
+        }
+
+        var alias = inputs.Length > 1 && inputs[1].Text.Trim() is { Length: > 0 } aliasText ? aliasText : null;
+        var email = inputs.Length > 2 && inputs[2].Text.Trim() is { Length: > 0 } emailText ? emailText : null;
+        var weChatUserId = inputs.Length > 3 && inputs[3].Text.Trim() is { Length: > 0 } weChatIdText
+            ? weChatIdText
+            : null;
+        await _projectMemberRepository.SaveAsync(
+            project.Id,
+            displayName,
+            alias,
+            email,
+            weChatUserId,
+            CancellationToken.None);
+        foreach (var input in inputs)
+        {
+            input.Text = "";
+        }
+
+        await LoadFollowedProjectsAsync();
+        SummaryText = $"已为「{project.ProjectName}」添加成员「{displayName}」。"
+            + (weChatUserId is null && email is null ? "请补充wxid或邮箱后才能归集其直接周报。" : "");
+    }
+
+    /// <summary>切换成员是否参与周报，只更新该开关，不覆盖wxid、邮箱或其他成员配置。</summary>
+    private async void ProjectMemberReportingCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox { DataContext: ProjectMemberRow row } checkBox)
+        {
+            return;
+        }
+
+        await _projectMemberRepository.SetReportingAsync(row.Id, checkBox.IsChecked == true, CancellationToken.None);
+        await LoadFollowedProjectsAsync();
+        SummaryText = $"已{(checkBox.IsChecked == true ? "启用" : "停用")}成员「{row.DisplayName}」的周报归集。";
+    }
+
+    /// <summary>删除项目节点下的单个成员。</summary>
+    private async void DeleteProjectMemberButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: ProjectMemberRow row })
+        {
+            SummaryText = "请选择要删除的成员。";
+            return;
+        }
+
+        await _projectMemberRepository.DeleteAsync(row.Id, CancellationToken.None);
+        await LoadFollowedProjectsAsync();
+        SummaryText = $"已删除成员「{row.DisplayName}」。";
     }
 
     /// <summary>按最长关键字优先匹配群名和消息正文，返回归属项目名称。</summary>
@@ -2388,6 +3150,111 @@ public sealed class HighlightableWeChatMessageRow : INotifyPropertyChanged
     }
 }
 
+/// <summary>建议状态下拉项：界面显示中文，提交时保留原始枚举值。</summary>
+public sealed record ProjectMemoryStatusOption(ProjectMemoryStatus Value, string Name);
+
+/// <summary>
+/// 可编辑的简报建议行。默认勾选，但目标状态可以在确认前人工修正；
+/// 原始建议保留基准状态和来源 ID，不会因界面编辑丢失并发校验信息。
+/// </summary>
+public sealed class ProjectMemoryProposalRow : INotifyPropertyChanged
+{
+    private bool _isSelected = true;
+    private ProjectMemoryStatus _proposedStatus;
+
+    public ProjectMemoryProposalRow(ProjectMemoryProposal proposal)
+    {
+        Proposal = proposal ?? throw new ArgumentNullException(nameof(proposal));
+        _proposedStatus = proposal.ProposedStatus;
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>未编辑的原始建议，包含稳定事项 ID、基准状态及证据白名单。</summary>
+    public ProjectMemoryProposal Proposal { get; }
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            _isSelected = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public ProjectMemoryStatus ProposedStatus
+    {
+        get => _proposedStatus;
+        set
+        {
+            _proposedStatus = value;
+            OnPropertyChanged();
+        }
+    }
+
+    // 以下只读属性直接投影领域建议，供表格列绑定。
+    public string CategoryText => ProjectMemoryDisplay.Category(Proposal.Category);
+    public string Title => Proposal.Title;
+    public string BaseStatusText => ProjectMemoryDisplay.Status(Proposal.BaseStatus);
+    public string Reason => Proposal.Reason;
+    public int SourceCount => Proposal.SourceMessageIds.Count;
+
+    /// <summary>仅替换用户可编辑的目标状态，其余证据和基准字段保持不变。</summary>
+    public ProjectMemoryProposal ToProposal() => Proposal with { ProposedStatus = ProposedStatus };
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+}
+
+/// <summary>项目记忆列表的只读界面行。</summary>
+public sealed record ProjectMemoryItemRow(
+    long Id,
+    string CategoryText,
+    string Title,
+    string StatusText,
+    string UpdatedAtText,
+    string LastStatusReason);
+
+/// <summary>来源快照行；ParticipantText 同时保留会话和发送人上下文。</summary>
+public sealed record ProjectMemorySourceRow(
+    string Source,
+    string ParticipantText,
+    string ContentSnapshot,
+    string SentAtText);
+
+/// <summary>状态时间线行，创建记录的“前状态”显示为新事项。</summary>
+public sealed record ProjectMemoryHistoryRow(string ChangedAtText, string ChangeText, string Reason);
+
+/// <summary>项目记忆领域枚举的统一中文显示规则。</summary>
+internal static class ProjectMemoryDisplay
+{
+    public static string Category(ProjectMemoryCategory category) => category switch
+    {
+        ProjectMemoryCategory.Progress => "进展",
+        ProjectMemoryCategory.Risk => "风险",
+        ProjectMemoryCategory.Action => "行动",
+        _ => "未知"
+    };
+
+    /// <summary>可空状态用于新事项和创建历史，不伪造一个领域状态。</summary>
+    public static string Status(ProjectMemoryStatus? status) => status switch
+    {
+        null => "新事项",
+        ProjectMemoryStatus.Open => "未开始",
+        ProjectMemoryStatus.InProgress => "进行中",
+        ProjectMemoryStatus.Blocked => "阻塞",
+        ProjectMemoryStatus.Shelved => "已搁置",
+        ProjectMemoryStatus.Completed => "已完成",
+        ProjectMemoryStatus.Discarded => "已废弃",
+        _ => "未知"
+    };
+
+    /// <summary>完成和废弃共用终态折叠规则，但语义仍严格区分。</summary>
+    public static bool IsTerminal(ProjectMemoryStatus status) =>
+        status is ProjectMemoryStatus.Completed or ProjectMemoryStatus.Discarded;
+}
+
 /// <summary>项目汇总行数据：按项目聚合的待办数量与高优先级数量。</summary>
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
 
@@ -2432,10 +3299,31 @@ public sealed record FollowedChatRow(long Id, string ChatName);
 public sealed record FollowedProjectRow(long Id, string ProjectName, string Color);
 public sealed record FollowedProjectKeywordRow(long Id, long ProjectId, string ProjectName, string Keyword);
 
+/// <summary>项目成员行数据：用于 UI 展示与删除操作。</summary>
+public sealed record ProjectMemberRow(
+    long Id,
+    long ProjectId,
+    string DisplayName,
+    string? Alias,
+    string? Email,
+    string? WeChatUserId,
+    bool IsReporting)
+{
+    /// <summary>界面上把别名与邮箱拼成一行说明；缺项自动省略。</summary>
+    public string Detail =>
+        string.Join(" · ", new[]
+        {
+            string.IsNullOrWhiteSpace(Alias) ? null : $"别名：{Alias}",
+            string.IsNullOrWhiteSpace(Email) ? null : Email
+        }.Where(part => part is not null));
+}
+
 /// <summary>关注设置的层级节点：一个项目 + 它名下的全部关键字，供可折叠树绑定。</summary>
 public sealed record FollowedProjectTreeRow(
     long Id,
     string ProjectName,
     string Color,
     string KeywordSummary,
-    IReadOnlyList<FollowedProjectKeywordRow> Keywords);
+    string MemberSummary,
+    IReadOnlyList<FollowedProjectKeywordRow> Keywords,
+    IReadOnlyList<ProjectMemberRow> Members);

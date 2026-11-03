@@ -51,6 +51,9 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 sent_at,
                 captured_at,
                 is_mention_me,
+                sender_external_id,
+                chat_type,
+                direction,
                 raw_excerpt
             )
             VALUES (
@@ -64,6 +67,9 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 $sentAt,
                 $capturedAt,
                 $isMentionMe,
+                $senderExternalId,
+                $chatType,
+                $direction,
                 $rawExcerpt
             )
             ON CONFLICT(source, source_message_key) DO NOTHING
@@ -96,6 +102,45 @@ public sealed class SqliteMessageRepository : IMessageRepository
         return result is not null;
     }
 
+    /// <inheritdoc />
+    public async Task<bool> UpdateRoutingMetadataIfUnknownAsync(
+        string source,
+        string sourceMessageKey,
+        string? senderExternalId,
+        ChatType chatType,
+        Direction direction,
+        CancellationToken cancellationToken)
+    {
+        // 新记录同样完全没有路由证据时无需写库，更不能用 Unknown 清除已有发送人 ID。
+        var normalizedSenderId = string.IsNullOrWhiteSpace(senderExternalId)
+            ? null
+            : senderExternalId.Trim();
+        if (normalizedSenderId is null && chatType == ChatType.Unknown && direction == Direction.Unknown)
+        {
+            return false;
+        }
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE messages
+            SET sender_external_id = COALESCE($senderExternalId, sender_external_id),
+                chat_type = $chatType,
+                direction = $direction
+            WHERE source = $source
+              AND source_message_key = $sourceMessageKey
+              AND chat_type = 'Unknown'
+              AND direction = 'Unknown';
+            """;
+        command.Parameters.AddWithValue("$source", source);
+        command.Parameters.AddWithValue("$sourceMessageKey", sourceMessageKey);
+        command.Parameters.AddWithValue("$senderExternalId", (object?)normalizedSenderId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$chatType", chatType.ToString());
+        command.Parameters.AddWithValue("$direction", direction.ToString());
+        // 并发重复采集也由 WHERE 条件保证只补 Unknown，不覆盖已确认路由。
+        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+    }
+
     /// <summary>获取最近 N 条消息（按发送时间倒序）。</summary>
     public async Task<IReadOnlyList<Message>> GetRecentAsync(int limit, CancellationToken cancellationToken)
     {
@@ -113,7 +158,10 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 message_type,
                 sent_at,
                 captured_at,
-                is_mention_me
+                is_mention_me,
+                sender_external_id,
+                chat_type,
+                direction
             FROM messages
             ORDER BY sent_at DESC, id DESC
             LIMIT $limit;
@@ -125,6 +173,125 @@ public sealed class SqliteMessageRepository : IMessageRepository
         while (await reader.ReadAsync(cancellationToken))
         {
             messages.Add(ReadMessage(reader));
+        }
+
+        return messages;
+    }
+
+    /// <summary>获取发送时间落在 [from, to] 区间内的消息（含边界，按发送时间倒序、限量）。</summary>
+    public async Task<IReadOnlyList<Message>> GetSentBetweenAsync(
+        DateTimeOffset from,
+        DateTimeOffset to,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                id,
+                source,
+                source_message_key,
+                chat_session_id,
+                chat_name,
+                sender_name,
+                content,
+                message_type,
+                sent_at,
+                captured_at,
+                is_mention_me,
+                sender_external_id,
+                chat_type,
+                direction
+            FROM messages
+            WHERE sent_at >= $from AND sent_at <= $to
+            ORDER BY sent_at DESC, id DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$from", from.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$to", to.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$limit", limit);
+
+        var messages = new List<Message>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            messages.Add(ReadMessage(reader));
+        }
+
+        return messages;
+    }
+
+    /// <summary>
+    /// 以 sent_at、id 为游标稳定分页读取完整闭区间；每页只限制单次 SQL 行数，不截断窗口总量。
+    /// 使用键集分页而非 OFFSET，避免逐页扫描已读数据，也避免相同发送时间的消息被跳过。
+    /// </summary>
+    public async Task<IReadOnlyList<Message>> GetAllSentBetweenAsync(
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken)
+    {
+        const int pageSize = 500;
+        var messages = new List<Message>();
+        string? cursorSentAt = null;
+        long cursorId = 0;
+
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        while (true)
+        {
+            await using var command = connection.CreateCommand();
+            // 第一页没有游标；后续页严格从上一页最后一个 (sent_at,id) 之后继续。
+            var cursorClause = cursorSentAt is null
+                ? string.Empty
+                : " AND (sent_at > $cursorSentAt OR (sent_at = $cursorSentAt AND id > $cursorId))";
+            command.CommandText = $"""
+                SELECT
+                    id,
+                    source,
+                    source_message_key,
+                    chat_session_id,
+                    chat_name,
+                    sender_name,
+                    content,
+                    message_type,
+                    sent_at,
+                    captured_at,
+                    is_mention_me,
+                    sender_external_id,
+                    chat_type,
+                    direction
+                FROM messages
+                WHERE sent_at >= $from AND sent_at <= $to
+                {cursorClause}
+                ORDER BY sent_at ASC, id ASC
+                LIMIT $limit;
+                """;
+            command.Parameters.AddWithValue("$from", from.ToString("O", CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$to", to.ToString("O", CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$limit", pageSize);
+            if (cursorSentAt is not null)
+            {
+                command.Parameters.AddWithValue("$cursorSentAt", cursorSentAt);
+                command.Parameters.AddWithValue("$cursorId", cursorId);
+            }
+
+            var page = new List<Message>(pageSize);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                page.Add(ReadMessage(reader));
+            }
+
+            messages.AddRange(page);
+            if (page.Count < pageSize)
+            {
+                break;
+            }
+
+            // 保留完整时间文本作为主游标，id 作为同时间消息的唯一次序。
+            var last = page[^1];
+            cursorSentAt = last.SentAt.ToString("O", CultureInfo.InvariantCulture);
+            cursorId = last.Id;
         }
 
         return messages;
@@ -165,7 +332,10 @@ public sealed class SqliteMessageRepository : IMessageRepository
                     message_type,
                     sent_at,
                     captured_at,
-                    is_mention_me
+                    is_mention_me,
+                    sender_external_id,
+                    chat_type,
+                    direction
                 FROM messages
                 WHERE id IN ({string.Join(", ", placeholders)});
                 """;
@@ -258,7 +428,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
 
             command.CommandText = $"""
                 SELECT id, source, source_message_key, chat_session_id, chat_name,
-                       sender_name, content, message_type, sent_at, captured_at, is_mention_me
+                       sender_name, content, message_type, sent_at, captured_at, is_mention_me, sender_external_id, chat_type, direction
                 FROM messages
                 WHERE {string.Join(" OR ", predicates)};
                 """;
@@ -288,7 +458,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
         command.Transaction = transaction;
         command.CommandText = """
             SELECT id, source, source_message_key, chat_session_id, chat_name,
-                   sender_name, content, message_type, sent_at, captured_at, is_mention_me
+                   sender_name, content, message_type, sent_at, captured_at, is_mention_me, sender_external_id, chat_type, direction
             FROM messages
             WHERE id = $id;
             """;
@@ -338,7 +508,7 @@ public sealed class SqliteMessageRepository : IMessageRepository
         var order = newer ? "ASC" : "DESC";
         command.CommandText = $"""
             SELECT id, source, source_message_key, chat_session_id, chat_name,
-                   sender_name, content, message_type, sent_at, captured_at, is_mention_me
+                   sender_name, content, message_type, sent_at, captured_at, is_mention_me, sender_external_id, chat_type, direction
             FROM messages
             WHERE sent_at {comparison} $sentAt
                OR (sent_at = $sentAt AND id {comparison} $id)
@@ -527,7 +697,10 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 message_type,
                 sent_at,
                 captured_at,
-                is_mention_me
+                is_mention_me,
+                sender_external_id,
+                chat_type,
+                direction
             FROM messages
             WHERE {whereClause}
             ORDER BY sent_at DESC, id DESC
@@ -545,7 +718,10 @@ public sealed class SqliteMessageRepository : IMessageRepository
                 message_type,
                 sent_at,
                 captured_at,
-                is_mention_me
+                is_mention_me,
+                sender_external_id,
+                chat_type,
+                direction
             FROM messages
             ORDER BY sent_at DESC, id DESC
             LIMIT $limit OFFSET $offset;
@@ -614,6 +790,13 @@ public sealed class SqliteMessageRepository : IMessageRepository
         command.Parameters.AddWithValue("$sentAt", message.SentAt.ToString("O"));
         command.Parameters.AddWithValue("$capturedAt", message.CapturedAt.ToString("O"));
         command.Parameters.AddWithValue("$isMentionMe", message.IsMentionMe ? 1 : 0);
+        // 路由字段按字符串保存；发送人稳定 ID 没有可靠证据时必须写 NULL。
+        command.Parameters.AddWithValue(
+            "$senderExternalId",
+            (object?)(string.IsNullOrWhiteSpace(message.SenderExternalId) ? null : message.SenderExternalId.Trim())
+            ?? DBNull.Value);
+        command.Parameters.AddWithValue("$chatType", message.ChatType.ToString());
+        command.Parameters.AddWithValue("$direction", message.Direction.ToString());
         // 原始摘要截断到 200 字
         command.Parameters.AddWithValue("$rawExcerpt", message.Content.Length <= 200 ? message.Content : message.Content[..200]);
     }
@@ -621,6 +804,15 @@ public sealed class SqliteMessageRepository : IMessageRepository
     /// <summary>从 DataReader 映射为 Message 实体。</summary>
     internal static Message ReadMessage(SqliteDataReader reader, int offset = 0)
     {
+        // 损坏或未来版本的枚举文本按 Unknown 降级，不能把不可靠路由提升为私聊收件。
+        var chatType = Enum.TryParse<ChatType>(reader.GetString(offset + 12), out var parsedChatType)
+            && Enum.IsDefined(parsedChatType)
+            ? parsedChatType
+            : ChatType.Unknown;
+        var direction = Enum.TryParse<Direction>(reader.GetString(offset + 13), out var parsedDirection)
+            && Enum.IsDefined(parsedDirection)
+            ? parsedDirection
+            : Direction.Unknown;
         return new Message(
             Id: reader.GetInt64(offset),
             Source: reader.GetString(offset + 1),
@@ -632,6 +824,9 @@ public sealed class SqliteMessageRepository : IMessageRepository
             MessageType: Enum.Parse<MessageType>(reader.GetString(offset + 7)),
             SentAt: DateTimeOffset.Parse(reader.GetString(offset + 8)),
             CapturedAt: DateTimeOffset.Parse(reader.GetString(offset + 9)),
-            IsMentionMe: reader.GetInt32(offset + 10) == 1);
+            IsMentionMe: reader.GetInt32(offset + 10) == 1,
+            SenderExternalId: reader.IsDBNull(offset + 11) ? null : reader.GetString(offset + 11),
+            ChatType: chatType,
+            Direction: direction);
     }
 }

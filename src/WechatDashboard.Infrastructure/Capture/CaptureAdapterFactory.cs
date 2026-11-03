@@ -213,7 +213,12 @@ public static class CaptureAdapterFactory
         var inbox = SinopecMailArchiveLocator.FindInbox()
             ?? throw new InvalidOperationException(
                 "未找到石化邮客户端的本地邮件缓存，请先登录石化邮并完成一次收信。");
-        return new MboxMailCaptureAdapter(new MboxMailArchiveReader(inbox), MailSourcePolicy.SinopecMail);
+        // 本地缓存不需要密码，但唯一 To 判定仍复用当前已保存的采集账号。
+        var currentAccount = new ProtectedImapCredentialStore().Load()?.Account;
+        return new MboxMailCaptureAdapter(
+            new MboxMailArchiveReader(inbox),
+            MailSourcePolicy.SinopecMail,
+            currentAccount: currentAccount);
     }
 
     /// <summary>

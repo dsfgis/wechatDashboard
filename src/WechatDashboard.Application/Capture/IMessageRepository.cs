@@ -12,11 +12,37 @@ public interface IMessageRepository
     /// <summary>判断指定来源+消息键是否已存在（用于去重）。</summary>
     Task<bool> ExistsAsync(string source, string sourceMessageKey, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// 重复采集时补充路由元数据；只有旧记录的会话类型和方向都为 Unknown 才允许更新，
+    /// 已知路由绝不覆盖，也不触碰正文、分类、评分或待办。
+    /// </summary>
+    /// <returns>实际补充了元数据时返回 true。</returns>
+    Task<bool> UpdateRoutingMetadataIfUnknownAsync(
+        string source,
+        string sourceMessageKey,
+        string? senderExternalId,
+        ChatType chatType,
+        Direction direction,
+        CancellationToken cancellationToken);
+
     /// <summary>保存一条消息并返回带 Id 的实体。</summary>
     Task<Message> SaveAsync(Message message, CancellationToken cancellationToken);
 
     /// <summary>获取最近 N 条消息（按采集时间倒序）。</summary>
     Task<IReadOnlyList<Message>> GetRecentAsync(int limit, CancellationToken cancellationToken);
+
+    /// <summary>获取发送时间落在 [from, to] 区间内的消息（按发送时间倒序、限量），用于跨源项目简报取数。</summary>
+    Task<IReadOnlyList<Message>> GetSentBetweenAsync(
+        DateTimeOffset from,
+        DateTimeOffset to,
+        int limit,
+        CancellationToken cancellationToken);
+
+    /// <summary>按 sent_at、id 稳定分页读取完整闭区间 [from, to]，不限制窗口内消息总数。</summary>
+    Task<IReadOnlyList<Message>> GetAllSentBetweenAsync(
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken);
 
     /// <summary>按消息 ID 集合精确查询消息。</summary>
     Task<IReadOnlyList<Message>> GetByIdsAsync(IReadOnlyCollection<long> ids, CancellationToken cancellationToken);

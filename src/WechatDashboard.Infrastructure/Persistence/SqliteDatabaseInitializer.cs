@@ -59,6 +59,23 @@ public sealed class SqliteDatabaseInitializer
             cancellationToken);
         await ApplyProjectAssignmentMigrationAsync(connection, cancellationToken);
         await ApplyTodoSourceMessagesMigrationAsync(connection, cancellationToken);
+        await ApplyProjectMembersMigrationAsync(connection, cancellationToken);
+        // v8 只追加路由与成员身份字段，既有迁移及其校验和保持不变。
+        await ApplyMigrationAsync(
+            connection,
+            version: 8,
+            name: "message-routing-member-identity",
+            checksum: "message-routing-member-identity-v1",
+            sql: MessageRoutingMemberIdentityMigrationSql,
+            cancellationToken);
+        // v9 只追加项目记忆表，不修改既有消息、待办及旧迁移校验和。
+        await ApplyMigrationAsync(
+            connection,
+            version: 9,
+            name: "project-memory-briefing-tracking",
+            checksum: "project-memory-briefing-tracking-v1",
+            sql: ProjectMemoryMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>
@@ -107,6 +124,20 @@ public sealed class SqliteDatabaseInitializer
             await transaction.RollbackAsync(CancellationToken.None);
             throw;
         }
+    }
+
+    /// <summary>v7：项目成员表，用于在周报中按成员归集每周工作内容并带出收件人。</summary>
+    private static async Task ApplyProjectMembersMigrationAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await ApplyMigrationAsync(
+            connection,
+            version: 7,
+            name: "project-members",
+            checksum: "project-members-v1",
+            sql: ProjectMembersMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>执行一条无返回 SQL。</summary>
@@ -485,6 +516,95 @@ public sealed class SqliteDatabaseInitializer
         SELECT id, source_message_id, COALESCE(updated_at, created_at), 1
         FROM todo_items
         WHERE source_message_id IS NOT NULL;
+        """;
+
+    /// <summary>v7：项目成员表，保存成员姓名、用于匹配发送人的别名与周报收件邮箱。</summary>
+    private const string ProjectMembersMigrationSql = """
+        CREATE TABLE IF NOT EXISTS project_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            display_name TEXT NOT NULL,
+            alias TEXT NULL,
+            email TEXT NULL,
+            is_reporting INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_id, display_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_project_members_project
+            ON project_members(project_id, id);
+        """;
+
+    /// <summary>
+    /// v8：补充消息路由与成员微信身份。SQLite 的 ADD COLUMN 会把非空默认值回填到历史行，
+    /// 因而历史消息的会话类型和方向均为 Unknown，不会被误认成私聊收件。
+    /// </summary>
+    private const string MessageRoutingMemberIdentityMigrationSql = """
+        ALTER TABLE messages ADD COLUMN sender_external_id TEXT NULL;
+        ALTER TABLE messages ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'Unknown';
+        ALTER TABLE messages ADD COLUMN direction TEXT NOT NULL DEFAULT 'Unknown';
+        ALTER TABLE project_members ADD COLUMN wechat_user_id TEXT NULL;
+        """;
+
+    /// <summary>
+    /// v9：项目记忆由事项、来源快照和状态历史组成。
+    /// 非终态标题使用部分唯一索引去重；删除原消息只清空外键，不删除已保存的证据文本。
+    /// </summary>
+    private const string ProjectMemoryMigrationSql = """
+        CREATE TABLE project_memory_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            category TEXT NOT NULL CHECK(category IN ('Progress', 'Risk', 'Action')),
+            title TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('Open', 'InProgress', 'Blocked', 'Shelved', 'Completed', 'Discarded')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_mentioned_at TEXT NOT NULL,
+            last_status_reason TEXT NULL,
+            FOREIGN KEY(project_id) REFERENCES followed_projects(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX ux_project_memory_active_title
+            ON project_memory_items(project_id, normalized_title)
+            WHERE status NOT IN ('Completed', 'Discarded');
+        CREATE INDEX idx_project_memory_project_status
+            ON project_memory_items(project_id, status, updated_at DESC);
+
+        CREATE TABLE project_memory_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            message_id INTEGER NULL,
+            source TEXT NOT NULL,
+            source_message_key TEXT NOT NULL,
+            chat_name TEXT NOT NULL,
+            sender_name TEXT NOT NULL,
+            content_snapshot TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(item_id, source, source_message_key),
+            FOREIGN KEY(item_id) REFERENCES project_memory_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX idx_project_memory_sources_item
+            ON project_memory_sources(item_id, sent_at DESC, id DESC);
+
+        CREATE TABLE project_memory_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            previous_status TEXT NULL CHECK(previous_status IS NULL OR previous_status IN ('Open', 'InProgress', 'Blocked', 'Shelved', 'Completed', 'Discarded')),
+            new_status TEXT NOT NULL CHECK(new_status IN ('Open', 'InProgress', 'Blocked', 'Shelved', 'Completed', 'Discarded')),
+            reason TEXT NOT NULL,
+            evidence_message_id INTEGER NULL,
+            change_source TEXT NOT NULL CHECK(change_source IN ('Briefing', 'Manual')),
+            changed_at TEXT NOT NULL,
+            FOREIGN KEY(item_id) REFERENCES project_memory_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(evidence_message_id) REFERENCES messages(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX idx_project_memory_history_item
+            ON project_memory_status_history(item_id, changed_at DESC, id DESC);
         """;
 
     private const string SchemaSql = """

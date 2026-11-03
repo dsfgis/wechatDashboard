@@ -10,6 +10,9 @@ using WechatDashboard.App.Services;
 using WechatDashboard.App.ViewModels.Messages;
 using WechatDashboard.App.ViewModels.Settings;
 using WechatDashboard.App.ViewModels.Todos;
+using WechatDashboard.Application.Agent;
+using WechatDashboard.Application.Briefing;
+using WechatDashboard.Application.Weekly;
 using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Capture;
@@ -17,7 +20,6 @@ using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
 using WechatDashboard.Application.Urgency;
-using WechatDashboard.Application.Agent;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
@@ -47,6 +49,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Manual Agent priority stays isolated and rolls back with Todo failures", TestManualAgentPriorityTransactionAsync),
     ("DeepSeek model uses saved API key and preserves environment fallback", TestDeepSeekMessageActionModelAsync),
     ("DeepSeek mention analysis returns creation decision, priority and summary JSON", TestDeepSeekMentionAnalysisAsync),
+    ("DeepSeek project briefing returns summary and section arrays JSON", TestDeepSeekProjectBriefingModelAsync),
+    ("Project briefing service merges cross-source messages for one project with safe fallback", TestProjectBriefingServiceAsync),
+    // 项目记忆使用独立测试文件，覆盖 v9、稳定 ID、事务回滚、证据保留和模型校验。
+    ("Project memory schema v9 upgrades old databases and is idempotent", WechatDashboard.Tests.ProjectMemoryTests.SchemaV9UpgradesAndIsIdempotentAsync),
+    ("Project memory keeps stable IDs across briefings and applies proposals idempotently", WechatDashboard.Tests.ProjectMemoryTests.RepositoryTracksItemsAcrossBriefingsAsync),
+    ("Project memory rejects stale batches and preserves evidence snapshots", WechatDashboard.Tests.ProjectMemoryTests.RepositoryRejectsStaleBatchesAndRetainsEvidenceAsync),
+    ("Project briefing validates memory items and propagates cancellation", WechatDashboard.Tests.ProjectMemoryTests.BriefingValidatesStructuredItemsAndFallsBackAsync),
     ("Reminder snooze preserves history without changing the Todo due time", TestReminderSnoozeAsync),
     ("Reminder worker claims and delivers a due reminder only once", TestReminderWorkerAsync),
     ("Reminder worker recovers a stale dispatch claim after restart", TestReminderWorkerRecoversStaleClaimAsync),
@@ -126,6 +135,14 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync),
     ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync),
     ("Project keyword repository supports multiple keywords per project", TestFollowedProjectKeywordRepositoryAsync),
+    ("Project member repository round-trips members and cleans up with the project", TestProjectMemberRepositoryAsync),
+    ("Weekly report collector merges each member's cross-source messages in one week window", TestWeeklyReportCollectorAsync),
+    ("Weekly report collector uses strict identities and reads the complete window", WechatDashboard.Tests.WeeklyReportServiceTests.CollectorUsesStrictIdentityAndCompleteWindowAsync),
+    ("Weekly report service validates sources and owners with safe fallback", WechatDashboard.Tests.WeeklyReportServiceTests.ServiceValidatesModelAndFallsBackAsync),
+    ("Weekly report service batches oversized member contributions", WechatDashboard.Tests.WeeklyReportServiceTests.ServiceBatchesLongMemberContributionsAsync),
+    ("Weekly report Todo query isolates project and completion window", WechatDashboard.Tests.WeeklyReportServiceTests.TodoRepositorySelectsWeeklyScopeAsync),
+    ("Weekly report exporter preserves the real template and maps every item", WechatDashboard.Tests.WeeklyReportExporterTests.ExportsAllItemsIntoPreservedTemplateCopyAsync),
+    ("Sinopec mail routing accepts only a unique direct recipient", MailCaptureTests.TestMailDirectRoutingAsync),
     ("Project settings exposes a fixed-palette editable color column", TestProjectColorSettingsXamlAsync),
 };
 
@@ -1428,6 +1445,226 @@ static async Task TestDeepSeekMentionAnalysisAsync()
     var skipAnalysis = await skipModel.AnalyzeMentionAsync(message, CancellationToken.None);
     AssertFalse(skipAnalysis.ShouldCreate, "The model's no-Todo decision must survive JSON parsing.");
     AssertEqual(PriorityLevel.P3, skipAnalysis.Priority, "A skipped item should retain its analyzed priority.");
+}
+
+static async Task TestDeepSeekProjectBriefingModelAsync()
+{
+    // 固定响应只经过假 HTTP handler，验证协议而不会访问真实 DeepSeek 服务。
+    static string CreateResponse(string content) => JsonSerializer.Serialize(new
+    {
+        choices = new[]
+        {
+            new { finish_reason = "stop", message = new { content } }
+        }
+    });
+
+    var from = new DateTimeOffset(2026, 10, 28, 0, 0, 0, TimeSpan.FromHours(8));
+    var to = new DateTimeOffset(2026, 10, 30, 18, 0, 0, TimeSpan.FromHours(8));
+    var request = new ProjectBriefingRequest(
+        "智能管线",
+        from,
+        to,
+        new[]
+        {
+            new BriefingMessage("WeChat", "管线提升项目群", "王工", "联调环境已就绪", from.AddHours(10), 101),
+            new BriefingMessage("SinopecMail", "石化邮", "张总", "请确认验收时间", from.AddHours(12), 102)
+        })
+    {
+        // 既有事项用于验证模型协议中的稳定 ID 白名单。
+        ExistingItems = new[]
+        {
+            new ProjectBriefingExistingItem(7, ProjectMemoryCategory.Action, "确认验收时间", ProjectMemoryStatus.Open)
+        }
+    };
+
+    var handler = new RecordingModelHttpMessageHandler(CreateResponse(
+        "{\"summary\":\"  联调整体推进顺利。  \",\"highlights\":[\" 联调环境就绪 \",\"  \",\"验收安排待确认 \"],\"risks\":[],\"actions\":[\" 确认验收时间 \"],\"items\":[{\"itemId\":7,\"category\":\"Action\",\"title\":\" 确认验收时间 \",\"proposedStatus\":\"Open\",\"reason\":\" 需要确认验收窗口 \",\"sourceMessageIds\":[102]}]}"));
+    using var http = new HttpClient(handler);
+    var model = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-briefing-test", http);
+
+    var briefing = await model.SummarizeProjectAsync(request, CancellationToken.None);
+
+    AssertEqual("联调整体推进顺利。", briefing.Summary, "The briefing summary should be trimmed.");
+    AssertEqual(2, briefing.Highlights.Count, "Blank highlight entries should be dropped.");
+    AssertEqual("联调环境就绪", briefing.Highlights[0], "Highlight entries should be trimmed.");
+    AssertEqual(0, briefing.Risks.Count, "An empty risk array should stay empty.");
+    AssertEqual(1, briefing.Actions.Count, "Action entries should be preserved.");
+    AssertEqual("确认验收时间", briefing.Actions[0], "Action entries should be trimmed.");
+    // 结构化事项也必须完整解析，供后续人工批量确认入库。
+    AssertEqual(1, briefing.Items.Count, "Structured memory items should be preserved.");
+    AssertEqual(7L, briefing.Items[0].ItemId, "An existing stable item ID should round-trip.");
+    AssertEqual("确认验收时间", briefing.Items[0].Title, "Structured item titles should be trimmed.");
+    AssertEqual(102L, briefing.Items[0].SourceMessageIds.Single(), "Evidence IDs should remain numeric.");
+    AssertEqual("sk-briefing-test", handler.AuthorizationParameter, "Briefing requests must use the saved Bearer key.");
+
+    using var body = JsonDocument.Parse(handler.RequestBody
+        ?? throw new InvalidOperationException("Briefing request body was not recorded."));
+    AssertEqual(2500, body.RootElement.GetProperty("max_tokens").GetInt32(),
+        "The briefing output should reserve bounded space for text and structured memory items.");
+    AssertEqual("json_object", body.RootElement.GetProperty("response_format").GetProperty("type").GetString(),
+        "The briefing should require a JSON object response.");
+    AssertEqual("disabled", body.RootElement.GetProperty("thinking").GetProperty("type").GetString(),
+        "The built-in DeepSeek briefing should disable thinking.");
+
+    // 用户输入包含项目名、时间窗口、请求内消息和当前项目的既有事项白名单。
+    var requestMessages = body.RootElement.GetProperty("messages");
+    AssertEqual(2, requestMessages.GetArrayLength(), "A briefing should contain one system and one user message.");
+    var userContent = requestMessages[1].GetProperty("content").GetString()
+        ?? throw new InvalidOperationException("Briefing user input was missing.");
+    using var input = JsonDocument.Parse(userContent);
+    AssertEqual("智能管线", input.RootElement.GetProperty("projectName").GetString(),
+        "The briefing input should carry the project name.");
+    AssertEqual(2, input.RootElement.GetProperty("messages").GetArrayLength(),
+        "The briefing input should only contain the requested messages.");
+    AssertEqual("SinopecMail", input.RootElement.GetProperty("messages")[1].GetProperty("source").GetString(),
+        "Cross-source messages should be sent in chronological order.");
+    AssertEqual(102L, input.RootElement.GetProperty("messages")[1].GetProperty("id").GetInt64(),
+        "The model request should expose real database message IDs for evidence.");
+    AssertEqual(1, input.RootElement.GetProperty("existingItems").GetArrayLength(),
+        "Only current-project existing items should be sent to the model.");
+
+    // 空消息列表必须直接拒绝，不产生模型调用。
+    var rejectedEmptyInput = false;
+    try
+    {
+        await model.SummarizeProjectAsync(
+            new ProjectBriefingRequest("智能管线", from, to, Array.Empty<BriefingMessage>()),
+            CancellationToken.None);
+    }
+    catch (InvalidOperationException)
+    {
+        rejectedEmptyInput = true;
+    }
+
+    AssertTrue(rejectedEmptyInput, "An empty message list must be rejected before any model call.");
+
+    // 缺少条目字段的响应按格式无效处理，由调用方回退本地统计。
+    var invalidHandler = new RecordingModelHttpMessageHandler(CreateResponse("{\"summary\":\"缺少条目字段\"}"));
+    using var invalidHttp = new HttpClient(invalidHandler);
+    var invalidModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment("sk-briefing-test", invalidHttp);
+    var rejectedInvalidResponse = false;
+    try
+    {
+        await invalidModel.SummarizeProjectAsync(request, CancellationToken.None);
+    }
+    catch (InvalidOperationException)
+    {
+        rejectedInvalidResponse = true;
+    }
+
+    AssertTrue(rejectedInvalidResponse, "A briefing response without section arrays must be treated as invalid.");
+}
+
+static async Task TestProjectBriefingServiceAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var to = new DateTimeOffset(2026, 10, 30, 18, 0, 0, TimeSpan.FromHours(8));
+    var from = new DateTimeOffset(2026, 10, 28, 0, 0, 0, TimeSpan.FromHours(8));
+
+    // 三个来源的同一项目消息 + 无关消息 + 窗口外旧消息 + 其他项目消息。
+    static Message SourceMessage(
+        string source,
+        string chatName,
+        string senderName,
+        string content,
+        DateTimeOffset sentAt,
+        bool isMentionMe) => new(
+            Id: 0,
+            Source: source,
+            SourceMessageKey: $"briefing-{source}-{Guid.NewGuid():N}",
+            ChatSessionId: 42,
+            ChatName: chatName,
+            SenderName: senderName,
+            Content: content,
+            SentAt: sentAt,
+            CapturedAt: sentAt,
+            MessageType: MessageType.Text,
+            IsMentionMe: isMentionMe);
+
+    var saved = new List<Message>();
+    // 微信，群名命中关键词；正文超长用于验证截断。
+    saved.Add(await messageRepository.SaveAsync(
+        SourceMessage("WeChat", "管线提升项目群", "王工", "管线提升联调环境已就绪，" + new string('细', 500), to.AddHours(-10), false),
+        CancellationToken.None));
+    // 石化通，正文命中关键词，且含风险词。
+    saved.Add(await messageRepository.SaveAsync(
+        SourceMessage("Shihuatong", "石化通工作群", "李经理", "管线提升上线被阻塞，需要协调窗口", to.AddHours(-8), false),
+        CancellationToken.None));
+    // 石化邮，正文命中关键词，且 @我。
+    saved.Add(await messageRepository.SaveAsync(
+        SourceMessage("SinopecMail", "石化邮", "张总", "管线提升验收时间请确认", to.AddHours(-6), true),
+        CancellationToken.None));
+    // 无关消息：不命中任何关键词。
+    saved.Add(await messageRepository.SaveAsync(
+        SourceMessage("WeChat", "闲聊群", "赵工", "今晚聚餐", to.AddHours(-5), false),
+        CancellationToken.None));
+    // 窗口外旧消息：群名命中但时间早于窗口。
+    saved.Add(await messageRepository.SaveAsync(
+        SourceMessage("WeChat", "管线提升项目群", "王工", "旧消息", to.AddDays(-10), false),
+        CancellationToken.None));
+    // 其他项目消息：命中另一个项目的关键词。
+    saved.Add(await messageRepository.SaveAsync(
+        SourceMessage("WeChat", "积分商城群", "钱工", "积分商城需求评审", to.AddHours(-4), false),
+        CancellationToken.None));
+
+    // 两个项目的关键词：与待办归并共用同一套匹配语义。
+    var keywords = new[]
+    {
+        new FollowedProjectKeyword(1, 10, "智能管线", "管线提升", DateTimeOffset.Now),
+        new FollowedProjectKeyword(2, 20, "积分商城", "积分商城", DateTimeOffset.Now)
+    };
+
+    var model = new RecordingProjectBriefingModel(_ => new ProjectBriefing(
+        "联调推进中",
+        new[] { "联调环境就绪" },
+        new[] { "上线窗口被阻塞" },
+        new[] { "确认验收时间" }));
+    var service = new ProjectBriefingService(messageRepository, model);
+
+    var outcome = await service.GenerateAsync(10, "智能管线", keywords, from, to, CancellationToken.None);
+
+    AssertTrue(outcome.FromModel, "A configured healthy model should produce the briefing.");
+    AssertEqual(3, outcome.MatchedCount, "Only in-window messages matching the project keywords count.");
+    AssertEqual(3, outcome.SentToModelCount, "The bounded request should carry all three matched messages.");
+    AssertEqual(1, model.Requests.Count, "The model should be called exactly once per briefing.");
+
+    var sent = model.Requests[0];
+    AssertEqual("智能管线", sent.ProjectName, "The request should carry the project name.");
+    AssertEqual(3, sent.Messages.Count, "Only matched cross-source messages should reach the model.");
+    // 送入模型的消息按时间正序排列，正文截断到服务层上限。
+    AssertEqual("WeChat", sent.Messages[0].Source, "The oldest matched message should come first.");
+    AssertEqual("Shihuatong", sent.Messages[1].Source, "Cross-source messages should be merged in time order.");
+    AssertEqual("SinopecMail", sent.Messages[2].Source, "The newest matched message should come last.");
+    AssertTrue(sent.Messages.All(message => message.Content.Length <= ProjectBriefingService.MaxContentChars),
+        "Message content sent to the model must be truncated to the bounded length.");
+    AssertTrue(sent.Messages.All(message => !message.Content.Contains("旧消息")),
+        "Out-of-window messages must not reach the model.");
+
+    // 模型失败：回退本地统计摘要，不向调用方抛出异常。
+    var failing = new RecordingProjectBriefingModel(_ => throw new InvalidOperationException("模型调用超时，可稍后重试。"));
+    var fallbackService = new ProjectBriefingService(messageRepository, failing);
+    var fallback = await fallbackService.GenerateAsync(10, "智能管线", keywords, from, to, CancellationToken.None);
+
+    AssertFalse(fallback.FromModel, "A failing model must fall back to the local statistical briefing.");
+    AssertTrue(fallback.Briefing.Summary.Contains("3 条相关消息"),
+        "The fallback summary should report the matched message count.");
+    AssertTrue(fallback.Briefing.Summary.Contains("模型不可用"),
+        "The fallback summary should tell the user why it is statistical.");
+    AssertTrue(fallback.Briefing.Risks.Count > 0,
+        "The fallback should surface risk-keyword messages as risks.");
+    AssertTrue(fallback.Briefing.Actions.Count > 0,
+        "The fallback should surface mention-me messages as actions.");
+
+    // 没有匹配消息：不调用模型，直接给空简报。
+    var empty = await service.GenerateAsync(30, "不存在项目", keywords, from, to, CancellationToken.None);
+    AssertEqual(0, empty.MatchedCount, "An unmatched project should report zero matched messages.");
+    AssertEqual(1, model.Requests.Count, "No additional model call should happen for an unmatched project.");
+    AssertTrue(empty.Briefing.Summary.Contains("没有匹配关注关键词的消息"),
+        "The empty briefing should explain that no keyword-matching message exists.");
 }
 
 static async Task TestReminderSnoozeAsync()
@@ -4998,8 +5235,13 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
         13, 30, 0,
         TimeSpan.FromHours(8));
 
-    // 只改变来源消息键，便于用同一正文比较 Agent 分析前后的待办字段。
-    CapturedMessage Capture(string key, string content) => new(
+    // 默认只改变来源消息键；路由参数用于验证重复采集仅补充 Unknown 元数据。
+    CapturedMessage Capture(
+        string key,
+        string content,
+        string? senderExternalId = null,
+        ChatType chatType = ChatType.Unknown,
+        Direction direction = Direction.Unknown) => new(
         "WeChat",
         key,
         "analysis-room",
@@ -5007,7 +5249,10 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
         "王工",
         content,
         sentAt,
-        MessageType.Text);
+        MessageType.Text,
+        SenderExternalId: senderExternalId,
+        ChatType: chatType,
+        Direction: direction);
 
     // 可控 Agent 委托模拟成功、故障、空白和外部取消，不产生真实模型费用。
     Task<MentionMessageAnalysis> Analyze(Message message, CancellationToken cancellationToken)
@@ -5107,13 +5352,26 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     AssertEqual(1, skipResult.PersistedCount, "A skipped Todo must not prevent its source message from persisting.");
     AssertEqual(0, skipResult.CreatedTodoCount, "A model-approved skip must not create an automatic Todo.");
 
-    // 重复消息仍由工作单元去重，但摘要前预检应阻止第二次模型调用。
+    // 重复消息只允许回填 Unknown 路由，摘要前预检必须阻止第二次模型与待办流程。
     var callsBeforeDuplicate = analysisCalls.Count;
     var duplicateResult = await pipeline.ProcessAsync(
-        new[] { Capture("summary-on", mentionContent) },
+        new[]
+        {
+            Capture("summary-on", mentionContent, "wxid_wang", ChatType.Private, Direction.Incoming)
+        },
         CancellationToken.None);
     AssertEqual(1, duplicateResult.DuplicateCount, "The repeated source key should remain a duplicate.");
+    AssertEqual(0, duplicateResult.CreatedTodoCount, "A duplicate must not create another Todo.");
     AssertEqual(callsBeforeDuplicate, analysisCalls.Count, "A duplicate message must not invoke the model again.");
+
+    // 已有可靠路由后，再次重复采集不得用后续来源的冲突证据覆盖它。
+    await pipeline.ProcessAsync(
+        new[]
+        {
+            Capture("summary-on", mentionContent, "wxid_other", ChatType.Group, Direction.Outgoing)
+        },
+        CancellationToken.None);
+    AssertEqual(callsBeforeDuplicate, analysisCalls.Count, "Conflicting duplicate metadata must still skip the model.");
 
     var cancellationPropagated = false;
     try
@@ -5132,6 +5390,10 @@ static async Task TestCapturePipelineMentionAnalysisAsync()
     var todos = await todoRepository.GetPendingAsync(CancellationToken.None);
     AssertEqual(6, messages.Count, "All six non-duplicate, non-cancelled messages should persist, including the skipped Todo source.");
     AssertEqual(4, todos.Count, "Only the four model-approved or fallback mention messages should create Todos.");
+    var routedDuplicate = messages.Single(message => message.SourceMessageKey == "summary-on");
+    AssertEqual("wxid_wang", routedDuplicate.SenderExternalId, "A duplicate should supplement the previously missing wxid.");
+    AssertEqual(ChatType.Private, routedDuplicate.ChatType, "A duplicate should supplement an Unknown chat type.");
+    AssertEqual(Direction.Incoming, routedDuplicate.Direction, "A duplicate should supplement an Unknown direction.");
 
     // 通过来源消息键定位待办，避免依赖仓储的排序规则。
     TodoItem TodoFor(string key)
@@ -5594,6 +5856,172 @@ static async Task TestFollowedProjectKeywordRepositoryAsync()
     AssertTrue(remainingKeywords.Any(item => item.ProjectId == shorterProject.Id), "Deleting one project's keywords must preserve other projects' keyword rules.");
 }
 
+static async Task TestProjectMemberRepositoryAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
+    var memberRepository = new SqliteProjectMemberRepository(databasePath);
+    var project = await projectRepository.SaveAsync("智能管线", ProjectColorPolicy.Purple, CancellationToken.None);
+
+    var empty = await memberRepository.GetAllAsync(CancellationToken.None);
+    AssertEqual(0, empty.Count, "A new project should start without members.");
+
+    var zhang = await memberRepository.SaveAsync(
+        project.Id, "张三", "小张, 张三丰", "zhang@pcitc.com", "wxid_zhang", CancellationToken.None);
+    var li = await memberRepository.SaveAsync(project.Id, "李四", null, null, CancellationToken.None);
+
+    var loaded = await memberRepository.GetAllAsync(CancellationToken.None);
+    AssertEqual(2, loaded.Count, "All saved project members should round-trip.");
+    var zhangRow = loaded.Single(member => member.DisplayName == "张三");
+    AssertEqual("小张, 张三丰", zhangRow.Alias, "Member aliases must round-trip.");
+    AssertEqual("zhang@pcitc.com", zhangRow.Email, "Member email must round-trip.");
+    AssertEqual("wxid_zhang", zhangRow.WeChatUserId, "The stable WeChat identity must round-trip.");
+    AssertTrue(zhangRow.IsReporting, "A new project member should join weekly reporting by default.");
+    AssertEqual<string?>(null, loaded.Single(member => member.DisplayName == "李四").Alias,
+        "A member without alias should persist null.");
+
+    // 周报开关独立更新，不得连带覆盖已配置的发送人匹配字段。
+    await memberRepository.SetReportingAsync(zhang.Id, false, CancellationToken.None);
+    var reportingDisabled = (await memberRepository.GetAllAsync(CancellationToken.None))
+        .Single(member => member.Id == zhang.Id);
+    AssertFalse(reportingDisabled.IsReporting, "The reporting switch should persist its disabled state.");
+    AssertEqual("wxid_zhang", reportingDisabled.WeChatUserId,
+        "Changing the reporting switch must preserve the WeChat identity.");
+    AssertEqual("zhang@pcitc.com", reportingDisabled.Email,
+        "Changing the reporting switch must preserve the sender email.");
+
+    // 同名重复保存只更新成员资料，不新增成员，也不重新打开已关闭的周报开关。
+    var updated = await memberRepository.SaveAsync(
+        project.Id, "张三", "小张", "zhang3@pcitc.com", "wxid_zhang_new", CancellationToken.None);
+    AssertEqual(zhang.Id, updated.Id, "Re-saving the same member must update in place instead of adding another row.");
+    var afterUpdate = await memberRepository.GetAllAsync(CancellationToken.None);
+    AssertEqual(2, afterUpdate.Count, "Idempotent member saving must not create duplicate members.");
+    var updatedRow = afterUpdate.Single(member => member.Id == zhang.Id);
+    AssertEqual("zhang3@pcitc.com", updatedRow.Email, "Re-saving a member should update the persisted email.");
+    AssertEqual("wxid_zhang_new", updatedRow.WeChatUserId, "Re-saving a member should update the WeChat identity.");
+    AssertFalse(updatedRow.IsReporting, "Re-saving member details must preserve the reporting switch.");
+
+    await memberRepository.DeleteAsync(li.Id, CancellationToken.None);
+    var afterDelete = await memberRepository.GetAllAsync(CancellationToken.None);
+    AssertFalse(afterDelete.Any(member => member.Id == li.Id), "Deleting a member should remove it.");
+    AssertTrue(afterDelete.Any(member => member.Id == zhang.Id), "Deleting one member must preserve the others.");
+
+    await memberRepository.DeleteByProjectIdAsync(project.Id, CancellationToken.None);
+    var afterProjectDelete = await memberRepository.GetAllAsync(CancellationToken.None);
+    AssertEqual(0, afterProjectDelete.Count, "Deleting a project must clean up all its members.");
+}
+
+static async Task TestWeeklyReportCollectorAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    // 固定单周窗口，所有私聊身份和方向均由测试显式给出。
+    var from = new DateTimeOffset(2026, 11, 2, 0, 0, 0, TimeSpan.FromHours(8));
+    var to = new DateTimeOffset(2026, 11, 8, 18, 0, 0, TimeSpan.FromHours(8));
+
+    static Message WeeklyMessage(
+        string source,
+        string sender,
+        string content,
+        DateTimeOffset sentAt,
+        string? externalId = null,
+        ChatType chatType = ChatType.Unknown,
+        Direction direction = Direction.Unknown) => new(
+        Id: 0,
+        Source: source,
+        SourceMessageKey: $"weekly-{source}-{Guid.NewGuid():N}",
+        ChatSessionId: 7,
+        ChatName: chatType == ChatType.Group ? "管线提升项目群" : "成员私聊",
+        SenderName: sender,
+        Content: content,
+        SentAt: sentAt,
+        CapturedAt: sentAt,
+        MessageType: MessageType.Text,
+        IsMentionMe: false,
+        SenderExternalId: externalId,
+        ChatType: chatType,
+        Direction: direction);
+
+    // 张三的微信wxid与石化邮邮箱都可精确匹配，跨源消息按时间合并。
+    await messageRepository.SaveAsync(
+        WeeklyMessage("WeChat", "张三", "本周完成接口联调", from.AddHours(10), "wxid_zhang", ChatType.Private, Direction.Incoming),
+        CancellationToken.None);
+    await messageRepository.SaveAsync(
+        WeeklyMessage("SinopecMail", "张三", "下周计划：压测", from.AddHours(30), "zhang@pcitc.com", ChatType.Private, Direction.Incoming),
+        CancellationToken.None);
+    // 即使昵称等于成员别名，Unknown路由也不能进入成员周报。
+    await messageRepository.SaveAsync(
+        WeeklyMessage("Shihuatong", "张三丰", "别名不能替代私聊证据", from.AddHours(20)), CancellationToken.None);
+    // 李四通过直接邮件归集一条。
+    await messageRepository.SaveAsync(
+        WeeklyMessage("SinopecMail", "李四", "本周完成数据迁移", from.AddHours(12), "li@pcitc.com", ChatType.Private, Direction.Incoming),
+        CancellationToken.None);
+    // 窗口外和本人发出内容都必须排除。
+    await messageRepository.SaveAsync(
+        WeeklyMessage("WeChat", "张三", "上周的旧内容", from.AddDays(-2), "wxid_zhang", ChatType.Private, Direction.Incoming),
+        CancellationToken.None);
+    await messageRepository.SaveAsync(
+        WeeklyMessage("WeChat", "我", "收到，下周同步", from.AddHours(14), "wxid_me", ChatType.Private, Direction.Outgoing),
+        CancellationToken.None);
+    // 非成员项目群消息只进入项目整体素材，不归到任何成员。
+    await messageRepository.SaveAsync(
+        WeeklyMessage("WeChat", "外部协作方", "管线提升验收安排", from.AddHours(16), "wxid_other", ChatType.Group, Direction.Incoming),
+        CancellationToken.None);
+
+    var projectRepository = new SqliteFollowedProjectRepository(databasePath);
+    var project = await projectRepository.SaveAsync("智能管线", ProjectColorPolicy.Purple, CancellationToken.None);
+    var members = new[]
+    {
+        new ProjectMember(1, project.Id, "张三", "张三丰, 小张", "zhang@pcitc.com", true, DateTimeOffset.Now, "wxid_zhang"),
+        new ProjectMember(2, project.Id, "李四", null, "li@pcitc.com", true, DateTimeOffset.Now)
+    };
+    var keywords = new[] { new FollowedProjectKeyword(1, project.Id, "智能管线", "管线提升", DateTimeOffset.Now) };
+
+    var collector = new WeeklyReportCollector(messageRepository);
+    var material = await collector.CollectAsync(
+        project.Id,
+        project.ProjectName,
+        members,
+        keywords,
+        from,
+        to,
+        excludedSenders: new[] { "我" },
+        CancellationToken.None);
+
+    AssertEqual(2, material.Contributions.Count, "Every configured member should get a contribution slot.");
+    var zhang = material.Contributions.Single(item => item.Member.DisplayName == "张三");
+    AssertEqual(2, zhang.Messages.Count, "Only wxid/email matched private incoming messages should merge across sources.");
+    AssertEqual("WeChat", zhang.Messages[0].Source, "Contribution messages should be ordered oldest first.");
+    AssertEqual("SinopecMail", zhang.Messages[1].Source, "Direct mail should merge after the earlier WeChat message.");
+    AssertFalse(zhang.Messages.Any(message => message.Content.Contains("别名")), "Alias text must never replace DirectToMe evidence.");
+
+    var li = material.Contributions.Single(item => item.Member.DisplayName == "李四");
+    AssertEqual(1, li.Messages.Count, "A direct member mail should contribute exactly one message.");
+    AssertEqual(1, material.Unattributed.Count, "Keyword-matching non-member messages should stay unattributed.");
+    AssertEqual("WeChat", material.Unattributed[0].Source, "The project group message should remain in project material.");
+    AssertFalse(material.Unattributed.Any(message => message.SenderName == "我"), "Outgoing messages must never enter weekly material.");
+    AssertEqual(1, material.Diagnostics.UnknownRouteExcluded, "The alias-only Unknown message should be counted as excluded.");
+
+    // 时间窗口颠倒必须直接报错，避免静默生成空周报。
+    var rejectedWindow = false;
+    try
+    {
+        await collector.CollectAsync(project.Id, project.ProjectName, members, keywords, to, from, null, CancellationToken.None);
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+        rejectedWindow = true;
+    }
+
+    AssertTrue(rejectedWindow, "An inverted time window must be rejected instead of silently producing an empty report.");
+}
+
 static async Task TestProjectColorSettingsXamlAsync()
 {
     var xamlPath = Path.Combine(ProjectToolPaths.ProjectRoot, "src", "WechatDashboard.App", "MainWindow.xaml");
@@ -5741,7 +6169,7 @@ static async Task TestNativeWeChatReaderAsync()
         var page = await nativeReader.ReadAsync(
             new WeChatReadRequest(start, end, 0, 2),
             CancellationToken.None);
-        AssertEqual(3, page.TotalCount, "Native reader should count all matching shard messages before paging.");
+        AssertEqual(7, page.TotalCount, "Native reader should count group and private routing fixture messages before paging.");
         AssertEqual(2, page.Messages.Count, "Native reader should apply page size after stable sorting.");
         AssertTrue(page.Messages[0].SentAt >= page.Messages[1].SentAt, "Native messages should be newest first.");
 
@@ -5775,13 +6203,37 @@ static async Task TestNativeWeChatReaderAsync()
         AssertEqual("", contentDecoder.DecodeContent(new byte[] { 0x28, 0xB5, 0x2F, 0xFD, 0x00 }, 1), "Corrupt zstd should fail closed.");
         var mention = all.Messages.Single(message => message.Content.Contains("@张三", StringComparison.Ordinal));
         AssertEqual("Alice", mention.SenderName, "Name2Id and contact display names should resolve the group sender.");
+        AssertEqual(ChatType.Group, mention.ChatType, "A chatroom session must remain a group regardless of direction evidence.");
         AssertTrue(mention.SourceMessageKey.StartsWith("WeChat:local:room@chatroom:message_0.db:", StringComparison.Ordinal), "Source key should remain stable and compatible.");
+
+        // 私聊只有 is_send=0 且 Name2Id 能解析 wxid 时，才能形成成员周报所需的完整证据。
+        var privateIncoming = all.Messages.Single(message => message.Content == "成员私聊周报");
+        AssertEqual(ChatType.Private, privateIncoming.ChatType, "A resolved incoming direct session should be private.");
+        AssertEqual(Direction.Incoming, privateIncoming.Direction, "is_send=0 should identify an incoming message.");
+        AssertEqual("wxid_alice", privateIncoming.SenderExternalId, "Name2Id should provide the stable sender wxid.");
+
+        var privateOutgoing = all.Messages.Single(message => message.Content == "本人私聊回复");
+        AssertEqual(ChatType.Private, privateOutgoing.ChatType, "An outgoing direct session can still be identified as private.");
+        AssertEqual(Direction.Outgoing, privateOutgoing.Direction, "is_send=1 should identify an outgoing message.");
+        AssertEqual<string?>(null, privateOutgoing.SenderExternalId, "Outgoing messages must not borrow the peer wxid as sender identity.");
+
+        // 入方向明确但 wxid 缺失时仍不可归到成员，避免用昵称猜测身份。
+        var missingWxid = all.Messages.Single(message => message.Content == "缺少wxid的私聊");
+        AssertEqual(ChatType.Unknown, missingWxid.ChatType, "Incoming text without Name2Id evidence must not be promoted to private.");
+        AssertEqual(Direction.Incoming, missingWxid.Direction, "A known is_send value may be retained even when wxid is missing.");
+        AssertEqual<string?>(null, missingWxid.SenderExternalId, "An unresolved sender id must remain empty.");
+
+        // 尚未取得真实私聊 status 映射前，只有 status 的记录必须保持 Unknown。
+        var statusOnly = all.Messages.Single(message => message.Content == "仅有status的私聊");
+        AssertEqual(ChatType.Unknown, statusOnly.ChatType, "Status alone must not prove a private chat.");
+        AssertEqual(Direction.Unknown, statusOnly.Direction, "Status alone must not prove message direction.");
+        AssertEqual<string?>(null, statusOnly.SenderExternalId, "Unknown direction must not produce member sender evidence.");
 
         var adapter = new WeChatLocalDatabaseCaptureAdapter(nativeReader);
         var batch = await adapter.CaptureAsync(
             new CaptureContext(new Dictionary<string, string> { [adapter.Name] = "0" }),
             CancellationToken.None);
-        AssertEqual(3, batch.Messages.Count, "Native adapter should capture all fixture messages from offset zero.");
+        AssertEqual(7, batch.Messages.Count, "Native adapter should capture all group and private fixture messages from offset zero.");
         var captureOffset = WeChatCaptureOffset.Parse(batch.NextOffset);
         AssertTrue(long.Parse(captureOffset.HighWatermark, CultureInfo.InvariantCulture) >= 1_780_000_300, "Native adapter should return a high-water timestamp.");
         AssertTrue(!string.IsNullOrWhiteSpace(captureOffset.SourceFingerprint), "Native adapter should persist a source fingerprint.");
@@ -5947,6 +6399,8 @@ static async Task CreateWeChatFixtureAsync(string databaseRoot, byte[]? masterKe
         {
             ExecuteSql(connection, "CREATE TABLE SessionTable(username TEXT, last_timestamp INTEGER, display_name TEXT);");
             ExecuteSql(connection, "INSERT INTO SessionTable VALUES ('room@chatroom', 1780000300, '项目群');");
+            // 同一单聊会话覆盖接收、发送、缺少 wxid 和只有 status 四种路由证据组合。
+            ExecuteSql(connection, "INSERT INTO SessionTable VALUES ('wxid_alice', 1780000700, 'Alice');");
         });
     await CreateFixtureDatabaseAsync(
         Path.Combine(databaseRoot, "message", "message_0.db"),
@@ -5976,6 +6430,20 @@ static async Task CreateWeChatFixtureAsync(string databaseRoot, byte[]? masterKe
                 command.Parameters.AddWithValue("$compressed", compressor.Wrap(Encoding.UTF8.GetBytes("压缩消息")).ToArray());
                 command.ExecuteNonQuery();
             }
+
+            // 私聊 fixture 显式给出 status/is_send，验证只采用已实证的 is_send 方向语义。
+            var privateTableName = "Msg_" + Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes("wxid_alice")));
+            ExecuteSql(connection, $"CREATE TABLE \"{privateTableName}\"(" +
+                "local_id INTEGER, server_id INTEGER, local_type INTEGER, real_sender_id INTEGER, " +
+                "status INTEGER, is_send INTEGER, create_time INTEGER, message_content BLOB, compress_content BLOB);");
+            ExecuteSql(connection, $"INSERT INTO \"{privateTableName}\" VALUES " +
+                "(1, 201, 1, 1, 2, 0, 1780000400, '成员私聊周报', NULL)");
+            ExecuteSql(connection, $"INSERT INTO \"{privateTableName}\" VALUES " +
+                "(2, 202, 1, 1, 2, 1, 1780000500, '本人私聊回复', NULL)");
+            ExecuteSql(connection, $"INSERT INTO \"{privateTableName}\" VALUES " +
+                "(3, 203, 1, 999, 2, 0, 1780000600, '缺少wxid的私聊', NULL)");
+            ExecuteSql(connection, $"INSERT INTO \"{privateTableName}\" VALUES " +
+                "(4, 204, 1, 1, 4, NULL, 1780000700, '仅有status的私聊', NULL)");
         });
 }
 
@@ -6437,6 +6905,19 @@ public sealed class RecordingModelHttpMessageHandler(string responseBody) : Http
         {
             Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
         };
+    }
+}
+
+/// <summary>记录每次项目简报调用的请求，并按委托返回固定简报，避免测试访问真实模型。</summary>
+public sealed class RecordingProjectBriefingModel(Func<ProjectBriefingRequest, ProjectBriefing> respond) : IProjectBriefingModel
+{
+    public List<ProjectBriefingRequest> Requests { get; } = new();
+
+    public Task<ProjectBriefing> SummarizeProjectAsync(ProjectBriefingRequest request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Requests.Add(request);
+        return Task.FromResult(respond(request));
     }
 }
 

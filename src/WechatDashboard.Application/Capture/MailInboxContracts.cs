@@ -28,6 +28,9 @@ public sealed record MailFetchRequest(
 /// <param name="Body">已转为纯文本的正文。</param>
 /// <param name="AttachmentCount">附件数量，仅计数，不下载内容。</param>
 /// <param name="IsUnread">是否未读。</param>
+/// <param name="To">To 头中的邮箱地址；缺省时为空，由映射层按无路由证据处理。</param>
+/// <param name="Cc">Cc 头中的邮箱地址。</param>
+/// <param name="Bcc">Bcc 头中的邮箱地址；本地缓存或服务器未提供时不能据此推定私聊。</param>
 public sealed record MailEnvelope(
     uint Uid,
     string MessageId,
@@ -37,7 +40,10 @@ public sealed record MailEnvelope(
     DateTimeOffset SentAt,
     string Body,
     int AttachmentCount,
-    bool IsUnread);
+    bool IsUnread,
+    IReadOnlyList<string>? To = null,
+    IReadOnlyList<string>? Cc = null,
+    IReadOnlyList<string>? Bcc = null);
 
 /// <summary>一次邮件读取的结果与更新后的游标。</summary>
 /// <param name="Messages">本次读取到的邮件，按 UID 升序。</param>

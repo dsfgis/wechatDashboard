@@ -184,7 +184,21 @@ public sealed class ImapMailInboxReader : IMailInboxReader
             SentAt: envelope?.Date ?? summary.InternalDate ?? DateTimeOffset.Now,
             Body: body,
             AttachmentCount: CountAttachments(summary),
-            IsUnread: !summary.Flags.HasValue || !summary.Flags.Value.HasFlag(MessageFlags.Seen));
+            IsUnread: !summary.Flags.HasValue || !summary.Flags.Value.HasFlag(MessageFlags.Seen),
+            // 路由判定必须使用完整收件人头，不能只凭“位于收件箱”推定私聊。
+            To: ReadAddresses(envelope?.To),
+            Cc: ReadAddresses(envelope?.Cc),
+            Bcc: ReadAddresses(envelope?.Bcc));
+    }
+
+    /// <summary>提取并修剪邮箱地址，丢弃空项；显示名不参与账号或发送人精确匹配。</summary>
+    private static IReadOnlyList<string> ReadAddresses(InternetAddressList? addresses)
+    {
+        return addresses?.Mailboxes
+            .Select(mailbox => mailbox.Address?.Trim() ?? string.Empty)
+            .Where(address => address.Length > 0)
+            .ToArray()
+            ?? Array.Empty<string>();
     }
 
     /// <summary>优先取 text/plain，其次 text/html 转纯文本；只下载选中的那一个 MIME 部分。</summary>

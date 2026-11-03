@@ -44,7 +44,12 @@ public sealed class SinopecMailCaptureAdapter : IMessageCaptureAdapter
         var messages = new List<CapturedMessage>(result.Messages.Count);
         foreach (var envelope in result.Messages)
         {
-            messages.Add(MailMessageMapper.Map(Name, envelope, _options.MaxBodyLength));
+            // 当前登录账号是唯一 To 判定基准，不能使用发件人或显示名代替。
+            messages.Add(MailMessageMapper.Map(
+                Name,
+                envelope,
+                _options.MaxBodyLength,
+                _options.Account));
         }
 
         return new CaptureBatch(Name, messages, MailCursor.Format(result.UidValidity, result.NextUid));

@@ -379,6 +379,64 @@ internal static class MailCaptureTests
         return -1;
     }
 
+    /// <summary>只有唯一To等于当前账号且无Cc/Bcc时，邮件才可作为成员直接周报。</summary>
+    internal static Task TestMailDirectRoutingAsync()
+    {
+        var envelope = new MailEnvelope(
+            Uid: 88,
+            MessageId: "route@sinopec.com",
+            Subject: "项目周报",
+            FromDisplayName: "沈佳奇",
+            FromAddress: "shen@pcitc.com",
+            SentAt: SampleSentAt,
+            Body: "本周完成接口联调",
+            AttachmentCount: 0,
+            IsUnread: false,
+            To: new[] { "me@pcitc.com" });
+
+        // 直接邮件保留发件人稳定邮箱，供项目成员精确匹配。
+        var direct = MailMessageMapper.Map(
+            MailSourcePolicy.SinopecMail,
+            envelope,
+            maxBodyLength: 4000,
+            currentAccount: "me@pcitc.com");
+        AssertEqual(ChatType.Private, direct.ChatType, "唯一To当前账号应识别为直接邮件。");
+        AssertEqual(Direction.Incoming, direct.Direction, "直接邮件方向应为接收。");
+        AssertEqual("shen@pcitc.com", direct.SenderExternalId, "直接邮件应保留发件人邮箱作为成员身份。");
+
+        // 多收件人和抄送/密送均属于非直接邮件，不得进入成员私聊周报。
+        var multipleTo = MailMessageMapper.Map(
+            MailSourcePolicy.SinopecMail,
+            envelope with { To = new[] { "me@pcitc.com", "other@pcitc.com" } },
+            4000,
+            "me@pcitc.com");
+        AssertEqual(ChatType.Group, multipleTo.ChatType, "多个To不能认定私聊。");
+        AssertEqual<string?>(null, multipleTo.SenderExternalId, "非直接邮件不得提供成员匹配身份。");
+        var withCc = MailMessageMapper.Map(
+            MailSourcePolicy.SinopecMail,
+            envelope with { Cc = new[] { "other@pcitc.com" } },
+            4000,
+            "me@pcitc.com");
+        AssertEqual(ChatType.Group, withCc.ChatType, "存在Cc时不能认定私聊。");
+        var withBcc = MailMessageMapper.Map(
+            MailSourcePolicy.SinopecMail,
+            envelope with { Bcc = new[] { "other@pcitc.com" } },
+            4000,
+            "me@pcitc.com");
+        AssertEqual(ChatType.Group, withBcc.ChatType, "存在Bcc时不能认定私聊。");
+
+        // 当前账号或完整收件人证据缺失时必须保持Unknown，不能靠“已入收件箱”猜测。
+        var missingAccount = MailMessageMapper.Map(
+            MailSourcePolicy.SinopecMail,
+            envelope,
+            4000,
+            currentAccount: null);
+        AssertEqual(ChatType.Unknown, missingAccount.ChatType, "账号未配置时路由证据不足。");
+        AssertEqual(Direction.Unknown, missingAccount.Direction, "账号未配置时方向必须保持Unknown。");
+        AssertEqual<string?>(null, missingAccount.SenderExternalId, "Unknown路由不得用于成员身份匹配。");
+        return Task.CompletedTask;
+    }
+
     private sealed class FakeMailReader : IMailInboxReader    {
         private readonly MailFetchResult _result;
 

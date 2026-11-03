@@ -20,6 +20,16 @@ public interface ITodoRepository
     /// <summary>获取所有活动状态待办。</summary>
     Task<IReadOnlyList<TodoItem>> GetActiveAsync(CancellationToken cancellationToken);
 
+    /// <summary>
+    /// 获取项目周报所需待办：本周完成事项以及仍需后续跟进的活动事项。
+    /// 查询只读，不改变待办状态、提醒或优先级。
+    /// </summary>
+    Task<IReadOnlyList<TodoItem>> GetWeeklyReportAsync(
+        long projectId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken);
+
     /// <summary>按主键获取待办。</summary>
     Task<TodoItem?> GetByIdAsync(long id, CancellationToken cancellationToken);
 
