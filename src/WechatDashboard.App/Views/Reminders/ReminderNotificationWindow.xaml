@@ -1,7 +1,7 @@
 <Window x:Class="WechatDashboard.App.Views.Reminders.ReminderNotificationWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="待办提醒"
+        Title=""
         Width="380"
         SizeToContent="Height"
         MaxHeight="360"
@@ -19,26 +19,17 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Grid>
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBlock Text="待办提醒"
-                       FontSize="15"
-                       FontWeight="SemiBold"
-                       VerticalAlignment="Center" />
-            <Border Grid.Column="1"
-                    Padding="7,2"
-                    VerticalAlignment="Center"
-                    Background="#FEF3C7"
-                    CornerRadius="8"
-                    Visibility="{Binding QueueBadgeVisibility}">
-                <TextBlock Text="{Binding QueueBadgeText}"
-                           FontSize="11"
-                           Foreground="#92400E" />
-            </Border>
-        </Grid>
+        <!-- 卡片不再重复显示窗口标题，仅在有多条排队提醒时保留数量提示。 -->
+        <Border Padding="7,2"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Center"
+                Background="#FEF3C7"
+                CornerRadius="8"
+                Visibility="{Binding QueueBadgeVisibility}">
+            <TextBlock Text="{Binding QueueBadgeText}"
+                       FontSize="11"
+                       Foreground="#92400E" />
+        </Border>
 
         <Border Grid.Row="1"
                 Margin="0,10,0,0"
@@ -50,7 +41,7 @@
             <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <StackPanel>
                     <TextBlock Text="{Binding TodoTitle}"
-                               FontSize="14"
+                               FontSize="12"
                                FontWeight="SemiBold"
                                TextWrapping="Wrap" />
                     <TextBlock Margin="0,6,0,0"
@@ -74,26 +65,81 @@
                     Margin="0,12,0,0"
                     HorizontalAlignment="Right"
                     Orientation="Horizontal">
-            <Button Content="知道了"
-                    MinWidth="64"
-                    Padding="10,5"
-                    FontSize="12"
-                    Click="Acknowledge_Click" />
-            <Button Content="延后10分钟"
-                    MinWidth="84"
+            <StackPanel.Resources>
+                <!-- 所有提醒操作统一使用紧凑图标按钮，文字说明仅保留在悬浮提示中。 -->
+                <Style x:Key="ReminderIconButton" TargetType="Button">
+                    <Setter Property="Width" Value="30" />
+                    <Setter Property="Height" Value="30" />
+                    <Setter Property="Padding" Value="5" />
+                </Style>
+            </StackPanel.Resources>
+
+            <!-- 详情：直接打开现有待办详情窗口。 -->
+            <Button Style="{StaticResource ReminderIconButton}"
+                    ToolTip="查看详情"
+                    Click="Details_Click">
+                <Path Width="17"
+                      Height="17"
+                      Data="M4,1 H11 L16,6 V19 H4 Z M11,1 V6 H16 M7,10 H13 M7,14 H13"
+                      Stretch="Uniform"
+                      Fill="Transparent"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                      StrokeThickness="1.6"
+                      StrokeLineJoin="Round"
+                      StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round" />
+            </Button>
+
+            <!-- 知道了：眼睛图标表示已知晓，不改变待办状态。 -->
+            <Button Style="{StaticResource ReminderIconButton}"
                     Margin="6,0,0,0"
-                    Padding="10,5"
-                    FontSize="12"
-                    Click="Snooze_Click" />
-            <Button Content="完成"
-                    MinWidth="64"
+                    ToolTip="知道了"
+                    Click="Acknowledge_Click">
+                <Path Width="18"
+                      Height="18"
+                      Data="M1,10 C4,5 7,3 10,3 C13,3 16,5 19,10 C16,15 13,17 10,17 C7,17 4,15 1,10 Z M13,10 A3,3 0 1,1 7,10 A3,3 0 1,1 13,10"
+                      Stretch="Uniform"
+                      Fill="Transparent"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                      StrokeThickness="1.5"
+                      StrokeLineJoin="Round" />
+            </Button>
+
+            <!-- 延后十分钟：时钟图标对应延期提醒。 -->
+            <Button Style="{StaticResource ReminderIconButton}"
                     Margin="6,0,0,0"
-                    Padding="10,5"
-                    FontSize="12"
+                    ToolTip="延后10分钟"
+                    Click="Snooze_Click">
+                <Path Width="17"
+                      Height="17"
+                      Data="M12,2 A10,10 0 1,0 12,22 A10,10 0 1,0 12,2 M12,6 V12 L16,14"
+                      Stretch="Uniform"
+                      Fill="Transparent"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                      StrokeThickness="1.7"
+                      StrokeLineJoin="Round"
+                      StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round" />
+            </Button>
+
+            <!-- 完成：保留蓝色强调，使用勾选图标完成待办。 -->
+            <Button Style="{StaticResource ReminderIconButton}"
+                    Margin="6,0,0,0"
+                    ToolTip="完成"
                     Background="#2563EB"
                     Foreground="White"
-                    FontWeight="SemiBold"
-                    Click="Complete_Click" />
+                    Click="Complete_Click">
+                <Path Width="17"
+                      Height="17"
+                      Data="M4,12 L9,17 L20,6"
+                      Stretch="Uniform"
+                      Fill="Transparent"
+                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                      StrokeThickness="2"
+                      StrokeLineJoin="Round"
+                      StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round" />
+            </Button>
         </StackPanel>
     </Grid>
 </Window>

@@ -26,15 +26,19 @@ public sealed class ReminderNotificationQueue : IDisposable
     private const double MinCardHeight = 170;
 
     private readonly Func<ReminderDispatchItem, ReminderNotificationAction, Task> _onResolved;
+    // 查看详情不属于提醒处理结果，因此使用独立回调且不会关闭提醒卡片。
+    private readonly Func<ReminderDispatchItem, Task> _onShowDetails;
     private readonly Queue<ReminderDispatchItem> _pending = new();
     private readonly List<ReminderNotificationWindow> _visible = new();
     private readonly HashSet<long> _knownReminderIds = new();
     private bool _disposed;
 
     public ReminderNotificationQueue(
-        Func<ReminderDispatchItem, ReminderNotificationAction, Task> onResolved)
+        Func<ReminderDispatchItem, ReminderNotificationAction, Task> onResolved,
+        Func<ReminderDispatchItem, Task> onShowDetails)
     {
         _onResolved = onResolved;
+        _onShowDetails = onShowDetails;
     }
 
     /// <summary>当前排队（尚未显示）的提醒条数。</summary>
@@ -85,7 +89,11 @@ public sealed class ReminderNotificationQueue : IDisposable
 
     private void Show(ReminderDispatchItem item)
     {
-        var window = new ReminderNotificationWindow(item.TodoTitle, item.TodoDescription);
+        // 将当前提醒项绑定到详情回调，点击卡片上的详情图标即可打开对应待办。
+        var window = new ReminderNotificationWindow(
+            item.TodoTitle,
+            item.TodoDescription,
+            () => _onShowDetails(item));
         window.Closed += (_, _) => OnWindowClosed(window, item);
         window.Loaded += (_, _) => Relayout();
         // SizeToContent 的高度在首帧之后才稳定，尺寸变化时重排，避免卡片压出工作区。

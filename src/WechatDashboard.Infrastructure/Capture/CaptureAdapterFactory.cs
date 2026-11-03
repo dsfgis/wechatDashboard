@@ -44,9 +44,24 @@ public static class CaptureAdapterFactory
                 CreateWeChatLocalExportSource(captureRootPath),
                 CreateWeChatLocalDatabaseSource(readerService),
                 CreateShihuatongLocalDatabaseSource(),
-                CreateSinopecMailArchiveSource(),
+                // 石化邮统一通过 IMAP 直接收信，不再注册客户端本地缓存源。
                 CreateSinopecMailSource(),
             })
+            .ToArray();
+    }
+
+    /// <summary>
+    /// 对采集源集合应用“石化邮直接收信”策略：剔除历史本地缓存源，并强制启用 IMAP 源。
+    /// 数据库里可能保存过旧版本的缓存开关或未启用 IMAP，这里统一纠正，避免采集回退到缓存。
+    /// </summary>
+    public static IReadOnlyList<CaptureSourceDefinition> ApplyDirectMailPolicy(
+        IEnumerable<CaptureSourceDefinition> sources)
+    {
+        return sources
+            .Where(source => source.Kind != CaptureSourceKind.SinopecMailArchive)
+            .Select(source => source.Kind == CaptureSourceKind.SinopecMail
+                ? source with { IsEnabled = true }
+                : source)
             .ToArray();
     }
 
@@ -151,17 +166,17 @@ public static class CaptureAdapterFactory
     }
 
     /// <summary>
-    /// 创建石化邮 IMAP 采集源。默认不启用：未保存账号密码时启用只会在每轮采集产生一条
-    /// “尚未配置”失败记录，等用户在设置中填写后由界面改为启用。
+    /// 创建石化邮 IMAP 采集源。石化邮只保留直接收信这一条路径，因此默认启用；
+    /// 未保存账号密码时由适配器在每轮采集报告“尚未配置”，不会回退读取本地缓存。
     /// </summary>
     public static CaptureSourceDefinition CreateSinopecMailSource()
     {
         return new CaptureSourceDefinition(
             Source: MailSourcePolicy.SinopecMail,
-            DisplayName: "石化邮（IMAP）",
+            DisplayName: "石化邮（IMAP 直接收信）",
             Kind: CaptureSourceKind.SinopecMail,
             Location: "amail.sinopec.com:993",
-            IsEnabled: false);
+            IsEnabled: true);
     }
 
     /// <summary>获取微信本地数据库配置文件路径。</summary>

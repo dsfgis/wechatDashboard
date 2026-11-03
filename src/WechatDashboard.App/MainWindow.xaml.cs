@@ -2062,7 +2062,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 newLocation: "原生 C#（只读本地数据库）",
                 CancellationToken.None);
             var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
-            var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
+            // 石化邮改为直接收信后，历史本地缓存行不再出现在设置列表里。
+            var defaultSources = CaptureAdapterFactory.ApplyDirectMailPolicy(
+                CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService));
             return defaultSources.Select(source =>
             {
                 var saved = savedSettings.FirstOrDefault(setting =>
@@ -2073,7 +2075,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     DisplayName = source.DisplayName,
                     Kind = source.Kind.ToString(),
                     Location = source.Location,
-                    IsEnabled = saved?.IsEnabled ?? source.IsEnabled
+                    // 石化邮始终启用 IMAP 直接收信，历史保存的 false 不能把这条链路关掉。
+                    IsEnabled = source.Kind == CaptureSourceKind.SinopecMail
+                        || (saved?.IsEnabled ?? source.IsEnabled)
                 };
             }).ToArray();
         });
@@ -2611,21 +2615,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var now = DateTimeOffset.Now;
-        var settings = CaptureSourceSettings.Select(row => new CaptureSourceSettings(
-            Id: 0,
-            Source: row.Source,
-            DisplayName: row.DisplayName,
-            Kind: row.Kind,
-            Location: row.Location,
-            IsEnabled: row.IsEnabled,
-            CreatedAt: now,
-            UpdatedAt: now)).ToList();
+        // 保存时同样执行直接收信策略：丢弃历史缓存行，并强制写回 IMAP 启用。
+        var settings = CaptureSourceSettings
+            .Where(row => row.Kind != CaptureSourceKind.SinopecMailArchive.ToString())
+            .Select(row => new CaptureSourceSettings(
+                Id: 0,
+                Source: row.Source,
+                DisplayName: row.DisplayName,
+                Kind: row.Kind,
+                Location: row.Location,
+                IsEnabled: row.Kind == CaptureSourceKind.SinopecMail.ToString() || row.IsEnabled,
+                CreatedAt: now,
+                UpdatedAt: now))
+            .ToList();
 
         await _settingsRepository.DeleteAllAsync(CancellationToken.None);
         await _settingsRepository.SaveAllAsync(settings, CancellationToken.None);
+        // 保存后用数据库真实内容重建列表，让界面与实际生效的采集源保持一致。
+        await LoadCaptureSourceSettingsAsync();
         Interlocked.Increment(ref _capturePipelineVersion);
         WakeLiveCaptureLoop();
-        SummaryText = $"采集源设置已保存，共 {settings.Count} 个源";
+        SummaryText = $"采集源设置已保存，共 {settings.Count} 个源；石化邮固定使用 IMAP 直接收信";
     }
 
     /// <summary>添加别名：校验非空后保存并刷新别名列表与当前生效集合。</summary>
@@ -2668,12 +2678,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private MessageCapturePipeline CreateCapturePipeline()
     {
         var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService);
-        var effectiveSources = defaultSources.Select(source =>
+        var mergedSources = defaultSources.Select(source =>
         {
             var saved = CaptureSourceSettings.FirstOrDefault(row =>
                 row.Source == source.Source && row.Kind == source.Kind.ToString());
             return saved is null ? source : source with { IsEnabled = saved.IsEnabled };
-        }).ToArray();
+        });
+        // 始终以直接收信策略收口，确保管线不会创建缓存适配器或被旧开关关闭 IMAP。
+        var effectiveSources = CaptureAdapterFactory.ApplyDirectMailPolicy(mergedSources);
 
         return new MessageCapturePipeline(
             adapters: CaptureAdapterFactory.CreateAdapters(

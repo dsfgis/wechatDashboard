@@ -67,7 +67,10 @@ public sealed class TodoFeatureCoordinator : IDisposable
             todoRepository,
             clock,
             Workbench.RefreshAsync);
-        _reminderQueue = new ReminderNotificationQueue(resolutionHandler.HandleAsync);
+        // 详情按钮复用工作台现有详情流程，根据提醒关联的待办ID直接打开。
+        _reminderQueue = new ReminderNotificationQueue(
+            resolutionHandler.HandleAsync,
+            item => Workbench.OpenTodoAsync(item.Reminder.TodoId));
         var publisher = new InAppReminderNotificationPublisher(_reminderQueue);
         _reminderWorker = new ReminderWorker(reminderRepository, publisher, clock);
         _dueRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };

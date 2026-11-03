@@ -19,14 +19,17 @@ public partial class ReminderNotificationWindow : Window, INotifyPropertyChanged
 {
     private string _queueBadgeText = string.Empty;
     private Visibility _queueBadgeVisibility = Visibility.Collapsed;
+    // 详情操作由功能协调层注入，提醒窗口无需直接依赖仓储和详情视图模型。
+    private readonly Func<Task> _showDetails;
     // 防止重复点击按钮触发多次关闭。
     private bool _resolved;
 
-    public ReminderNotificationWindow(string todoTitle, string? todoDescription)
+    public ReminderNotificationWindow(string todoTitle, string? todoDescription, Func<Task> showDetails)
     {
         InitializeComponent();
         TodoTitle = todoTitle;
         TodoDescription = todoDescription;
+        _showDetails = showDetails;
         DataContext = this;
 
         // 主窗口仅隐藏到托盘时不设 Owner：避免提醒随隐藏窗口一起不可见。
@@ -88,6 +91,9 @@ public partial class ReminderNotificationWindow : Window, INotifyPropertyChanged
         QueueBadgeText = pendingCount > 0 ? $"+{pendingCount} 条待查看" : string.Empty;
         QueueBadgeVisibility = pendingCount > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    /// <summary>仅打开详情，不关闭提醒，也不触发“知道了”等提醒处理动作。</summary>
+    private async void Details_Click(object sender, RoutedEventArgs e) => await _showDetails();
 
     private void Acknowledge_Click(object sender, RoutedEventArgs e) => Resolve(ReminderNotificationAction.Acknowledge);
 

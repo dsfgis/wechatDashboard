@@ -105,7 +105,6 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Protected IMAP credential store round-trips under DPAPI protection", MailCaptureTests.TestProtectedImapCredentialStoreAsync),
     ("SinopecMail mbox reader only reads appended messages and decodes Chinese headers", MailCaptureTests.TestMboxIncrementalReadAsync),
     ("SinopecMail mbox cursor recovers when the cache file is rewritten", MailCaptureTests.TestMboxCursorAndResetAsync),
-    ("SinopecMail local cache decodes the newest mail from the installed client", MailCaptureTests.TestRealClientInboxAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
     ("Window text adapter ignores dashboard status when inferring chat name", TestWindowTextCaptureAdapterSkipsStatusChatNameAsync),
@@ -2434,6 +2433,22 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WeChatLocalExport && source.IsEnabled), "Live capture should enable WeChat local export source.");
     AssertFalse(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText), "Live capture must not include the visible-window OCR source.");
     AssertTrue(definitions.Any(source => source.Source == "Shihuatong" && source.Kind == CaptureSourceKind.ShihuatongLocalDatabase && source.IsEnabled), "Live capture should enable Shihuatong local database source.");
+    // 石化邮只允许 IMAP 直接收信：默认源里不能再出现本地缓存，并且 IMAP 必须默认启用。
+    AssertFalse(definitions.Any(source => source.Kind == CaptureSourceKind.SinopecMailArchive), "Live capture must not register the local mail cache source.");
+    AssertTrue(
+        definitions.Any(source => source.Kind == CaptureSourceKind.SinopecMail && source.IsEnabled),
+        "Live capture should enable the SinopecMail IMAP source by default.");
+
+    // 历史数据库可能保存过“缓存开启、IMAP 关闭”，策略必须把这类设置纠正为直接收信。
+    var legacySources = new[]
+    {
+        CaptureAdapterFactory.CreateSinopecMailArchiveSource(),
+        CaptureAdapterFactory.CreateSinopecMailSource() with { IsEnabled = false }
+    };
+    var policySources = CaptureAdapterFactory.ApplyDirectMailPolicy(legacySources);
+    AssertEqual(1, policySources.Count, "Direct mail policy should keep exactly one mail source.");
+    AssertEqual(CaptureSourceKind.SinopecMail, policySources[0].Kind, "Direct mail policy should keep the IMAP source.");
+    AssertTrue(policySources[0].IsEnabled, "Direct mail policy should force the IMAP source enabled.");
 
     var adapters = CaptureAdapterFactory.CreateAdapters(
         definitions,
@@ -2444,6 +2459,8 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "Live adapters should still include WeChat JSONL adapter.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.LocalDatabase"), "Live adapters should include Shihuatong local database adapter.");
+    AssertFalse(adapters.Any(adapter => adapter.Name == "SinopecMail.LocalCache"), "Live adapters must not include the local mail cache adapter.");
+    AssertTrue(adapters.Any(adapter => adapter.Name == "SinopecMail"), "Live adapters should include the SinopecMail IMAP adapter.");
 
     var nativeReader = new FakeWeChatLocalDatabaseReader();
     nativeReader.InitializeAsync(

@@ -610,7 +610,7 @@
                                         </DataGrid>
                                         <StackPanel Grid.Column="1">
                                             <TextBlock Text="来源快照（原消息删除后仍保留）" FontWeight="SemiBold" Margin="0,0,0,5" />
-                                            <DataGrid ItemsSource="{Binding MemorySources}" MaxHeight="138" RowHeight="Auto" Margin="0,0,0,10">
+                                            <DataGrid ItemsSource="{Binding MemorySources}" MaxHeight="138" Margin="0,0,0,10">
                                                 <DataGrid.Columns>
                                                     <DataGridTextColumn Header="时间" Width="105" Binding="{Binding SentAtText}" />
                                                     <DataGridTextColumn Header="来源" Width="68" Binding="{Binding Source}" />
@@ -625,7 +625,7 @@
                                                 </DataGrid.Columns>
                                             </DataGrid>
                                             <TextBlock Text="状态时间线" FontWeight="SemiBold" Margin="0,0,0,5" />
-                                            <DataGrid ItemsSource="{Binding MemoryHistory}" MaxHeight="138" RowHeight="Auto">
+                                            <DataGrid ItemsSource="{Binding MemoryHistory}" MaxHeight="138">
                                                 <DataGrid.Columns>
                                                     <DataGridTextColumn Header="时间" Width="105" Binding="{Binding ChangedAtText}" />
                                                     <DataGridTextColumn Header="变化" Width="120" Binding="{Binding ChangeText}" />
@@ -828,7 +828,7 @@
                                     <TextBlock x:Name="MailCredentialStatusText" Foreground="#6B7280" VerticalAlignment="Center" Text="尚未保存账号密码" />
                                 </WrapPanel>
                                 <TextBlock Foreground="#9CA3AF" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"
-                                           Text="密码使用 Windows DPAPI 以当前用户身份加密保存在 %LocalAppData%\WechatDashboard\Mail，不写入数据库、日志或配置文件。保存账号后，在上表勾选“石化邮（IMAP）”并点击“保存设置”才会开始采集。" />
+                                           Text="密码使用 Windows DPAPI 以当前用户身份加密保存在 %LocalAppData%\WechatDashboard\Mail，不写入数据库、日志或配置文件。石化邮只通过 IMAP 直接收信，保存账号后即开始采集，不再读取客户端本地缓存，也无需手动勾选启用。" />
                             </StackPanel>
                         </Border>
                         <Button DockPanel.Dock="Top" Content="保存设置" Click="SaveCaptureSourceSettingsButton_Click" HorizontalAlignment="Right" Margin="0,0,0,10" />
