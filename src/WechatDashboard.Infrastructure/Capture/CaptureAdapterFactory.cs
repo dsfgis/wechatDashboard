@@ -44,24 +44,46 @@ public static class CaptureAdapterFactory
                 CreateWeChatLocalExportSource(captureRootPath),
                 CreateWeChatLocalDatabaseSource(readerService),
                 CreateShihuatongLocalDatabaseSource(),
-                // 石化邮统一通过 IMAP 直接收信，不再注册客户端本地缓存源。
+                // 石化邮两条链路都注册：客户端本地缓存优先（无口令、不受二次认证影响），IMAP 作为备用。
+                CreateSinopecMailArchiveSource(),
                 CreateSinopecMailSource(),
             })
             .ToArray();
     }
 
     /// <summary>
-    /// 对采集源集合应用“石化邮直接收信”策略：剔除历史本地缓存源，并强制启用 IMAP 源。
-    /// 数据库里可能保存过旧版本的缓存开关或未启用 IMAP，这里统一纠正，避免采集回退到缓存。
+    /// 石化邮采集源收口策略：客户端本地缓存可用时优先读缓存，缓存缺失才回退 IMAP 直接收信。
+    /// 两条链路都保留在设置列表里，用户可自行切换；未保存 IMAP 账号时不启用 IMAP 源，
+    /// 避免每轮采集都产生一条“尚未配置”的失败记录。
     /// </summary>
-    public static IReadOnlyList<CaptureSourceDefinition> ApplyDirectMailPolicy(
-        IEnumerable<CaptureSourceDefinition> sources)
+    /// <param name="sources">待收口的采集源集合。</param>
+    /// <param name="archiveAvailable">客户端本地缓存是否可用；null 表示按本机实际文件探测。</param>
+    /// <param name="hasImapCredential">是否已保存 IMAP 账号密码；null 表示读取本机密文存储。</param>
+    public static IReadOnlyList<CaptureSourceDefinition> ApplyMailSourcePolicy(
+        IEnumerable<CaptureSourceDefinition> sources,
+        bool? archiveAvailable = null,
+        bool? hasImapCredential = null)
     {
+        // 实际路径只解析一次：既用于判断可用性，也用于覆盖列表里显示的路径。
+        var inbox = SinopecMailArchiveLocator.FindInbox();
+        var inboxAvailable = archiveAvailable ?? inbox is not null;
+        var credentialAvailable = hasImapCredential ?? new ProtectedImapCredentialStore().Exists;
+
         return sources
-            .Where(source => source.Kind != CaptureSourceKind.SinopecMailArchive)
-            .Select(source => source.Kind == CaptureSourceKind.SinopecMail
-                ? source with { IsEnabled = true }
-                : source)
+            .Select(source => source.Kind switch
+            {
+                CaptureSourceKind.SinopecMailArchive => source with
+                {
+                    Location = inbox ?? source.Location,
+                    // 缓存文件不存在时强制关闭，否则每轮采集都会抛 FileNotFound。
+                    IsEnabled = inboxAvailable && source.IsEnabled
+                },
+                CaptureSourceKind.SinopecMail => source with
+                {
+                    IsEnabled = source.IsEnabled && credentialAvailable
+                },
+                _ => source
+            })
             .ToArray();
     }
 

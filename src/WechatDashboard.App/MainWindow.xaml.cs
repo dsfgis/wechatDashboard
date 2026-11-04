@@ -425,23 +425,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         new(ProjectMemoryStatus.Completed, "已完成"),
         new(ProjectMemoryStatus.Discarded, "已废弃")
     ];
-    public IReadOnlyList<ProjectColorOption> ProjectColors { get; } =
-    [
-        new("灰色", ProjectColorPolicy.DefaultColor),
-        new("红色", ProjectColorPolicy.Red),
-        new("橙色", ProjectColorPolicy.Orange),
-        new("绿色", ProjectColorPolicy.Green),
-        new("蓝色", ProjectColorPolicy.Blue),
-        new("紫色", ProjectColorPolicy.Purple),
-        new("粉色", ProjectColorPolicy.Pink)
-    ];
+    // 项目颜色不再由用户单独选择：状态决定颜色（见 ProjectStageColorPolicy），
+    // 因此界面上没有独立的项目颜色列表，避免出现“状态一个色、色板另一个色”。
 
-    /// <summary>项目生命周期状态选项：在建 / 运维 / 转交，顺序即下拉框与排序顺序。</summary>
+    /// <summary>
+    /// 项目生命周期状态选项：在建 / 运维 / 移交，顺序即下拉框与排序顺序。
+    /// 颜色由状态唯一决定（在建=红、运维=蓝、移交=灰），因此每个选项自带圆点颜色，
+    /// 界面上不再有独立的颜色下拉框。
+    /// </summary>
     public IReadOnlyList<ProjectStageOption> ProjectStageOptions { get; } =
     [
-        new(ProjectStage.Construction, "在建"),
-        new(ProjectStage.Operation, "运维"),
-        new(ProjectStage.Handover, "转交")
+        new(ProjectStage.Construction, "在建", ProjectStageColorPolicy.GetColor(ProjectStage.Construction)),
+        new(ProjectStage.Operation, "运维", ProjectStageColorPolicy.GetColor(ProjectStage.Operation)),
+        new(ProjectStage.Handover, "移交", ProjectStageColorPolicy.GetColor(ProjectStage.Handover))
     ];
 
     /// <summary>窗口加载完成：初始化数据库、加载采集源设置，并在读取器就绪时读取当天消息。</summary>
@@ -1846,22 +1842,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 newLocation: "原生 C#（只读本地数据库）",
                 CancellationToken.None);
             var savedSettings = await _settingsRepository.GetAllAsync(CancellationToken.None);
-            // 石化邮改为直接收信后，历史本地缓存行不再出现在设置列表里。
-            var defaultSources = CaptureAdapterFactory.ApplyDirectMailPolicy(
+            // 石化邮两条链路都出现在设置列表里：客户端本地缓存优先，IMAP 直接收信备用。
+            var defaultSources = CaptureAdapterFactory.ApplyMailSourcePolicy(
                 CaptureAdapterFactory.CreateDefaultLiveSources(_captureInboxPath, _readerService));
+            var archiveUsable = defaultSources.Any(source =>
+                source.Kind == CaptureSourceKind.SinopecMailArchive && source.IsEnabled);
+            // 旧版本从不保存缓存行、并把 IMAP 强写为启用；库里没有缓存行说明是升级后的第一次加载，
+            // 此时缓存可用就默认关掉必失败的 IMAP，避免每轮采集都报一条登录失败。
+            var legacyMailSettings = !savedSettings.Any(setting =>
+                setting.Kind == CaptureSourceKind.SinopecMailArchive.ToString());
             return defaultSources.Select(source =>
             {
                 var saved = savedSettings.FirstOrDefault(setting =>
                     setting.Source == source.Source && setting.Kind == source.Kind.ToString());
+                var legacyImap = legacyMailSettings && archiveUsable
+                                 && source.Kind == CaptureSourceKind.SinopecMail;
                 return new CaptureSourceSettingRow
                 {
                     Source = source.Source,
                     DisplayName = source.DisplayName,
                     Kind = source.Kind.ToString(),
                     Location = source.Location,
-                    // 石化邮始终启用 IMAP 直接收信，历史保存的 false 不能把这条链路关掉。
-                    IsEnabled = source.Kind == CaptureSourceKind.SinopecMail
-                        || (saved?.IsEnabled ?? source.IsEnabled)
+                    // 策略已给出“缓存是否存在 / 是否已保存账号”的默认值，用户保存过的开关优先，
+                    // 但不能把不可用的源重新打开，否则每轮采集都会产生失败记录。
+                    IsEnabled = source.IsEnabled && (saved?.IsEnabled ?? true) && !legacyImap
                 };
             }).ToArray();
         });
@@ -1978,6 +1982,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var snapshot = await Task.Run(async () =>
         {
             var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+            // 状态与颜色已合并：历史项目里独立选择的颜色会在这里归一到状态色，只写不一致的行。
+            projects = await NormalizeStageColorsAsync(projects);
             var keywords = await _followedProjectKeywordRepository.GetAllAsync(CancellationToken.None);
             var members = await _projectMemberRepository.GetAllAsync(CancellationToken.None);
             var addedDefaultKeyword = false;
@@ -2041,6 +2047,43 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }));
     }
 
+    /// <summary>
+    /// 把历史项目独立选择的颜色归一到状态色（在建=红、运维=蓝、移交=灰）。
+    /// 只对不一致的行写库，全部一致时不做任何写入；归一后重新读取，保证投影用的是最新颜色。
+    /// </summary>
+    private async Task<IReadOnlyList<FollowedProject>> NormalizeStageColorsAsync(
+        IReadOnlyList<FollowedProject> projects)
+    {
+        var mismatched = projects
+            .Where(project => !string.Equals(
+                project.Color,
+                ProjectStageColorPolicy.GetColor(project.Stage),
+                StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (mismatched.Length == 0)
+        {
+            return projects;
+        }
+
+        foreach (var project in mismatched)
+        {
+            try
+            {
+                await _followedProjectRepository.UpdateStageAndColorAsync(
+                    project.Id,
+                    project.Stage,
+                    ProjectStageColorPolicy.GetColor(project.Stage),
+                    CancellationToken.None);
+            }
+            catch (Exception)
+            {
+                // 归一化属于显示层的兼容处理，失败不应阻塞关注设置页加载；界面上圆点仍按状态色渲染。
+            }
+        }
+
+        return await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+    }
+
     /// <summary>添加项目，并将项目名称作为初始关键字以保持既有匹配方式。</summary>
     private async void AddFollowedProjectButton_Click(object sender, RoutedEventArgs e)
     {
@@ -2051,65 +2094,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        var color = NewFollowedProjectColorComboBox?.SelectedItem is ProjectColorOption selectedColor
-            ? selectedColor.Color
-            : ProjectColorPolicy.DefaultColor;
+        // 状态决定颜色：新建下拉里选中的状态同时决定落库颜色，默认在建（红色）。
+        var stage = NewFollowedProjectStageComboBox?.SelectedItem is ProjectStageOption selectedStage
+            ? selectedStage.Value
+            : ProjectStage.Construction;
+        var color = ProjectStageColorPolicy.GetColor(stage);
         var project = await _followedProjectRepository.SaveAsync(projectName, color, CancellationToken.None);
         await _followedProjectKeywordRepository.SaveAsync(project.Id, projectName, CancellationToken.None);
+        // SaveAsync 对已软删除的同名项目只做重新激活并保留旧颜色，这里统一把状态与颜色写成一致值。
+        await _followedProjectRepository.UpdateStageAndColorAsync(
+            project.Id,
+            stage,
+            color,
+            CancellationToken.None);
         if (NewFollowedProjectTextBox is not null) NewFollowedProjectTextBox.Text = "";
         await LoadFollowedProjectsAsync();
-        // 新项目默认“在建”，直接出现在周报与简报项目下拉的最前面。
         await ReloadProjectPickersAsync();
-        SummaryText = $"已添加项目「{projectName}」，可继续为它添加多个关键字。";
-    }
-
-    private async void FollowedProjectColorComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (sender is not ComboBox comboBox ||
-            comboBox.DataContext is not FollowedProjectTreeRow row ||
-            comboBox.SelectedItem is not ProjectColorOption selectedColor ||
-            string.Equals(row.Color, selectedColor.Color, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        var originalColor = row.Color;
-        comboBox.IsEnabled = false;
-        try
-        {
-            var outcome = await _followedProjectRepository.UpdateColorAsync(
-                row.Id,
-                selectedColor.Color,
-                CancellationToken.None);
-            if (outcome == UpdateFollowedProjectColorOutcome.Missing)
-            {
-                await LoadFollowedProjectsAsync();
-                SummaryText = $"项目「{row.ProjectName}」已不存在，颜色未保存，项目列表已刷新。";
-                return;
-            }
-
-            await LoadFollowedProjectsAsync();
-            await Task.WhenAll(
-                TodoFeature.Workbench.RefreshAsync(),
-                ScheduleOverview.RefreshAsync());
-            SummaryText = outcome == UpdateFollowedProjectColorOutcome.Updated
-                ? $"已将项目「{row.ProjectName}」的颜色更新为{selectedColor.Name}。"
-                : $"项目「{row.ProjectName}」的颜色未变化。";
-        }
-        catch (Exception)
-        {
-            comboBox.SelectedValue = originalColor;
-            SummaryText = $"项目「{row.ProjectName}」颜色保存失败，已恢复原颜色。";
-        }
-        finally
-        {
-            comboBox.IsEnabled = true;
-        }
+        SummaryText = $"已添加项目「{projectName}」（{ProjectStagePolicy.GetDisplayName(stage)}），可继续为它添加多个关键字。";
     }
 
     /// <summary>
-    /// 项目状态切换：在建 / 运维 / 转交。保存后刷新项目列表，
-    /// 使项目树与周报、简报的项目下拉框按新状态重新排序。
+    /// 项目状态切换：在建 / 运维 / 移交。状态即颜色，因此一次写入同时落库状态与颜色。
+    /// 保存后刷新项目列表，使项目树与周报、简报的项目下拉框按新状态重新排序。
     /// </summary>
     private async void FollowedProjectStageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -2126,12 +2132,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         var originalStage = row.Stage;
+        var targetColor = ProjectStageColorPolicy.GetColor(selectedStage.Value);
         comboBox.IsEnabled = false;
         try
         {
-            var outcome = await _followedProjectRepository.UpdateStageAsync(
+            var outcome = await _followedProjectRepository.UpdateStageAndColorAsync(
                 row.Id,
                 selectedStage.Value,
+                targetColor,
                 CancellationToken.None);
             if (outcome == UpdateFollowedProjectStageOutcome.Missing)
             {
@@ -2147,7 +2155,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 TodoFeature.Workbench.RefreshAsync(),
                 ScheduleOverview.RefreshAsync());
             SummaryText = outcome == UpdateFollowedProjectStageOutcome.Updated
-                ? $"已将项目「{row.ProjectName}」的状态更新为{selectedStage.Name}。"
+                ? $"已将项目「{row.ProjectName}」的状态更新为{selectedStage.Name}，颜色同步为{DescribeColor(selectedStage.Value)}。"
                 : $"项目「{row.ProjectName}」的状态未变化。";
         }
         catch (Exception)
@@ -2161,6 +2169,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>状态对应颜色的中文名，仅用于状态栏文案。</summary>
+    private static string DescribeColor(ProjectStage stage) => ProjectStageColorPolicy.GetColor(stage) switch
+    {
+        ProjectColorPolicy.Red => "红色",
+        ProjectColorPolicy.Blue => "蓝色",
+        _ => "灰色"
+    };
+
     /// <summary>项目状态变化后同步刷新周报与简报的项目下拉，避免下拉里仍是旧排序与旧状态文案。</summary>
     private Task ReloadProjectPickersAsync() =>
         Task.WhenAll(
@@ -2168,7 +2184,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             LoadBriefingProjectsAsync());
 
     /// <summary>
-    /// 读取启用状态的关注项目，并按“在建 → 运维 → 转交”重排。
+    /// 读取启用状态的关注项目，并按“在建 → 运维 → 移交”重排。
     /// 排序与状态文案都以数据库最新值为准，不复用界面上已渲染的旧对象。
     /// </summary>
     private async Task<IReadOnlyList<FollowedProject>> GetActiveProjectsAsync()
@@ -2517,16 +2533,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async void SaveCaptureSourceSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var now = DateTimeOffset.Now;
-        // 保存时同样执行直接收信策略：丢弃历史缓存行，并强制写回 IMAP 启用。
-        var settings = CaptureSourceSettings
-            .Where(row => row.Kind != CaptureSourceKind.SinopecMailArchive.ToString())
-            .Select(row => new CaptureSourceSettings(
-                Id: 0,
+        // 保存时不再强制石化邮的开关：本地缓存与 IMAP 都由用户勾选，策略只负责剔除不可用的源。
+        var settings = CaptureAdapterFactory
+            .ApplyMailSourcePolicy(CaptureSourceSettings.Select(row => new CaptureSourceDefinition(
                 Source: row.Source,
                 DisplayName: row.DisplayName,
-                Kind: row.Kind,
+                Kind: Enum.TryParse<CaptureSourceKind>(row.Kind, out var kind) ? kind : CaptureSourceKind.JsonlDirectory,
                 Location: row.Location,
-                IsEnabled: row.Kind == CaptureSourceKind.SinopecMail.ToString() || row.IsEnabled,
+                IsEnabled: row.IsEnabled)))
+            .Select(source => new CaptureSourceSettings(
+                Id: 0,
+                Source: source.Source,
+                DisplayName: source.DisplayName,
+                Kind: source.Kind.ToString(),
+                Location: source.Location,
+                IsEnabled: source.IsEnabled,
                 CreatedAt: now,
                 UpdatedAt: now))
             .ToList();
@@ -2537,7 +2558,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadCaptureSourceSettingsAsync();
         Interlocked.Increment(ref _capturePipelineVersion);
         WakeLiveCaptureLoop();
-        SummaryText = $"采集源设置已保存，共 {settings.Count} 个源；石化邮固定使用 IMAP 直接收信";
+        SummaryText = $"采集源设置已保存，共 {settings.Count} 个源";
     }
 
     /// <summary>添加别名：校验非空后保存并刷新别名列表与当前生效集合。</summary>
@@ -2586,8 +2607,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 row.Source == source.Source && row.Kind == source.Kind.ToString());
             return saved is null ? source : source with { IsEnabled = saved.IsEnabled };
         });
-        // 始终以直接收信策略收口，确保管线不会创建缓存适配器或被旧开关关闭 IMAP。
-        var effectiveSources = CaptureAdapterFactory.ApplyDirectMailPolicy(mergedSources);
+        // 石化邮收口：缓存可用时优先读客户端本地缓存，未保存账号时不启用 IMAP。
+        var effectiveSources = CaptureAdapterFactory.ApplyMailSourcePolicy(mergedSources);
 
         return new MessageCapturePipeline(
             adapters: CaptureAdapterFactory.CreateAdapters(
@@ -3231,7 +3252,11 @@ public sealed record FollowedProjectTreeRow(
     string KeywordSummary,
     string MemberSummary,
     IReadOnlyList<FollowedProjectKeywordRow> Keywords,
-    IReadOnlyList<ProjectMemberRow> Members);
+    IReadOnlyList<ProjectMemberRow> Members)
+{
+    /// <summary>行首圆点颜色：始终取状态对应的固定颜色，历史遗留的自选颜色不会影响显示。</summary>
+    public string StageColor => ProjectStageColorPolicy.GetColor(Stage);
+}
 
-/// <summary>项目状态下拉项：枚举值 + 中文显示名。</summary>
-public sealed record ProjectStageOption(ProjectStage Value, string Name);
+/// <summary>项目状态下拉项：枚举值 + 中文显示名 + 该状态对应的固定颜色（下拉圆点）。</summary>
+public sealed record ProjectStageOption(ProjectStage Value, string Name, string Color);

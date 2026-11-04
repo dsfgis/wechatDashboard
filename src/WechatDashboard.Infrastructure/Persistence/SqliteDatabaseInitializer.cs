@@ -484,7 +484,7 @@ public sealed class SqliteDatabaseInitializer
             ADD COLUMN color TEXT NOT NULL DEFAULT '#4B5563';
         """;
 
-    /// <summary>v10：关注项目增加生命周期状态（在建/运维/转交），历史项目统一落到“在建”。</summary>
+    /// <summary>v10：关注项目增加生命周期状态（在建/运维/移交），历史项目统一落到“在建”。</summary>
     private const string FollowedProjectStageMigrationSql = """
         ALTER TABLE followed_projects
             ADD COLUMN stage TEXT NOT NULL DEFAULT 'Construction';

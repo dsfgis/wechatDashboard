@@ -46,6 +46,20 @@
                                     </Style>
                                 </TextBlock.Style>
                             </TextBlock>
+                            <!-- 进行中/等待角标：这两个状态仍留在待办理，角标用于与普通待办理区分 -->
+                            <Border Margin="0,0,8,0" Padding="6,0" CornerRadius="8" Background="#E0E7FF" VerticalAlignment="Center">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding HasActiveStatusBadge}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding StatusBadge}" FontSize="11" Foreground="#3730A3" VerticalAlignment="Center" />
+                            </Border>
                             <TextBlock Text="{Binding Priority}" Foreground="{Binding PriorityColor}" FontWeight="SemiBold" Margin="0,0,8,0" />
                             <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         </DockPanel>

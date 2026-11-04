@@ -338,7 +338,7 @@
 
 ### TASK-029：项目生命周期状态与周报/简报下拉同步刷新
 
-- 交付物：v10 迁移（`followed_projects.stage`，默认 `Construction`）、`ProjectStage` 与 `ProjectStagePolicy`、`IFollowedProjectRepository.UpdateStageAsync`、仓储按“在建 → 运维 → 转交”排序、`FollowedProject.ProjectDisplayName`、“关注设置”节点内的状态下拉，以及 `LoadWeeklyReportProjectsAsync` / `LoadBriefingProjectsAsync` / `ReloadProjectPickersAsync` 这条唯一的下拉刷新链；更新 `requirements.md`、`design.md`、`check_list.md` 对应条目。
+- 交付物：v10 迁移（`followed_projects.stage`，默认 `Construction`）、`ProjectStage` 与 `ProjectStagePolicy`、`IFollowedProjectRepository.UpdateStageAsync`、仓储按“在建 → 运维 → 移交”排序、`FollowedProject.ProjectDisplayName`、“关注设置”节点内的状态下拉，以及 `LoadWeeklyReportProjectsAsync` / `LoadBriefingProjectsAsync` / `ReloadProjectPickersAsync` 这条唯一的下拉刷新链；更新 `requirements.md`、`design.md`、`check_list.md` 对应条目。
 - 需求/设计引用：REQ-020；D-038，设计第 4、7 节。
 - 覆盖验收：AC-087、AC-088。
 - 依赖：TASK-024、TASK-028。

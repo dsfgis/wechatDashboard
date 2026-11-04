@@ -24,6 +24,6 @@ public sealed record FollowedProject(
     /// <summary>状态中文名，供界面直接绑定。</summary>
     public string StageText => ProjectStagePolicy.GetDisplayName(Stage);
 
-    /// <summary>下拉框显示文本：状态 + 项目名，便于在列表中直接区分在建/运维/转交。</summary>
+    /// <summary>下拉框显示文本：状态 + 项目名，便于在列表中直接区分在建/运维/移交。</summary>
     public string ProjectDisplayName => $"{StageText} · {ProjectName}";
 }

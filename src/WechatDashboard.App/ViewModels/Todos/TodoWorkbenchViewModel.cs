@@ -469,6 +469,13 @@ public sealed class TodoListItemViewModel : ObservableObject
     public string PriorityColor => PriorityColorPolicy.For(Todo.Priority);
 
     public string Status => Todo.Status.ToString();
+
+    /// <summary>活动待办中“进行中/等待”的角标；待办理不显示角标，避免每行都重复同一个词。</summary>
+    public bool HasActiveStatusBadge => Todo.Status is TodoStatus.InProgress or TodoStatus.Waiting;
+
+    /// <summary>状态角标文本，与详情窗口下拉共用同一套中文名。</summary>
+    public string StatusBadge => HasActiveStatusBadge ? TodoStatusOption.NameOf(Todo.Status) : string.Empty;
+
     public string Title => Todo.Title;
     public string DueAt => Todo.DueAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";
     public string ReminderAt => Reminder?.ScheduledAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "-";

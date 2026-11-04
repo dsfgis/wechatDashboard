@@ -455,7 +455,7 @@
                                     <WrapPanel Margin="0,0,0,8">
                                         <TextBlock Text="项目" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
                                         <ComboBox x:Name="WeeklyReportProjectComboBox" Width="220" DisplayMemberPath="ProjectDisplayName" Margin="0,0,12,8"
-                                                  ToolTip="项目按“在建 → 运维 → 转交”排序，并显示当前状态" />
+                                                  ToolTip="项目按“在建 → 运维 → 移交”排序，并显示当前状态" />
                                         <DatePicker x:Name="WeeklyReportFromDatePicker" Width="125" Margin="0,0,6,8" ToolTip="周报开始日期" />
                                         <TextBlock Text="至" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
                                         <DatePicker x:Name="WeeklyReportToDatePicker" Width="125" Margin="0,0,12,8" ToolTip="周报结束日期" />
@@ -487,7 +487,7 @@
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                         <TextBlock Text="项目" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,0" />
                                         <ComboBox x:Name="BriefingProjectComboBox" Width="220" DisplayMemberPath="ProjectDisplayName"
-                                                  ToolTip="项目按“在建 → 运维 → 转交”排序，并显示当前状态" />
+                                                  ToolTip="项目按“在建 → 运维 → 移交”排序，并显示当前状态" />
                                         <TextBlock Text="时间范围" VerticalAlignment="Center" Foreground="#4B5563" Margin="14,0,6,0" />
                                         <ComboBox x:Name="BriefingWindowComboBox" Width="110" SelectedIndex="1">
                                             <ComboBoxItem Content="今天" Tag="1" />
@@ -668,15 +668,16 @@
 
                         <Separator Margin="0,16,0,12" />
                         <TextBlock Text="项目设置" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
-                        <TextBlock Text="先为项目选择颜色并创建项目，再展开项目为它添加多个关键字。手动待办可直接选择项目；自动待办仍按群名或消息正文中的项目关键字归属。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" TextWrapping="Wrap" />
+                        <TextBlock Text="先为项目选择状态并创建项目，再展开项目为它添加多个关键字。手动待办可直接选择项目；自动待办仍按群名或消息正文中的项目关键字归属。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" TextWrapping="Wrap" />
+                        <TextBlock Text="状态即颜色：在建=红色、运维=蓝色、移交=灰色。状态决定项目在列表、待办与日程中的颜色，不再单独选择颜色。" FontSize="13" Foreground="#6B7280" Margin="0,0,0,12" TextWrapping="Wrap" />
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                             <TextBox x:Name="NewFollowedProjectTextBox" Width="220" Margin="0,0,8,0" ToolTip="输入项目名称" />
-                            <ComboBox x:Name="NewFollowedProjectColorComboBox" Width="120" ItemsSource="{Binding ProjectColors}" SelectedIndex="0" Margin="0,0,8,0" ToolTip="选择项目颜色">
+                            <ComboBox x:Name="NewFollowedProjectStageComboBox" Width="112" ItemsSource="{Binding ProjectStageOptions}" SelectedIndex="0" Margin="0,0,8,0" ToolTip="选择项目状态（决定颜色）：在建=红色 / 运维=蓝色 / 移交=灰色">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
-                                            <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,6,0" />
-                                            <TextBlock Text="{Binding Name}" />
+                                            <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,6,0" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
@@ -693,23 +694,24 @@
                                                 <Button Style="{StaticResource RowDangerButton}" DockPanel.Dock="Right" Content="删除项目"
                                                         Click="DeleteFollowedProjectButton_Click" VerticalAlignment="Center"
                                                         ToolTip="删除该项目及其全部关键字" />
-                                                <ComboBox Width="110" DockPanel.Dock="Right" Margin="0,0,4,0" VerticalAlignment="Center"
-                                                          ItemsSource="{Binding DataContext.ProjectColors, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                          DisplayMemberPath="Name"
-                                                          SelectedValuePath="Color"
-                                                          SelectedValue="{Binding Color, Mode=OneWay}"
-                                                          SelectionChanged="FollowedProjectColorComboBox_SelectionChanged"
-                                                          ToolTip="选择后立即保存项目颜色" />
-                                                <ComboBox x:Name="FollowedProjectStageComboBox" Width="92" DockPanel.Dock="Right" Margin="0,0,4,0"
+                                                <ComboBox x:Name="FollowedProjectStageComboBox" Width="112" DockPanel.Dock="Right" Margin="0,0,4,0"
                                                           VerticalAlignment="Center"
                                                           ItemsSource="{Binding DataContext.ProjectStageOptions, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                          DisplayMemberPath="Name"
                                                           SelectedValuePath="Value"
                                                           SelectedValue="{Binding Stage, Mode=OneWay}"
                                                           SelectionChanged="FollowedProjectStageComboBox_SelectionChanged"
-                                                          ToolTip="项目状态：在建 / 运维 / 转交，决定周报与简报项目下拉的排序" />
+                                                          ToolTip="项目状态即颜色：在建=红色 / 运维=蓝色 / 移交=灰色；状态决定周报与简报项目下拉的排序">
+                                                    <ComboBox.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <StackPanel Orientation="Horizontal">
+                                                                <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,6,0" VerticalAlignment="Center" />
+                                                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
+                                                            </StackPanel>
+                                                        </DataTemplate>
+                                                    </ComboBox.ItemTemplate>
+                                                </ComboBox>
                                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                    <Border Width="10" Height="10" CornerRadius="5" Background="{Binding Color}" Margin="0,0,8,0" />
+                                                    <Border Width="10" Height="10" CornerRadius="5" Background="{Binding StageColor}" Margin="0,0,8,0" />
                                                     <TextBlock Text="{Binding ProjectName}" FontWeight="SemiBold" VerticalAlignment="Center" />
                                                     <TextBlock Text="{Binding KeywordSummary}" Foreground="#9CA3AF" FontSize="12"
                                                                Margin="8,0,0,0" VerticalAlignment="Center" />
@@ -799,7 +801,7 @@
                         <Border DockPanel.Dock="Top" Background="White" BorderBrush="#E5E7EB" BorderThickness="1"
                                 CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
                             <StackPanel>
-                                <TextBlock Text="石化邮账号（IMAP）" FontWeight="SemiBold" Margin="0,0,0,8" />
+                                <TextBlock Text="石化邮（默认读取客户端本地缓存）" FontWeight="SemiBold" Margin="0,0,0,8" />
                                 <WrapPanel>
                                     <TextBlock Text="账号" Foreground="#6B7280" VerticalAlignment="Center" />
                                     <TextBox x:Name="MailAccountTextBox" Width="170" Margin="6,0,14,0" VerticalContentAlignment="Center" />
@@ -810,7 +812,7 @@
                                     <TextBlock x:Name="MailCredentialStatusText" Foreground="#6B7280" VerticalAlignment="Center" Text="尚未保存账号密码" />
                                 </WrapPanel>
                                 <TextBlock Foreground="#9CA3AF" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"
-                                           Text="密码使用 Windows DPAPI 以当前用户身份加密保存在 %LocalAppData%\WechatDashboard\Mail，不写入数据库、日志或配置文件。石化邮只通过 IMAP 直接收信，保存账号后即开始采集，不再读取客户端本地缓存，也无需手动勾选启用。" />
+                                           Text="默认读取“石化邮”客户端已同步到本机的邮件缓存（Documents\sinopec\…\ImapMail\…\INBOX），无需账号密码，也不受登录二次验证影响；首次采集回溯最近 200 封，之后按增量继续。上面的账号密码只用于备用链路“石化邮（IMAP 直接收信）”，密码经 Windows DPAPI 以当前用户身份加密保存在 %LocalAppData%\WechatDashboard\Mail，不写入数据库或日志；该链路需要服务器允许客户端登录（开通 OTP 的邮箱通常需先申请客户端专用密码）。" />
                             </StackPanel>
                         </Border>
                         <Button DockPanel.Dock="Top" Content="保存设置" Click="SaveCaptureSourceSettingsButton_Click" HorizontalAlignment="Right" Margin="0,0,0,10" />

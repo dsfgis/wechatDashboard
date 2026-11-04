@@ -2,7 +2,7 @@ namespace WechatDashboard.Domain.Entities;
 
 /// <summary>
 /// 关注项目的生命周期状态。用于设置界面标注项目阶段，并决定项目下拉框的排序。
-/// 排序固定为：在建 → 运维 → 转交。
+/// 排序固定为：在建 → 运维 → 移交。
 /// </summary>
 public enum ProjectStage
 {
@@ -12,7 +12,7 @@ public enum ProjectStage
     /// <summary>运维：已交付进入运维期。</summary>
     Operation = 1,
 
-    /// <summary>转交：已移交其他团队或收尾。</summary>
+    /// <summary>移交：已交接给其他团队或进入收尾。</summary>
     Handover = 2
 }
 
@@ -26,11 +26,11 @@ public static class ProjectStagePolicy
     public static IReadOnlyList<ProjectStage> OrderedStages { get; } =
         [ProjectStage.Construction, ProjectStage.Operation, ProjectStage.Handover];
 
-    /// <summary>中文显示名：在建 / 运维 / 转交。</summary>
+    /// <summary>中文显示名：在建 / 运维 / 移交。</summary>
     public static string GetDisplayName(ProjectStage stage) => stage switch
     {
         ProjectStage.Operation => "运维",
-        ProjectStage.Handover => "转交",
+        ProjectStage.Handover => "移交",
         _ => "在建"
     };
 

@@ -19,7 +19,7 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
 
     /// <summary>
     /// 读取所有启用状态的关注项目。
-    /// 排序按项目状态：在建 → 运维 → 转交，同状态内按创建时间与 ID 保持稳定顺序。
+    /// 排序按项目状态：在建 → 运维 → 移交，同状态内按创建时间与 ID 保持稳定顺序。
     /// </summary>
     public async Task<IReadOnlyList<FollowedProject>> GetAllAsync(CancellationToken cancellationToken)
     {
@@ -134,7 +134,7 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
     }
 
     /// <summary>
-    /// 按项目 ID 更新生命周期状态（在建/运维/转交）。
+    /// 按项目 ID 更新生命周期状态（在建/运维/移交）。
     /// 状态变化会影响 GetAllAsync 的排序，但不会触碰项目名、颜色或关键字。
     /// </summary>
     public async Task<UpdateFollowedProjectStageOutcome> UpdateStageAsync(
@@ -171,6 +171,72 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
         update.Transaction = transaction;
         update.CommandText = "UPDATE followed_projects SET stage = $stage WHERE id = $id AND is_active = 1;";
         update.Parameters.AddWithValue("$stage", normalizedStage);
+        update.Parameters.AddWithValue("$id", id);
+        var affected = await update.ExecuteNonQueryAsync(cancellationToken);
+        if (affected != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectStageOutcome.Missing;
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return UpdateFollowedProjectStageOutcome.Updated;
+    }
+
+    /// <summary>
+    /// 在同一事务内更新项目状态与其固定颜色。
+    /// 状态与颜色在界面上已合并为一个下拉框，分开写会出现状态已改、颜色未改的中间态，
+    /// 因此这里一次性写入；两者都与库里一致时返回 Unchanged，不做无意义写入。
+    /// </summary>
+    public async Task<UpdateFollowedProjectStageOutcome> UpdateStageAndColorAsync(
+        long id,
+        ProjectStage stage,
+        string color,
+        CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return UpdateFollowedProjectStageOutcome.Missing;
+        }
+
+        var normalizedStage = ProjectStagePolicy.ToStorageValue(stage);
+        var normalizedColor = ProjectColorPolicy.Normalize(color);
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT stage, color FROM followed_projects WHERE id = $id AND is_active = 1;";
+        read.Parameters.AddWithValue("$id", id);
+        string? currentStage;
+        string? currentColor;
+        await using (var reader = await read.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return UpdateFollowedProjectStageOutcome.Missing;
+            }
+
+            currentStage = reader.IsDBNull(0) ? null : reader.GetString(0);
+            currentColor = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        if (string.Equals(currentStage, normalizedStage, StringComparison.Ordinal) &&
+            string.Equals(currentColor, normalizedColor, StringComparison.OrdinalIgnoreCase))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectStageOutcome.Unchanged;
+        }
+
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE followed_projects
+            SET stage = $stage, color = $color
+            WHERE id = $id AND is_active = 1;
+            """;
+        update.Parameters.AddWithValue("$stage", normalizedStage);
+        update.Parameters.AddWithValue("$color", normalizedColor);
         update.Parameters.AddWithValue("$id", id);
         var affected = await update.ExecuteNonQueryAsync(cancellationToken);
         if (affected != 1)

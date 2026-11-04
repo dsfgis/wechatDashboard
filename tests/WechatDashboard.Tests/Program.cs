@@ -55,6 +55,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Project memory schema v9 upgrades old databases and is idempotent", WechatDashboard.Tests.ProjectMemoryTests.SchemaV9UpgradesAndIsIdempotentAsync),
     ("Followed project schema v10 defaults historic projects to Construction", WechatDashboard.Tests.FollowedProjectStageTests.SchemaV10DefaultsToConstructionAsync),
     ("Followed project stage persists and reorders project pickers", WechatDashboard.Tests.FollowedProjectStageTests.StageUpdatePersistsAndReordersAsync),
+    ("Project stage drives project color in one write", WechatDashboard.Tests.FollowedProjectStageTests.StageColorFollowsStageAsync),
     ("Project memory keeps stable IDs across briefings and applies proposals idempotently", WechatDashboard.Tests.ProjectMemoryTests.RepositoryTracksItemsAcrossBriefingsAsync),
     ("Project memory rejects stale batches and preserves evidence snapshots", WechatDashboard.Tests.ProjectMemoryTests.RepositoryRejectsStaleBatchesAndRetainsEvidenceAsync),
     ("Project briefing validates memory items and propagates cancellation", WechatDashboard.Tests.ProjectMemoryTests.BriefingValidatesStructuredItemsAndFallsBackAsync),
@@ -106,6 +107,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Todo title comes from the mail subject and stays short for chat messages", MailCaptureTests.TestTodoTitleSourceAsync),
     ("Protected IMAP credential store round-trips under DPAPI protection", MailCaptureTests.TestProtectedImapCredentialStoreAsync),
     ("SinopecMail mbox reader only reads appended messages and decodes Chinese headers", MailCaptureTests.TestMboxIncrementalReadAsync),
+    ("SinopecMail mbox tail backfill reads only the newest messages on first run", MailCaptureTests.TestMboxTailBackfillAsync),
     ("SinopecMail mbox cursor recovers when the cache file is rewritten", MailCaptureTests.TestMboxCursorAndResetAsync),
     ("Window text adapter captures normalized visible messages with stable keys", TestWindowTextCaptureAdapterAsync),
     ("Window text adapter captures UIA split visible message blocks", TestWindowTextCaptureAdapterSplitBlocksAsync),
@@ -144,7 +146,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Weekly report Todo query isolates project and completion window", WechatDashboard.Tests.WeeklyReportServiceTests.TodoRepositorySelectsWeeklyScopeAsync),
     ("Weekly report exporter preserves the real template and maps every item", WechatDashboard.Tests.WeeklyReportExporterTests.ExportsAllItemsIntoPreservedTemplateCopyAsync),
     ("Sinopec mail routing accepts only a unique direct recipient", MailCaptureTests.TestMailDirectRoutingAsync),
-    ("Project settings exposes a fixed-palette editable color column", TestProjectColorSettingsXamlAsync),
+    ("Project settings merges stage and color into one dotted dropdown", TestProjectColorSettingsXamlAsync),
 };
 
 var failures = new List<string>();
@@ -2435,25 +2437,43 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WeChatLocalExport && source.IsEnabled), "Live capture should enable WeChat local export source.");
     AssertFalse(definitions.Any(source => source.Source == "WeChat" && source.Kind == CaptureSourceKind.WindowText), "Live capture must not include the visible-window OCR source.");
     AssertTrue(definitions.Any(source => source.Source == "Shihuatong" && source.Kind == CaptureSourceKind.ShihuatongLocalDatabase && source.IsEnabled), "Live capture should enable Shihuatong local database source.");
-    // 石化邮只允许 IMAP 直接收信：默认源里不能再出现本地缓存，并且 IMAP 必须默认启用。
-    AssertFalse(definitions.Any(source => source.Kind == CaptureSourceKind.SinopecMailArchive), "Live capture must not register the local mail cache source.");
-    AssertTrue(
-        definitions.Any(source => source.Kind == CaptureSourceKind.SinopecMail && source.IsEnabled),
-        "Live capture should enable the SinopecMail IMAP source by default.");
+    // 石化邮两条链路都注册：客户端本地缓存优先，IMAP 直接收信备用。
+    AssertTrue(definitions.Any(source => source.Kind == CaptureSourceKind.SinopecMailArchive), "Live capture should register the local mail cache source.");
+    AssertTrue(definitions.Any(source => source.Kind == CaptureSourceKind.SinopecMail), "Live capture should register the SinopecMail IMAP source.");
 
-    // 历史数据库可能保存过“缓存开启、IMAP 关闭”，策略必须把这类设置纠正为直接收信。
-    var legacySources = new[]
+    // 缓存可用但没有 IMAP 账号时：只启用缓存链路。
+    var mailSources = new[]
     {
-        CaptureAdapterFactory.CreateSinopecMailArchiveSource(),
-        CaptureAdapterFactory.CreateSinopecMailSource() with { IsEnabled = false }
+        CaptureAdapterFactory.CreateSinopecMailArchiveSource() with { IsEnabled = true },
+        CaptureAdapterFactory.CreateSinopecMailSource()
     };
-    var policySources = CaptureAdapterFactory.ApplyDirectMailPolicy(legacySources);
-    AssertEqual(1, policySources.Count, "Direct mail policy should keep exactly one mail source.");
-    AssertEqual(CaptureSourceKind.SinopecMail, policySources[0].Kind, "Direct mail policy should keep the IMAP source.");
-    AssertTrue(policySources[0].IsEnabled, "Direct mail policy should force the IMAP source enabled.");
+    var cacheFirst = CaptureAdapterFactory.ApplyMailSourcePolicy(
+        mailSources,
+        archiveAvailable: true,
+        hasImapCredential: false);
+    AssertEqual(2, cacheFirst.Count, "Mail policy should keep both mail links.");
+    AssertTrue(
+        cacheFirst.Single(source => source.Kind == CaptureSourceKind.SinopecMailArchive).IsEnabled,
+        "Mail policy should enable the local cache when the client inbox exists.");
+    AssertFalse(
+        cacheFirst.Single(source => source.Kind == CaptureSourceKind.SinopecMail).IsEnabled,
+        "Mail policy should disable IMAP when no credential is saved.");
 
+    // 缓存缺失但已保存账号时：回退到 IMAP 直接收信。
+    var imapFallback = CaptureAdapterFactory.ApplyMailSourcePolicy(
+        mailSources,
+        archiveAvailable: false,
+        hasImapCredential: true);
+    AssertFalse(
+        imapFallback.Single(source => source.Kind == CaptureSourceKind.SinopecMailArchive).IsEnabled,
+        "Mail policy should disable a missing local cache.");
+    AssertTrue(
+        imapFallback.Single(source => source.Kind == CaptureSourceKind.SinopecMail).IsEnabled,
+        "Mail policy should keep IMAP enabled when a credential is saved.");
+
+    // 适配器装配只取非缓存源，避免测试依赖本机是否安装石化邮客户端。
     var adapters = CaptureAdapterFactory.CreateAdapters(
-        definitions,
+        definitions.Where(source => source.Kind != CaptureSourceKind.SinopecMailArchive),
         new StaticWindowTextSnapshotProvider(Array.Empty<WindowTextSnapshot>()));
 
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.LocalExport"), "Live adapters should include WeChat local export adapter.");
@@ -2461,7 +2481,7 @@ static Task TestLiveCaptureAdapterFactoryAsync()
     AssertTrue(adapters.Any(adapter => adapter.Name == "WeChat.JsonlDirectory"), "Live adapters should still include WeChat JSONL adapter.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "DingTalk.JsonlDirectory"), "Live adapters should preserve extensibility for other sources.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "Shihuatong.LocalDatabase"), "Live adapters should include Shihuatong local database adapter.");
-    AssertFalse(adapters.Any(adapter => adapter.Name == "SinopecMail.LocalCache"), "Live adapters must not include the local mail cache adapter.");
+    AssertFalse(adapters.Any(adapter => adapter.Name == "SinopecMail.LocalCache"), "Filtered sources must not create the local mail cache adapter.");
     AssertTrue(adapters.Any(adapter => adapter.Name == "SinopecMail"), "Live adapters should include the SinopecMail IMAP adapter.");
 
     var nativeReader = new FakeWeChatLocalDatabaseReader();
@@ -5577,7 +5597,10 @@ static async Task TestLiveWeChatLocalExportCapturePipelineAsync()
     var offsetRepository = new SqliteProcessingOffsetRepository(databasePath);
     var sources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
         .Where(source => source.Kind != CaptureSourceKind.WeChatLocalDatabase &&
-                         source.Kind != CaptureSourceKind.ShihuatongLocalDatabase)
+                         source.Kind != CaptureSourceKind.ShihuatongLocalDatabase &&
+                         // 石化邮本地缓存指向本机真实邮箱，测试必须排除以免读到用户邮件。
+                         source.Kind != CaptureSourceKind.SinopecMailArchive &&
+                         source.Kind != CaptureSourceKind.SinopecMail)
         .ToArray();
     var pipeline = new MessageCapturePipeline(
         adapters: CaptureAdapterFactory.CreateAdapters(sources),
@@ -5729,7 +5752,10 @@ static async Task TestCapturePipelineWithSavedSettingsAsync()
 
     var defaultSources = CaptureAdapterFactory.CreateDefaultLiveSources(captureRoot)
         .Where(source => source.Kind != CaptureSourceKind.WeChatLocalDatabase &&
-                         source.Kind != CaptureSourceKind.ShihuatongLocalDatabase)
+                         source.Kind != CaptureSourceKind.ShihuatongLocalDatabase &&
+                         // 石化邮本地缓存指向本机真实邮箱，测试必须排除以免读到用户邮件。
+                         source.Kind != CaptureSourceKind.SinopecMailArchive &&
+                         source.Kind != CaptureSourceKind.SinopecMail)
         .ToArray();
     var effectiveSources = defaultSources.Select(source =>
     {
@@ -6041,15 +6067,23 @@ static async Task TestWeeklyReportCollectorAsync()
     AssertTrue(rejectedWindow, "An inverted time window must be rejected instead of silently producing an empty report.");
 }
 
+/// <summary>
+/// “关注设置”里项目状态与颜色已合并为一个下拉框：状态决定颜色，
+/// 下拉项是“圆点 + 状态名”，项目行圆点绑定状态色。独立的颜色选择器不得回归。
+/// </summary>
 static async Task TestProjectColorSettingsXamlAsync()
 {
     var xamlPath = Path.Combine(ProjectToolPaths.ProjectRoot, "src", "WechatDashboard.App", "MainWindow.xaml");
     var xaml = await File.ReadAllTextAsync(xamlPath, CancellationToken.None);
-    AssertTrue(xaml.Contains("x:Name=\"NewFollowedProjectColorComboBox\"", StringComparison.Ordinal), "Project creation should retain its fixed-palette color selector.");
-    AssertTrue(xaml.Contains("ItemsSource=\"{Binding DataContext.ProjectColors, RelativeSource={RelativeSource AncestorType=Window}}\"", StringComparison.Ordinal), "The project list color editor should use the shared fixed palette.");
-    AssertTrue(xaml.Contains("SelectedValue=\"{Binding Color, Mode=OneWay}\"", StringComparison.Ordinal), "The color dropdown should display the persisted row color without mutating the row before persistence succeeds.");
-    AssertTrue(xaml.Contains("SelectionChanged=\"FollowedProjectColorComboBox_SelectionChanged\"", StringComparison.Ordinal), "The project color dropdown should save selection changes immediately.");
-    AssertFalse(xaml.Contains("<TextBlock Text=\"{Binding Color}\" Foreground=\"{Binding Color}\"", StringComparison.Ordinal), "The project color column should no longer render a non-editable color code.");
+    AssertTrue(xaml.Contains("x:Name=\"NewFollowedProjectStageComboBox\"", StringComparison.Ordinal), "Project creation should offer the merged stage selector.");
+    AssertTrue(xaml.Contains("x:Name=\"FollowedProjectStageComboBox\"", StringComparison.Ordinal), "Each project row should keep exactly one merged stage selector.");
+    AssertTrue(xaml.Contains("SelectedValue=\"{Binding Stage, Mode=OneWay}\"", StringComparison.Ordinal), "The stage dropdown should display the persisted row stage without mutating the row before persistence succeeds.");
+    AssertTrue(xaml.Contains("SelectionChanged=\"FollowedProjectStageComboBox_SelectionChanged\"", StringComparison.Ordinal), "The merged stage dropdown should save selection changes immediately.");
+    AssertTrue(xaml.Contains("Background=\"{Binding Color}\" Margin=\"0,0,6,0\" VerticalAlignment=\"Center\"", StringComparison.Ordinal), "Each stage option should render a color dot before its name.");
+    AssertTrue(xaml.Contains("Background=\"{Binding StageColor}\"", StringComparison.Ordinal), "The project row dot should follow the stage color, not an independently chosen color.");
+    AssertFalse(xaml.Contains("NewFollowedProjectColorComboBox", StringComparison.Ordinal), "The independent creation-time color selector must be gone.");
+    AssertFalse(xaml.Contains("FollowedProjectColorComboBox_SelectionChanged", StringComparison.Ordinal), "The independent row color editor must be gone.");
+    AssertFalse(xaml.Contains("DataContext.ProjectColors", StringComparison.Ordinal), "No dropdown may still bind the standalone project color palette.");
 
     var pendingXamlPath = Path.Combine(ProjectToolPaths.ProjectRoot, "src", "WechatDashboard.App", "Views", "Todos", "TodoPendingView.xaml");
     var pendingXaml = await File.ReadAllTextAsync(pendingXamlPath, CancellationToken.None);

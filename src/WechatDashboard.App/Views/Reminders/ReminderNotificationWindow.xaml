@@ -11,14 +11,15 @@
         ShowActivated="False"
         Topmost="True"
         Background="#F4F6F8">
-    <Grid Margin="12">
+    <!-- 顶部贴齐标题栏，底部只留极小呼吸位：按钮区下方不再额外垫白。 -->
+    <Grid Margin="12,0,12,4">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!-- 卡片不再重复显示窗口标题，也不保留底部操作说明：内容本身就是全部信息。 -->
-        <Border Padding="11,9"
+        <Border Padding="11,9,11,7"
                 Background="White"
                 BorderBrush="#E5E7EB"
                 BorderThickness="1"
@@ -52,15 +53,40 @@
         </Border>
 
         <StackPanel Grid.Row="1"
-                    Margin="0,10,0,0"
+                    Margin="0,3,0,0"
                     HorizontalAlignment="Right"
                     Orientation="Horizontal">
             <StackPanel.Resources>
-                <!-- 所有提醒操作统一使用紧凑图标按钮，文字说明仅保留在悬浮提示中。 -->
+                <!-- 提示条操作只保留图标：去掉默认按钮的灰底与描边，悬停时才给极淡反馈。 -->
                 <Style x:Key="ReminderIconButton" TargetType="Button">
-                    <Setter Property="Width" Value="26" />
-                    <Setter Property="Height" Value="26" />
-                    <Setter Property="Padding" Value="3" />
+                    <Setter Property="Width" Value="21" />
+                    <Setter Property="Height" Value="21" />
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="Foreground" Value="#374151" />
+                    <Setter Property="Background" Value="Transparent" />
+                    <Setter Property="BorderThickness" Value="0" />
+                    <Setter Property="Cursor" Value="Hand" />
+                    <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="Hover"
+                                        Background="Transparent"
+                                        CornerRadius="4">
+                                    <ContentPresenter HorizontalAlignment="Center"
+                                                      VerticalAlignment="Center" />
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Hover" Property="Background" Value="#EDF1F6" />
+                                    </Trigger>
+                                    <Trigger Property="IsPressed" Value="True">
+                                        <Setter TargetName="Hover" Property="Background" Value="#DEE5EE" />
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
                 </Style>
             </StackPanel.Resources>
 
@@ -68,8 +94,8 @@
             <Button Style="{StaticResource ReminderIconButton}"
                     ToolTip="查看详情"
                     Click="Details_Click">
-                <Path Width="13"
-                      Height="13"
+                <Path Width="11"
+                      Height="11"
                       Data="M4,1 H11 L16,6 V19 H4 Z M11,1 V6 H16 M7,10 H13 M7,14 H13"
                       Stretch="Uniform"
                       Fill="Transparent"
@@ -82,11 +108,11 @@
 
             <!-- 知道了：眼睛图标表示已知晓，不改变待办状态。 -->
             <Button Style="{StaticResource ReminderIconButton}"
-                    Margin="5,0,0,0"
+                    Margin="2,0,0,0"
                     ToolTip="知道了"
                     Click="Acknowledge_Click">
-                <Path Width="14"
-                      Height="14"
+                <Path Width="12"
+                      Height="12"
                       Data="M1,10 C4,5 7,3 10,3 C13,3 16,5 19,10 C16,15 13,17 10,17 C7,17 4,15 1,10 Z M13,10 A3,3 0 1,1 7,10 A3,3 0 1,1 13,10"
                       Stretch="Uniform"
                       Fill="Transparent"
@@ -97,11 +123,11 @@
 
             <!-- 延后十分钟：时钟图标对应延期提醒。 -->
             <Button Style="{StaticResource ReminderIconButton}"
-                    Margin="5,0,0,0"
+                    Margin="2,0,0,0"
                     ToolTip="延后10分钟"
                     Click="Snooze_Click">
-                <Path Width="13"
-                      Height="13"
+                <Path Width="11"
+                      Height="11"
                       Data="M12,2 A10,10 0 1,0 12,22 A10,10 0 1,0 12,2 M12,6 V12 L16,14"
                       Stretch="Uniform"
                       Fill="Transparent"
@@ -112,20 +138,19 @@
                       StrokeEndLineCap="Round" />
             </Button>
 
-            <!-- 完成：保留蓝色强调，使用勾选图标完成待办。 -->
+            <!-- 完成：用蓝色描边勾作为主操作强调，不再套蓝色方块底色。 -->
             <Button Style="{StaticResource ReminderIconButton}"
-                    Margin="5,0,0,0"
+                    Margin="2,0,0,0"
                     ToolTip="完成"
-                    Background="#2563EB"
-                    Foreground="White"
+                    Foreground="#2563EB"
                     Click="Complete_Click">
-                <Path Width="13"
-                      Height="13"
+                <Path Width="12"
+                      Height="12"
                       Data="M4,12 L9,17 L20,6"
                       Stretch="Uniform"
                       Fill="Transparent"
                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                      StrokeThickness="1.9"
+                      StrokeThickness="2.2"
                       StrokeLineJoin="Round"
                       StrokeStartLineCap="Round"
                       StrokeEndLineCap="Round" />

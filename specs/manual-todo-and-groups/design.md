@@ -309,7 +309,7 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 关注设置原先有四个固定高度 `DataGrid`（别名 240、关注群 180、项目 130、关键字 180），各自带内部滚动条，与外层 `ScrollViewer` 形成多层嵌套。改为：
 
 - 别名与关注群 `DataGrid` 去掉固定高度，交由外层滚动条统一滚动；两者仍以选中行 + “删除选中”操作，行为不变。
-- 项目与关键字不再用两张平铺表（关键字表重复“项目”列）。`FollowedProjectTreeRow` 把项目与其关键字投影为一个节点，界面用自绘标题的可折叠 `Expander` 渲染：标题为颜色圆点、项目名、关键字数量、颜色下拉和删除项目；展开后缩进显示每条关键字（左侧引导线），逐条删除；“添加关键字”输入框位于节点内部，按钮通过 `Tag` 指向同节点输入框，`DataContext` 定位项目。
+- 项目与关键字不再用两张平铺表（关键字表重复“项目”列）。`FollowedProjectTreeRow` 把项目与其关键字投影为一个节点，界面用自绘标题的可折叠 `Expander` 渲染：标题为状态色圆点、项目名、关键字数量、状态下拉和删除项目（颜色下拉已于 2026-11-04 与状态合并，见 D-039）；展开后缩进显示每条关键字（左侧引导线），逐条删除；“添加关键字”输入框位于节点内部，按钮通过 `Tag` 指向同节点输入框，`DataContext` 定位项目。
 - 删除项目/关键字从“表格选中项”改为按 `sender.DataContext` 定位，移除 `ProjectKeywordProjectComboBox` 这一独立添加入口；每个项目至少保留一个关键字的约束保持。
 - 展开状态不跨刷新保存，重新加载后默认全部展开，避免删除或改色后节点折叠导致用户丢失上下文。（REQ-015、REQ-016、REQ-018）
 
@@ -363,17 +363,29 @@ v5 在现有迁移事务和校验和机制内执行，不改写项目名称、�
 
 ### D-038：项目状态进入数据模型并决定周报/简报下拉的排序与文案
 
-项目看板的周报与简报各自有一个项目下拉，原先都只在下拉第一次被使用（点“生成”）时才填充 `ItemsSource`，并且只显示 `ProjectName`。结果是同一个看板里项目越来越多以后，无法分辨哪个在建、哪个已转交；而且状态一旦变化，已填充过的下拉仍然保留旧的排序与旧文案，直到用户重新点一次“生成”。
+项目看板的周报与简报各自有一个项目下拉，原先都只在下拉第一次被使用（点“生成”）时才填充 `ItemsSource`，并且只显示 `ProjectName`。结果是同一个看板里项目越来越多以后，无法分辨哪个在建、哪个已移交；而且状态一旦变化，已填充过的下拉仍然保留旧的排序与旧文案，直到用户重新点一次“生成”。
 
 因此把状态做成数据而不是界面状态：
 
 - 迁移 v10 给 `followed_projects` 加 `stage TEXT NOT NULL DEFAULT 'Construction'`，存枚举名（`Construction/Operation/Handover`）。`ProjectStagePolicy` 负责显示名、存储值、解析与排序权重；未知值一律回落“在建”，旧库不需要回填脚本。
-- 排序固定为“在建 → 运维 → 转交”，同状态内按 `created_at`、`id`。仓储 SQL 与 `MainWindow.GetActiveProjectsAsync` 各排一次：后者是“下拉顺序不依赖 SQL 实现”的契约，删掉它会让排序变成隐式行为。
+- 排序固定为“在建 → 运维 → 移交”，同状态内按 `created_at`、`id`。仓储 SQL 与 `MainWindow.GetActiveProjectsAsync` 各排一次：后者是“下拉顺序不依赖 SQL 实现”的契约，删掉它会让排序变成隐式行为。
 - 下拉绑定 `FollowedProject.ProjectDisplayName`（`状态 · 项目名`）。文案与排序必须同时生效，否则“排在前面的项目”在界面上看不出原因。
 - 刷新点收敛到 `LoadWeeklyReportProjectsAsync` / `LoadBriefingProjectsAsync`：启动、新增项目、删除项目、状态切换各调一次（`ReloadProjectPickersAsync` 并行执行两者），生成前再各自加载一次，避免用旧列表生成文件。`ApplyProjectsToPicker` 保留仍存在的原选择，列表为空时把 `ItemsSource` 和 `SelectedItem` 都清掉，已删除项目不会残留。
-- 状态下拉放在“关注设置”的项目节点里，与颜色下拉同构（`SelectedValue` 单向上源 + `SelectionChanged` 落库），是唯一的写入入口；保存后只刷新项目列表与两个下拉，不改动关键字、成员和待办归属。
+- **状态与颜色已合并（2026-11-04 用户要求）**：项目节点只保留一个状态下拉，下拉项渲染为“颜色圆点 + 状态名”（`ProjectStageOption(Name, Color)`，`ComboBox.ItemTemplate` 内的 `Border` 绑定 `Color`），独立的颜色下拉与色板列表（`ProjectColors`）已删除。状态唯一决定颜色：在建 `#DC2626` 红、运维 `#2563EB` 蓝、移交 `#4B5563` 灰（`ProjectStageColorPolicy.GetColor`）。写入走 `UpdateStageAndColorAsync`（状态与颜色同一事务），新建项目也通过同一方法补齐颜色；项目行圆点绑定 `FollowedProjectTreeRow.StageColor` 而不是库里的 `Color`，历史自选色不会影响显示，加载项目列表时按状态色静默归一。状态下拉（`SelectedValue` 单向上源 + `SelectionChanged`）是唯一的状态/颜色写入入口；保存后只刷新项目列表与两个下拉，不改动关键字、成员和待办归属。
 
 代价：项目树节点投影必须改取仓储实体（`FollowedProject`）而不是 `FollowedProjectRow`，否则 `Stage` 无处可取；两个下拉宽度相应加宽以容纳状态前缀。（REQ-020；AC-087、AC-088）
+
+### D-039：状态与颜色合并为一个下拉，状态唯一决定颜色
+
+用户要求“状态跟颜色合并，在建红色、运维蓝色、移交灰色，选择框内容为文字前面一个颜色圆点”。原先项目节点上并排两个下拉（状态、颜色），同一个项目可以同时是“在建 + 绿色”，界面自身就自相矛盾，色板七色对区分状态没有任何信息量。
+
+- 颜色不再是独立用户输入，而是状态的函数：`ProjectStageColorPolicy.GetColor`（Application 层，在建 `#DC2626`、运维 `#2563EB`、移交 `#4B5563`）。Domain 不能反向依赖 `ProjectColorPolicy`，所以映射放在 Application，Domain 的 `ProjectStagePolicy` 只保留显示名/存储值/排序。
+- 项目节点与“添加项目”行都只保留下拉，`ProjectStageOption` 增加 `Color` 字段，`ComboBox.ItemTemplate` 渲染“`Border` 圆点 + 状态名”。**不使用 `DisplayMemberPath`**：它会覆盖 `ItemTemplate`，闭合状态就只剩文字，正是本次要修的观感。
+- 写入统一走新增的 `UpdateStageAndColorAsync`（单事务同时写 `stage` 与 `color`）。若沿用两次 `UpdateStageAsync` + `UpdateColorAsync`，中途失败会留下“状态已改、颜色还是旧色”的中间态。`UpdateStageAsync` / `UpdateColorAsync` 保留（测试与历史调用仍在使用），但不再是界面写入路径。
+- 项目行圆点绑定 `FollowedProjectTreeRow.StageColor`（由 `Stage` 计算）而不是库里的 `Color`，因此历史自选色不影响显示；`LoadFollowedProjectsAsync` 额外对颜色与状态不一致的行做一次静默归一，使待办、已办理、日程卡片（都读 `FollowedProject.Color`）与项目树看到同一个颜色。归一失败只吞异常、不阻塞设置页加载。
+- `ProjectColors` / `ProjectColorOption` 随之删除：颜色已无独立入口，留着只会让人以为还能单独选色。（REQ-016 的“独立选色”由本条取代）
+
+代价：颜色语义被绑定到状态上，无法再给同状态项目分配不同颜色用于视觉区分；若将来恢复该能力，必须同时恢复独立入口并去掉归一化写入。
 
 ## 4. 组件职责
 

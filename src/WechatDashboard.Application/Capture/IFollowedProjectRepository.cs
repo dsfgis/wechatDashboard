@@ -39,10 +39,21 @@ public interface IFollowedProjectRepository
         string color,
         CancellationToken cancellationToken);
 
-    /// <summary>按稳定项目 ID 更新生命周期状态（在建/运维/转交）。</summary>
+    /// <summary>按稳定项目 ID 更新生命周期状态（在建/运维/移交）。</summary>
     Task<UpdateFollowedProjectStageOutcome> UpdateStageAsync(
         long id,
         ProjectStage stage,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 在同一事务内更新生命周期状态与颜色。
+    /// 界面已把状态与颜色合并成一个下拉框（状态决定颜色），
+    /// 因此这是一次写入而不是两次，避免出现“状态已改、颜色未改”的中间态。
+    /// </summary>
+    Task<UpdateFollowedProjectStageOutcome> UpdateStageAndColorAsync(
+        long id,
+        ProjectStage stage,
+        string color,
         CancellationToken cancellationToken);
 
     /// <summary>按 ID 删除关注项目。</summary>

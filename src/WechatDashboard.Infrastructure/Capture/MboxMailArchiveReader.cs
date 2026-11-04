@@ -123,6 +123,106 @@ public sealed class MboxMailArchiveReader
         return new MboxReadResult(messages, position, reset);
     }
 
+    /// <summary>
+    /// 首次运行的回溯读取：只取文件末尾最近的 <paramref name="maxMessages"/> 封，
+    /// 回看窗口不超过 <paramref name="maxBytes"/> 字节，避免 2 GB 邮箱一次性全量解析。
+    /// 返回的 <see cref="MboxReadResult.NextOffset"/> 是文件末尾，后续轮次按增量继续。
+    /// </summary>
+    public MboxReadResult ReadTail(int maxMessages, long maxBytes)
+    {
+        if (!Exists)
+        {
+            throw new FileNotFoundException("未找到石化邮本地邮件缓存文件。", _path);
+        }
+
+        var limit = maxMessages <= 0 ? 50 : maxMessages;
+        var window = maxBytes <= 0 ? 32L * 1024 * 1024 : maxBytes;
+
+        long start;
+        using (var stream = new FileStream(
+            _path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            64 * 1024,
+            FileOptions.SequentialScan))
+        {
+            start = FindTailStart(stream, limit, window);
+        }
+
+        return ReadNew(start, limit);
+    }
+
+    /// <summary>
+    /// 定位尾部窗口的起始偏移：在最后 <paramref name="maxBytes"/> 字节内找出所有 mbox 分隔行，
+    /// 取倒数第 <paramref name="limit"/> 个。窗口内不足时从窗口首个分隔行开始，避免解析半条消息。
+    /// </summary>
+    private static long FindTailStart(FileStream stream, int limit, long maxBytes)
+    {
+        var length = stream.Length;
+        if (length == 0)
+        {
+            return 0;
+        }
+
+        var windowSize = (int)Math.Min(length, Math.Max(maxBytes, 1));
+        var baseOffset = length - windowSize;
+        var buffer = new byte[windowSize];
+        stream.Seek(baseOffset, SeekOrigin.Begin);
+
+        var read = 0;
+        while (read < windowSize)
+        {
+            var chunk = stream.Read(buffer, read, windowSize - read);
+            if (chunk <= 0)
+            {
+                break;
+            }
+
+            read += chunk;
+        }
+
+        var separators = new List<long>();
+        for (var index = 0; index < read; index++)
+        {
+            if (!IsSeparatorAt(buffer, index, read))
+            {
+                continue;
+            }
+
+            separators.Add(baseOffset + index);
+        }
+
+        if (separators.Count == 0)
+        {
+            // 窗口内没有分隔行，说明整段都属于同一封邮件，只能从头解析。
+            return 0;
+        }
+
+        // 取倒数第 limit 个分隔行：seps[count - limit] 就是最后 limit 封中最靠前那封的起始。
+        var startIndex = Math.Max(0, separators.Count - limit);
+        return separators[startIndex];
+    }
+
+    /// <summary>判断 buffer 的 index 处是否是 mbox 的 <c>From </c> 分隔行起始。</summary>
+    private static bool IsSeparatorAt(byte[] buffer, int index, int length)
+    {
+        if (buffer[index] != (byte)'F')
+        {
+            return false;
+        }
+
+        // 分隔行必须位于行首：文件/窗口开头，或紧跟在换行之后。
+        if (index > 0 && buffer[index - 1] != (byte)'\n')
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> marker = "From "u8;
+        return index + marker.Length <= length
+            && buffer.AsSpan(index, marker.Length).SequenceEqual(marker);
+    }
+
     /// <summary>把 MimeMessage 转成统一的邮件快照；缺少 Message-ID 时返回 null 由调用方回退游标。</summary>
     private static MailEnvelope? ToEnvelope(MimeMessage message, ref int sequence)
     {

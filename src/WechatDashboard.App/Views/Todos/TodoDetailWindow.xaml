@@ -1,7 +1,7 @@
 <Window x:Class="WechatDashboard.App.Views.Todos.TodoDetailWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="{Binding Title, FallbackValue=待办详情}" Width="560" Height="600" MinWidth="480" MinHeight="420"
+        Title="{Binding Title, FallbackValue=待办详情}" Width="560" Height="660" MinWidth="480" MinHeight="460"
         WindowStartupLocation="CenterOwner" Background="#F4F6F8"
         FontSize="12">
     <Window.Resources>
@@ -70,6 +70,15 @@
                     </Border>
                 </StackPanel>
             </DockPanel>
+
+            <!-- 状态：只有“完成”会移出待办理，进行中与等待仍留在待办理列表 -->
+            <TextBlock Text="状态" Style="{StaticResource FieldLabel}" />
+            <ComboBox x:Name="StatusComboBox" ItemsSource="{Binding StatusOptions}"
+                      DisplayMemberPath="Name" SelectedValuePath="Value"
+                      SelectedValue="{Binding Status, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                      Margin="0,4,0,0" />
+            <TextBlock Text="选择“完成”并保存后移入已办理；进行中、等待仍留在待办理。"
+                       Style="{StaticResource HintText}" Margin="0,4,0,10" />
 
             <!-- 优先级与项目同行，减少纵向占用 -->
             <Grid Margin="0,0,0,10">

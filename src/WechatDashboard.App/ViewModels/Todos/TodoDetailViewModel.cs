@@ -68,6 +68,8 @@ public sealed class TodoDetailViewModel : ObservableObject
         _originalPriority = _todo.Priority;
         _priority = PrioritySettings.Current.Normalize(_todo.Priority);
         _status = _todo.Status;
+        // 状态下拉随打开时的真实状态生成；历史“已忽略”记录补一项以免显示空白。
+        StatusOptions = TodoStatusOption.ForCurrent(_todo.Status);
         SetDueSelection(_todo.DueAt);
         var reminderSelection = _currentReminder?.ScheduledAt.LocalDateTime ?? GetDefaultReminderTime(_clock.Now);
         _reminderDate = reminderSelection.Date;
@@ -100,7 +102,8 @@ public sealed class TodoDetailViewModel : ObservableObject
     public event EventHandler? RequestClose;
     /// <summary>可选优先级，数量与颜色跟随“优先级设置”。</summary>
     public IReadOnlyList<PriorityOption> PriorityOptions { get; } = PriorityOption.FromCurrentPalette();
-    public IReadOnlyList<TodoStatus> Statuses { get; } = Enum.GetValues<TodoStatus>();
+    /// <summary>详情窗口的状态选项：只有“完成”会移入已办理，其余状态仍留在待办理。</summary>
+    public IReadOnlyList<TodoStatusOption> StatusOptions { get; }
     public ObservableCollection<TodoProjectOption> ProjectOptions { get; } = new();
     public IReadOnlyList<int> DueHours { get; } = Enumerable.Range(0, 24).ToArray();
     public IReadOnlyList<int> DueMinutes { get; } = Enumerable.Range(0, 60).ToArray();

@@ -218,14 +218,16 @@ internal static class MailCaptureTests
             var reader = new MboxMailArchiveReader(path);
             var lengthAfterTwo = reader.ReadLength();
 
-            // 首次运行只采新增：游标锚定在文件末尾，因此读到 0 封。
+            // 首次运行回溯客户端已收到的邮件，而不是把游标直接锚定在末尾。
             var adapter = new MboxMailCaptureAdapter(reader, MailSourcePolicy.SinopecMail);
             var firstBatch = adapter.CaptureAsync(
                 new CaptureContext(new Dictionary<string, string>()),
                 CancellationToken.None).GetAwaiter().GetResult();
 
-            AssertEqual(0, firstBatch.Messages.Count, "首次运行不应回溯已有邮件。");
-            AssertEqual("v1:" + lengthAfterTwo, firstBatch.NextOffset, "首次运行应把游标锚定在文件末尾。");
+            AssertEqual(2, firstBatch.Messages.Count, "首次运行应回溯客户端已同步的邮件。");
+            AssertEqual("first@pcitc.com", firstBatch.Messages[0].SourceMessageKey, "回溯应按时间顺序返回较早的一封。");
+            AssertEqual("second@pcitc.com", firstBatch.Messages[1].SourceMessageKey, "回溯应把最新一封排在最后。");
+            AssertEqual("v1:" + lengthAfterTwo, firstBatch.NextOffset, "回溯结束后游标应停在文件末尾。");
 
             // 追加第三封后，增量读取只能得到这一封。
             File.AppendAllText(path, string.Empty);
@@ -288,6 +290,52 @@ internal static class MailCaptureTests
             var result = reader.ReadNew(offset: 999_999_999, maxMessages: 10);
             AssertTrue(result.Reset, "游标超出文件长度时应标记为重置。");
             AssertEqual(1, result.Messages.Count, "重置后应从文件头读到那一封邮件。");
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    // 首次回溯只取最近 N 封：不能把 2 GB 邮箱整份解析，也不能因为窗口定位漏掉最新邮件。
+    internal static Task TestMboxTailBackfillAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "INBOX");
+
+        try
+        {
+            File.WriteAllBytes(path, BuildMboxEntry("<a@pcitc.com>", "第一封", "正文A", SampleSentAt));
+            foreach (var (messageId, subject, hours) in new[]
+                     {
+                         ("b@pcitc.com", "第二封", 1),
+                         ("c@pcitc.com", "第三封", 2),
+                         ("d@pcitc.com", "第四封", 3)
+                     })
+            {
+                var entry = BuildMboxEntry($"<{messageId}>", subject, "正文", SampleSentAt.AddHours(hours));
+                using var appender = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                appender.Write(entry, 0, entry.Length);
+            }
+
+            var reader = new MboxMailArchiveReader(path);
+            var length = reader.ReadLength();
+
+            var tail = reader.ReadTail(maxMessages: 2, maxBytes: 1024 * 1024);
+            AssertEqual(2, tail.Messages.Count, "回溯应只取最近两封。");
+            AssertEqual("c@pcitc.com", tail.Messages[0].MessageId, "回溯结果应按 UID 升序，先返回较早的一封。");
+            AssertEqual("d@pcitc.com", tail.Messages[1].MessageId, "回溯结果应把最后一封排在末尾。");
+            AssertEqual(length, tail.NextOffset, "回溯结束后游标应停在文件末尾。");
+
+            // 回溯封数大于文件内邮件数时返回全部，不应报错或补空。
+            var all = reader.ReadTail(maxMessages: 50, maxBytes: 1024 * 1024);
+            AssertEqual(4, all.Messages.Count, "封数上限大于邮件总数时应返回全部邮件。");
+
+            // 窗口内没有任何分隔行时回退为从头读取，宁可多读也不能漏读。
+            var fallback = reader.ReadTail(maxMessages: 50, maxBytes: 16);
+            AssertEqual(4, fallback.Messages.Count, "窗口过小时应回退为从头读取。");
             return Task.CompletedTask;
         }
         finally

@@ -13,8 +13,6 @@ public sealed record TodoProjectOption(long? Id, string Name, string Color)
     public static TodoProjectOption Unassigned { get; } = new(null, "未指定项目", ProjectColorPolicy.DefaultColor);
 }
 
-public sealed record ProjectColorOption(string Name, string Color);
-
 public sealed class TodoCreateViewModel : ObservableObject
 {
     private readonly TodoApplicationService _todos;
