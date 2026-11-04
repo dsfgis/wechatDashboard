@@ -11,35 +11,32 @@
         ShowActivated="False"
         Topmost="True"
         Background="#F4F6F8">
-    <Grid Margin="14">
+    <Grid Margin="12">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 卡片不再重复显示窗口标题，仅在有多条排队提醒时保留数量提示。 -->
-        <Border Padding="7,2"
-                HorizontalAlignment="Right"
-                VerticalAlignment="Center"
-                Background="#FEF3C7"
-                CornerRadius="8"
-                Visibility="{Binding QueueBadgeVisibility}">
-            <TextBlock Text="{Binding QueueBadgeText}"
-                       FontSize="11"
-                       Foreground="#92400E" />
-        </Border>
-
-        <Border Grid.Row="1"
-                Margin="0,10,0,0"
-                Padding="11"
+        <!-- 卡片不再重复显示窗口标题，也不保留底部操作说明：内容本身就是全部信息。 -->
+        <Border Padding="11,9"
                 Background="White"
                 BorderBrush="#E5E7EB"
                 BorderThickness="1"
                 CornerRadius="8">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <StackPanel>
+                    <!-- 数量角标放进卡片内部：无排队时折叠后不占用任何高度，卡片顶部不会留白。 -->
+                    <Border Padding="7,2"
+                            Margin="0,0,0,6"
+                            HorizontalAlignment="Right"
+                            Background="#FEF3C7"
+                            CornerRadius="8"
+                            Visibility="{Binding QueueBadgeVisibility}">
+                        <TextBlock Text="{Binding QueueBadgeText}"
+                                   FontSize="11"
+                                   Foreground="#92400E" />
+                    </Border>
+
                     <TextBlock Text="{Binding TodoTitle}"
                                FontSize="12"
                                FontWeight="SemiBold"
@@ -54,23 +51,16 @@
             </ScrollViewer>
         </Border>
 
-        <TextBlock Grid.Row="2"
-                   Margin="0,8,0,0"
-                   FontSize="11"
-                   Foreground="#6B7280"
-                   Text="完成后，该待办将移入已办理，相关提醒将同时取消。"
-                   TextWrapping="Wrap" />
-
-        <StackPanel Grid.Row="3"
-                    Margin="0,12,0,0"
+        <StackPanel Grid.Row="1"
+                    Margin="0,10,0,0"
                     HorizontalAlignment="Right"
                     Orientation="Horizontal">
             <StackPanel.Resources>
                 <!-- 所有提醒操作统一使用紧凑图标按钮，文字说明仅保留在悬浮提示中。 -->
                 <Style x:Key="ReminderIconButton" TargetType="Button">
-                    <Setter Property="Width" Value="30" />
-                    <Setter Property="Height" Value="30" />
-                    <Setter Property="Padding" Value="5" />
+                    <Setter Property="Width" Value="26" />
+                    <Setter Property="Height" Value="26" />
+                    <Setter Property="Padding" Value="3" />
                 </Style>
             </StackPanel.Resources>
 
@@ -78,13 +68,13 @@
             <Button Style="{StaticResource ReminderIconButton}"
                     ToolTip="查看详情"
                     Click="Details_Click">
-                <Path Width="17"
-                      Height="17"
+                <Path Width="13"
+                      Height="13"
                       Data="M4,1 H11 L16,6 V19 H4 Z M11,1 V6 H16 M7,10 H13 M7,14 H13"
                       Stretch="Uniform"
                       Fill="Transparent"
                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                      StrokeThickness="1.6"
+                      StrokeThickness="1.4"
                       StrokeLineJoin="Round"
                       StrokeStartLineCap="Round"
                       StrokeEndLineCap="Round" />
@@ -92,31 +82,31 @@
 
             <!-- 知道了：眼睛图标表示已知晓，不改变待办状态。 -->
             <Button Style="{StaticResource ReminderIconButton}"
-                    Margin="6,0,0,0"
+                    Margin="5,0,0,0"
                     ToolTip="知道了"
                     Click="Acknowledge_Click">
-                <Path Width="18"
-                      Height="18"
+                <Path Width="14"
+                      Height="14"
                       Data="M1,10 C4,5 7,3 10,3 C13,3 16,5 19,10 C16,15 13,17 10,17 C7,17 4,15 1,10 Z M13,10 A3,3 0 1,1 7,10 A3,3 0 1,1 13,10"
                       Stretch="Uniform"
                       Fill="Transparent"
                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                      StrokeThickness="1.5"
+                      StrokeThickness="1.3"
                       StrokeLineJoin="Round" />
             </Button>
 
             <!-- 延后十分钟：时钟图标对应延期提醒。 -->
             <Button Style="{StaticResource ReminderIconButton}"
-                    Margin="6,0,0,0"
+                    Margin="5,0,0,0"
                     ToolTip="延后10分钟"
                     Click="Snooze_Click">
-                <Path Width="17"
-                      Height="17"
+                <Path Width="13"
+                      Height="13"
                       Data="M12,2 A10,10 0 1,0 12,22 A10,10 0 1,0 12,2 M12,6 V12 L16,14"
                       Stretch="Uniform"
                       Fill="Transparent"
                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                      StrokeThickness="1.7"
+                      StrokeThickness="1.5"
                       StrokeLineJoin="Round"
                       StrokeStartLineCap="Round"
                       StrokeEndLineCap="Round" />
@@ -124,18 +114,18 @@
 
             <!-- 完成：保留蓝色强调，使用勾选图标完成待办。 -->
             <Button Style="{StaticResource ReminderIconButton}"
-                    Margin="6,0,0,0"
+                    Margin="5,0,0,0"
                     ToolTip="完成"
                     Background="#2563EB"
                     Foreground="White"
                     Click="Complete_Click">
-                <Path Width="17"
-                      Height="17"
+                <Path Width="13"
+                      Height="13"
                       Data="M4,12 L9,17 L20,6"
                       Stretch="Uniform"
                       Fill="Transparent"
                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                      StrokeThickness="2"
+                      StrokeThickness="1.9"
                       StrokeLineJoin="Round"
                       StrokeStartLineCap="Round"
                       StrokeEndLineCap="Round" />

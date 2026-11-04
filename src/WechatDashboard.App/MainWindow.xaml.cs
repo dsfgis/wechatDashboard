@@ -436,6 +436,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         new("粉色", ProjectColorPolicy.Pink)
     ];
 
+    /// <summary>项目生命周期状态选项：在建 / 运维 / 转交，顺序即下拉框与排序顺序。</summary>
+    public IReadOnlyList<ProjectStageOption> ProjectStageOptions { get; } =
+    [
+        new(ProjectStage.Construction, "在建"),
+        new(ProjectStage.Operation, "运维"),
+        new(ProjectStage.Handover, "转交")
+    ];
+
     /// <summary>窗口加载完成：初始化数据库、加载采集源设置，并在读取器就绪时读取当天消息。</summary>
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
@@ -850,6 +858,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadUserAliasesAsync();
         await LoadFollowedChatsAsync();
         await LoadFollowedProjectsAsync();
+        // 项目下拉先填好，打开“项目看板”即可看到当前状态与排序，不必先点生成。
+        await ReloadProjectPickersAsync();
         if (seedIfEmpty)
         {
             // 空库时播种示例，便于首次体验
@@ -977,12 +987,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         try
         {
-            await _databaseInitializer.InitializeAsync(CancellationToken.None);
-            var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
-            var activeProjects = projects.Where(project => project.IsActive).ToList();
+            // 生成前重读项目：状态切换后排序与“状态 · 项目名”文案必须立刻生效。
+            var activeProjects = await LoadBriefingProjectsAsync();
             if (activeProjects.Count == 0)
             {
-                BriefingProjectComboBox.ItemsSource = null;
                 BriefingStatusText.Text = "暂无启用的关注项目。请先在“关注设置”中添加项目。";
                 BriefingResultTextBox.Clear();
                 // 项目被删除后，旧建议不能再跨项目应用。
@@ -991,12 +999,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ProjectBriefingExpander.IsExpanded = true;
                 return;
             }
-
-            // 每次生成前刷新项目下拉，并保留仍存在的原选择。
-            var previouslySelected = (BriefingProjectComboBox.SelectedItem as FollowedProject)?.Id;
-            BriefingProjectComboBox.ItemsSource = activeProjects;
-            BriefingProjectComboBox.SelectedItem =
-                activeProjects.FirstOrDefault(project => project.Id == previouslySelected) ?? activeProjects[0];
 
             if (BriefingProjectComboBox.SelectedItem is not FollowedProject project)
             {
@@ -1381,22 +1383,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         GenerateWeeklyReportButton.IsEnabled = false;
         try
         {
-            await _databaseInitializer.InitializeAsync(CancellationToken.None);
-            var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
-            var activeProjects = projects.Where(project => project.IsActive).ToArray();
-            if (activeProjects.Length == 0)
+            // 生成前重读项目：状态切换后排序与“状态 · 项目名”文案必须立刻生效。
+            var activeProjects = await LoadWeeklyReportProjectsAsync();
+            if (activeProjects.Count == 0)
             {
-                WeeklyReportProjectComboBox.ItemsSource = null;
                 WeeklyReportStatusText.Text = "暂无启用的关注项目，请先在“关注设置”中添加项目。";
                 WeeklyReportResultTextBox.Clear();
                 return;
             }
 
-            // 每次生成前刷新项目列表，并尽量保留用户上次选择。
-            var previousProjectId = (WeeklyReportProjectComboBox.SelectedItem as FollowedProject)?.Id;
-            WeeklyReportProjectComboBox.ItemsSource = activeProjects;
-            WeeklyReportProjectComboBox.SelectedItem =
-                activeProjects.FirstOrDefault(project => project.Id == previousProjectId) ?? activeProjects[0];
             if (WeeklyReportProjectComboBox.SelectedItem is not FollowedProject project)
             {
                 WeeklyReportStatusText.Text = "请选择要生成周报的项目。";
@@ -2023,9 +2018,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Replace(FollowedProjects, projectRows);
         Replace(FollowedProjectKeywords, keywordRows);
         // 同一份数据再投影成树：每个项目节点持有自己的关键字，界面只渲染一层可折叠列表。
+        // 树节点直接取仓储对象，保留状态字段供节点内的状态下拉绑定。
         Replace(
             FollowedProjectTree,
-            projectRows.Select(project =>
+            projects.Select(project =>
             {
                 var projectKeywords = keywordRows
                     .Where(keyword => keyword.ProjectId == project.Id)
@@ -2037,6 +2033,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     project.Id,
                     project.ProjectName,
                     project.Color,
+                    project.Stage,
                     $"{projectKeywords.Length} 个关键字",
                     $"{projectMembers.Length} 位成员",
                     projectKeywords,
@@ -2061,6 +2058,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _followedProjectKeywordRepository.SaveAsync(project.Id, projectName, CancellationToken.None);
         if (NewFollowedProjectTextBox is not null) NewFollowedProjectTextBox.Text = "";
         await LoadFollowedProjectsAsync();
+        // 新项目默认“在建”，直接出现在周报与简报项目下拉的最前面。
+        await ReloadProjectPickersAsync();
         SummaryText = $"已添加项目「{projectName}」，可继续为它添加多个关键字。";
     }
 
@@ -2108,7 +2107,123 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    /// <summary>删除项目以及它关联的所有关键字；按钮位于项目树节点内，按 DataContext 定位项目。</summary>
+    /// <summary>
+    /// 项目状态切换：在建 / 运维 / 转交。保存后刷新项目列表，
+    /// 使项目树与周报、简报的项目下拉框按新状态重新排序。
+    /// </summary>
+    private async void FollowedProjectStageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox comboBox ||
+            comboBox.DataContext is not FollowedProjectTreeRow row ||
+            comboBox.SelectedItem is not ProjectStageOption selectedStage)
+        {
+            return;
+        }
+
+        if (row.Stage == selectedStage.Value)
+        {
+            return;
+        }
+
+        var originalStage = row.Stage;
+        comboBox.IsEnabled = false;
+        try
+        {
+            var outcome = await _followedProjectRepository.UpdateStageAsync(
+                row.Id,
+                selectedStage.Value,
+                CancellationToken.None);
+            if (outcome == UpdateFollowedProjectStageOutcome.Missing)
+            {
+                await LoadFollowedProjectsAsync();
+                await ReloadProjectPickersAsync();
+                SummaryText = $"项目「{row.ProjectName}」已不存在，状态未保存，项目列表已刷新。";
+                return;
+            }
+
+            await LoadFollowedProjectsAsync();
+            await ReloadProjectPickersAsync();
+            await Task.WhenAll(
+                TodoFeature.Workbench.RefreshAsync(),
+                ScheduleOverview.RefreshAsync());
+            SummaryText = outcome == UpdateFollowedProjectStageOutcome.Updated
+                ? $"已将项目「{row.ProjectName}」的状态更新为{selectedStage.Name}。"
+                : $"项目「{row.ProjectName}」的状态未变化。";
+        }
+        catch (Exception)
+        {
+            comboBox.SelectedValue = originalStage;
+            SummaryText = $"项目「{row.ProjectName}」状态保存失败，已恢复原状态。";
+        }
+        finally
+        {
+            comboBox.IsEnabled = true;
+        }
+    }
+
+    /// <summary>项目状态变化后同步刷新周报与简报的项目下拉，避免下拉里仍是旧排序与旧状态文案。</summary>
+    private Task ReloadProjectPickersAsync() =>
+        Task.WhenAll(
+            LoadWeeklyReportProjectsAsync(),
+            LoadBriefingProjectsAsync());
+
+    /// <summary>
+    /// 读取启用状态的关注项目，并按“在建 → 运维 → 转交”重排。
+    /// 排序与状态文案都以数据库最新值为准，不复用界面上已渲染的旧对象。
+    /// </summary>
+    private async Task<IReadOnlyList<FollowedProject>> GetActiveProjectsAsync()
+    {
+        await _databaseInitializer.InitializeAsync(CancellationToken.None);
+        var projects = await _followedProjectRepository.GetAllAsync(CancellationToken.None);
+        // 仓储已按状态排序，这里再排一次以保证排序规则不依赖 SQL 实现。
+        return projects
+            .Where(project => project.IsActive)
+            .OrderBy(project => ProjectStagePolicy.GetOrder(project.Stage))
+            .ThenBy(project => project.CreatedAt)
+            .ThenBy(project => project.Id)
+            .ToArray();
+    }
+
+    /// <summary>刷新周报的项目下拉，并尽量保留用户上次选择。</summary>
+    private async Task<IReadOnlyList<FollowedProject>> LoadWeeklyReportProjectsAsync()
+    {
+        var activeProjects = await GetActiveProjectsAsync();
+        ApplyProjectsToPicker(WeeklyReportProjectComboBox, activeProjects);
+        return activeProjects;
+    }
+
+    /// <summary>刷新简报的项目下拉，并尽量保留用户上次选择。</summary>
+    private async Task<IReadOnlyList<FollowedProject>> LoadBriefingProjectsAsync()
+    {
+        var activeProjects = await GetActiveProjectsAsync();
+        ApplyProjectsToPicker(BriefingProjectComboBox, activeProjects);
+        return activeProjects;
+    }
+
+    /// <summary>
+    /// 把项目列表写入下拉框：保留仍存在的原选择，否则落到排序后的第一个；
+    /// 没有可用项目时清空数据源，避免下拉里残留已删除或已停用的旧项目。
+    /// </summary>
+    private static void ApplyProjectsToPicker(ComboBox picker, IReadOnlyList<FollowedProject> activeProjects)
+    {
+        if (picker is null)
+        {
+            return;
+        }
+
+        var previousProjectId = (picker.SelectedItem as FollowedProject)?.Id;
+        if (activeProjects.Count == 0)
+        {
+            picker.ItemsSource = null;
+            picker.SelectedItem = null;
+            return;
+        }
+
+        picker.ItemsSource = activeProjects;
+        picker.SelectedItem = activeProjects.FirstOrDefault(project => project.Id == previousProjectId)
+            ?? activeProjects[0];
+    }
+
     private async void DeleteFollowedProjectButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { DataContext: FollowedProjectTreeRow row })
@@ -2121,6 +2236,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _projectMemberRepository.DeleteByProjectIdAsync(row.Id, CancellationToken.None);
         await _followedProjectRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedProjectsAsync();
+        // 删除后周报/简报下拉不能继续保留这个项目。
+        await ReloadProjectPickersAsync();
         await TodoFeature.Workbench.RefreshAsync();
         await ScheduleOverview.RefreshAsync();
         SummaryText = $"已删除项目「{row.ProjectName}」及其关键字。";
@@ -3110,7 +3227,11 @@ public sealed record FollowedProjectTreeRow(
     long Id,
     string ProjectName,
     string Color,
+    ProjectStage Stage,
     string KeywordSummary,
     string MemberSummary,
     IReadOnlyList<FollowedProjectKeywordRow> Keywords,
     IReadOnlyList<ProjectMemberRow> Members);
+
+/// <summary>项目状态下拉项：枚举值 + 中文显示名。</summary>
+public sealed record ProjectStageOption(ProjectStage Value, string Name);

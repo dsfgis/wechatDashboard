@@ -76,6 +76,14 @@ public sealed class SqliteDatabaseInitializer
             checksum: "project-memory-briefing-tracking-v1",
             sql: ProjectMemoryMigrationSql,
             cancellationToken);
+        // v10 只追加关注项目的生命周期状态列，默认“在建”，既有项目数据保持不变。
+        await ApplyMigrationAsync(
+            connection,
+            version: 10,
+            name: "followed-project-stage",
+            checksum: "followed-project-stage-v1",
+            sql: FollowedProjectStageMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>
@@ -474,6 +482,12 @@ public sealed class SqliteDatabaseInitializer
     private const string TodoGroupColorsMigrationSql = """
         ALTER TABLE todo_groups
             ADD COLUMN color TEXT NOT NULL DEFAULT '#4B5563';
+        """;
+
+    /// <summary>v10：关注项目增加生命周期状态（在建/运维/转交），历史项目统一落到“在建”。</summary>
+    private const string FollowedProjectStageMigrationSql = """
+        ALTER TABLE followed_projects
+            ADD COLUMN stage TEXT NOT NULL DEFAULT 'Construction';
         """;
 
     private const string TodoProjectAssignmentMigrationSql = """

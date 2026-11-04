@@ -9,6 +9,14 @@ public enum UpdateFollowedProjectColorOutcome
     Missing
 }
 
+/// <summary>更新项目生命周期状态的结果。</summary>
+public enum UpdateFollowedProjectStageOutcome
+{
+    Updated,
+    Unchanged,
+    Missing
+}
+
 /// <summary>
 /// 关注项目仓储接口：持久化用户关注的项目名称列表。
 /// 实现见 SqliteFollowedProjectRepository。
@@ -29,6 +37,12 @@ public interface IFollowedProjectRepository
     Task<UpdateFollowedProjectColorOutcome> UpdateColorAsync(
         long id,
         string color,
+        CancellationToken cancellationToken);
+
+    /// <summary>按稳定项目 ID 更新生命周期状态（在建/运维/转交）。</summary>
+    Task<UpdateFollowedProjectStageOutcome> UpdateStageAsync(
+        long id,
+        ProjectStage stage,
         CancellationToken cancellationToken);
 
     /// <summary>按 ID 删除关注项目。</summary>

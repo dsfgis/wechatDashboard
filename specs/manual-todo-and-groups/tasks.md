@@ -336,6 +336,17 @@
 - 预期结果：构建 0 警告/0 错误、全部测试通过；迁移/回滚可复核；项目设置和关键字无行为回归，分组入口消失，跨页面项目信息一致；无范围外代码或原有工作区丢失。
 - 并行：否，最终审批后实施的收口任务。
 
+### TASK-029：项目生命周期状态与周报/简报下拉同步刷新
+
+- 交付物：v10 迁移（`followed_projects.stage`，默认 `Construction`）、`ProjectStage` 与 `ProjectStagePolicy`、`IFollowedProjectRepository.UpdateStageAsync`、仓储按“在建 → 运维 → 转交”排序、`FollowedProject.ProjectDisplayName`、“关注设置”节点内的状态下拉，以及 `LoadWeeklyReportProjectsAsync` / `LoadBriefingProjectsAsync` / `ReloadProjectPickersAsync` 这条唯一的下拉刷新链；更新 `requirements.md`、`design.md`、`check_list.md` 对应条目。
+- 需求/设计引用：REQ-020；D-038，设计第 4、7 节。
+- 覆盖验收：AC-087、AC-088。
+- 依赖：TASK-024、TASK-028。
+- TDD 步骤：先写 `FollowedProjectStageTests` 覆盖 v10 默认值与幂等、状态更新的三种返回、逐级改状态后的顺序、“改色不改状态”和删除项目后从数据源消失，再实现迁移、仓储与界面刷新。
+- 验证方法：`dotnet build WechatDashboard.sln` + 完整控制台运行器；人工在“关注设置”改状态后回到“项目看板”，展开周报与简报的项目下拉核对顺序与“状态 · 项目名”文案；再新增、删除项目各复核一次。
+- 预期结果：构建 0 错误 0 CS 警告；运行器 113 PASS / 0 FAIL；状态下拉与两个项目下拉的排序、文案和选择保留一致；历史项目显示“在建”；改状态不影响关键字、成员、颜色和待办归属。
+- 并行：否，涉及迁移与两个页签的刷新链。
+
 ## 3. 增量执行顺序
 
 ```text
@@ -422,6 +433,7 @@ TASK-005、TASK-007、TASK-008 只有在执行者能保证文件不重叠时才�
 | REQ-017 | TASK-023、TASK-024、TASK-026、TASK-028 |
 | REQ-018 | TASK-024、TASK-027、TASK-028 |
 | REQ-019 | TASK-022 至 TASK-024、TASK-026、TASK-028 |
+| REQ-020 | TASK-029 |
 
 ## 5. 验收标准到任务逐项映射
 
@@ -513,5 +525,7 @@ TASK-005、TASK-007、TASK-008 只有在执行者能保证文件不重叠时才�
 | AC-084 | TASK-022、TASK-023、TASK-028 |
 | AC-085 | TASK-022 至 TASK-024、TASK-026、TASK-028 |
 | AC-086 | TASK-024、TASK-025、TASK-028 |
+| AC-087 | TASK-029 |
+| AC-088 | TASK-029 |
 
-所有 REQ-001 至 REQ-019 与 AC-001 至 AC-086 均由至少一个任务覆盖。最终完成状态和证据位置以 `check_list.md` 为准；已存在的实现和自动化证据不替代四份当前文档的重新确认，也不替代 TASK-019/TASK-028 的真实 GUI、迁移和回滚验收。
+所有 REQ-001 至 REQ-020 与 AC-001 至 AC-088 均由至少一个任务覆盖。最终完成状态和证据位置以 `check_list.md` 为准；已存在的实现和自动化证据不替代四份当前文档的重新确认，也不替代 TASK-019/TASK-028 的真实 GUI、迁移和回滚验收。

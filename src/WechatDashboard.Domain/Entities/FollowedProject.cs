@@ -17,4 +17,13 @@ public sealed record FollowedProject(
 {
     /// <summary>项目在待办及设置界面中的固定色板颜色。</summary>
     public string Color { get; init; } = "#4B5563";
+
+    /// <summary>项目生命周期状态，默认“在建”。</summary>
+    public ProjectStage Stage { get; init; } = ProjectStage.Construction;
+
+    /// <summary>状态中文名，供界面直接绑定。</summary>
+    public string StageText => ProjectStagePolicy.GetDisplayName(Stage);
+
+    /// <summary>下拉框显示文本：状态 + 项目名，便于在列表中直接区分在建/运维/转交。</summary>
+    public string ProjectDisplayName => $"{StageText} · {ProjectName}";
 }

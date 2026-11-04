@@ -53,6 +53,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Project briefing service merges cross-source messages for one project with safe fallback", TestProjectBriefingServiceAsync),
     // 项目记忆使用独立测试文件，覆盖 v9、稳定 ID、事务回滚、证据保留和模型校验。
     ("Project memory schema v9 upgrades old databases and is idempotent", WechatDashboard.Tests.ProjectMemoryTests.SchemaV9UpgradesAndIsIdempotentAsync),
+    ("Followed project schema v10 defaults historic projects to Construction", WechatDashboard.Tests.FollowedProjectStageTests.SchemaV10DefaultsToConstructionAsync),
+    ("Followed project stage persists and reorders project pickers", WechatDashboard.Tests.FollowedProjectStageTests.StageUpdatePersistsAndReordersAsync),
     ("Project memory keeps stable IDs across briefings and applies proposals idempotently", WechatDashboard.Tests.ProjectMemoryTests.RepositoryTracksItemsAcrossBriefingsAsync),
     ("Project memory rejects stale batches and preserves evidence snapshots", WechatDashboard.Tests.ProjectMemoryTests.RepositoryRejectsStaleBatchesAndRetainsEvidenceAsync),
     ("Project briefing validates memory items and propagates cancellation", WechatDashboard.Tests.ProjectMemoryTests.BriefingValidatesStructuredItemsAndFallsBackAsync),

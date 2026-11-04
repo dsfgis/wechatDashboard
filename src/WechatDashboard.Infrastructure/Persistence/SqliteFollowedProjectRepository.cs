@@ -17,16 +17,26 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
         _databasePath = databasePath;
     }
 
-    /// <summary>读取所有启用状态的关注项目，按 ID 排序。</summary>
+    /// <summary>
+    /// 读取所有启用状态的关注项目。
+    /// 排序按项目状态：在建 → 运维 → 转交，同状态内按创建时间与 ID 保持稳定顺序。
+    /// </summary>
     public async Task<IReadOnlyList<FollowedProject>> GetAllAsync(CancellationToken cancellationToken)
     {
         await using var connection = SqliteConnectionFactory.Open(_databasePath);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, project_name, is_active, created_at, color
+            SELECT id, project_name, is_active, created_at, color, stage
             FROM followed_projects
             WHERE is_active = 1
-            ORDER BY id;
+            ORDER BY CASE stage
+                        WHEN 'Construction' THEN 0
+                        WHEN 'Operation' THEN 1
+                        WHEN 'Handover' THEN 2
+                        ELSE 3
+                     END,
+                     created_at,
+                     id;
             """;
 
         var projects = new List<FollowedProject>();
@@ -66,7 +76,7 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
 
         // 回读最新状态
         command.Parameters.Clear();
-        command.CommandText = "SELECT id, project_name, is_active, created_at, color FROM followed_projects WHERE project_name = $projectName;";
+        command.CommandText = "SELECT id, project_name, is_active, created_at, color, stage FROM followed_projects WHERE project_name = $projectName;";
         command.Parameters.AddWithValue("$projectName", normalized);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
@@ -123,6 +133,56 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
         return UpdateFollowedProjectColorOutcome.Updated;
     }
 
+    /// <summary>
+    /// 按项目 ID 更新生命周期状态（在建/运维/转交）。
+    /// 状态变化会影响 GetAllAsync 的排序，但不会触碰项目名、颜色或关键字。
+    /// </summary>
+    public async Task<UpdateFollowedProjectStageOutcome> UpdateStageAsync(
+        long id,
+        ProjectStage stage,
+        CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return UpdateFollowedProjectStageOutcome.Missing;
+        }
+
+        var normalizedStage = ProjectStagePolicy.ToStorageValue(stage);
+        await using var connection = SqliteConnectionFactory.Open(_databasePath);
+        await using var transaction = connection.BeginTransaction();
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT stage FROM followed_projects WHERE id = $id AND is_active = 1;";
+        read.Parameters.AddWithValue("$id", id);
+        var currentStage = await read.ExecuteScalarAsync(cancellationToken) as string;
+        if (currentStage is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectStageOutcome.Missing;
+        }
+
+        if (string.Equals(currentStage, normalizedStage, StringComparison.Ordinal))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectStageOutcome.Unchanged;
+        }
+
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "UPDATE followed_projects SET stage = $stage WHERE id = $id AND is_active = 1;";
+        update.Parameters.AddWithValue("$stage", normalizedStage);
+        update.Parameters.AddWithValue("$id", id);
+        var affected = await update.ExecuteNonQueryAsync(cancellationToken);
+        if (affected != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return UpdateFollowedProjectStageOutcome.Missing;
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return UpdateFollowedProjectStageOutcome.Updated;
+    }
+
     /// <summary>按 ID 物理删除关注项目。</summary>
     public async Task DeleteAsync(long id, CancellationToken cancellationToken)
     {
@@ -142,7 +202,8 @@ public sealed class SqliteFollowedProjectRepository : IFollowedProjectRepository
             IsActive: reader.GetInt32(2) == 1,
             CreatedAt: DateTimeOffset.Parse(reader.GetString(3)))
         {
-            Color = reader.GetString(4)
+            Color = reader.GetString(4),
+            Stage = ProjectStagePolicy.Parse(reader.IsDBNull(5) ? null : reader.GetString(5))
         };
     }
 }
