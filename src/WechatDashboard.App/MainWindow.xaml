@@ -444,31 +444,9 @@
                 </TabItem>
                 <TabItem Header="项目看板">
                     <Border Background="White" BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="10" Padding="16">
-                        <DockPanel>
-                            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,14">
-                                <StackPanel DockPanel.Dock="Left">
-                                    <TextBlock Text="项目统计" FontSize="17" FontWeight="SemiBold" Foreground="#111827" />
-                                    <TextBlock Text="{Binding DashboardStatusText}" Margin="0,4,0,0" Foreground="#6B7280" TextWrapping="Wrap" />
-                                </StackPanel>
-                                <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                                    <TextBlock Text="统计维度" VerticalAlignment="Center" Foreground="#4B5563" Margin="0,0,6,8" />
-                                    <ComboBox x:Name="DashboardDimensionComboBox" Width="120" SelectedIndex="0" SelectionChanged="DashboardDimensionComboBox_SelectionChanged">
-                                        <ComboBoxItem Content="按项目" Tag="project" />
-                                        <ComboBoxItem Content="按时间" Tag="time" />
-                                        <ComboBoxItem Content="按群名" Tag="chat" />
-                                    </ComboBox>
-                                    <TextBlock Text="图表类型" VerticalAlignment="Center" Foreground="#4B5563" Margin="14,0,6,8" />
-                                    <ComboBox x:Name="DashboardChartTypeComboBox" Width="128" SelectedIndex="0" SelectionChanged="DashboardChartTypeComboBox_SelectionChanged">
-                                        <ComboBoxItem Content="横向柱状图" Tag="bar" />
-                                        <ComboBoxItem Content="环形占比图" Tag="pie" />
-                                        <ComboBoxItem Content="趋势折线图" Tag="line" />
-                                    </ComboBox>
-                                </WrapPanel>
-                            </DockPanel>
-
+                        <StackPanel>
                             <!-- 项目周报：只生成Excel文件，不提供邮件草稿或自动发送入口。 -->
                             <Expander x:Name="WeeklyReportExpander"
-                                      DockPanel.Dock="Bottom"
                                       Header="项目周报（成员私聊周报 + 项目消息与待办）"
                                       IsExpanded="False"
                                       Margin="0,14,0,0"
@@ -500,7 +478,6 @@
                             </Expander>
 
                             <Expander x:Name="ProjectBriefingExpander"
-                                      DockPanel.Dock="Bottom"
                                       Header="项目简报（跨微信、石化通、石化邮汇总）"
                                       IsExpanded="False"
                                       Margin="0,14,0,0"
@@ -561,7 +538,6 @@
 
                             <!-- 项目记忆与简报共用项目数据，但不复用或更改待办生命周期。 -->
                             <Expander x:Name="ProjectMemoryExpander"
-                                      DockPanel.Dock="Bottom"
                                       Header="项目记忆（持续跟踪完成、阻塞、搁置与废弃）"
                                       IsExpanded="False"
                                       Expanded="ProjectMemoryExpander_Expanded"
@@ -642,11 +618,7 @@
                                     </Grid>
                                 </StackPanel>
                             </Expander>
-
-                            <local:DashboardChartControl ItemsSource="{Binding DashboardChartRows}"
-                                                         ChartType="{Binding DashboardChartType}"
-                                                         MinHeight="330" />
-                        </DockPanel>
+                        </StackPanel>
                     </Border>
                 </TabItem>
                 <TabItem Header="关注设置">

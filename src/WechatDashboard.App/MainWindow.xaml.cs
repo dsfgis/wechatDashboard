@@ -135,8 +135,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _wechatMessagesLoaded;
     private string _wechatMessagePageText = "第 0/0 页，共 0 条";
     private string _wechatMessageStatusText = "默认读取当天微信消息。请先提取 DB Key 并初始化本地库。";
-    private string _dashboardStatusText = "按项目统计最近消息。";
-    private string _dashboardChartType = "bar";
     // 模型配置状态只描述保存情况，不包含或回显 API Key。
     private string _modelConfigStatusText = "尚未保存本机 DeepSeek API Key。";
     public TodoFeatureCoordinator TodoFeature { get; }
@@ -372,17 +370,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
 
-    public string DashboardStatusText
-    {
-        get => _dashboardStatusText;
-        private set => SetField(ref _dashboardStatusText, value);
-    }
-    public string DashboardChartType
-    {
-        get => _dashboardChartType;
-        private set => SetField(ref _dashboardChartType, value);
-    }
-
     /// <summary>模型密钥保存状态，不承载任何敏感内容。</summary>
     public string ModelConfigStatusText
     {
@@ -399,9 +386,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // 项目汇总列表（UI 绑定）
     public ObservableCollection<ProjectSummaryRow> ProjectSummaries { get; } = new();
-
-    // 项目看板统计图行（UI 绑定）
-    public ObservableCollection<DashboardChartRow> DashboardChartRows { get; } = new();
 
     // 采集诊断列表（UI 绑定）
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
@@ -887,24 +871,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async Task RefreshAsync()
     {
-        var dashboardTask = CreateDashboardSnapshotAsync(
-            ReadSelectedDashboardDimension(),
-            DashboardChartType);
+        var recentMessagesTask = Task.Run(() => _messageRepository.GetRecentAsync(DashboardMessageSampleLimit, CancellationToken.None));
         var pendingTodosTask = Task.Run(() => _todoRepository.GetPendingAsync(CancellationToken.None));
         var managedProjectsTask = Task.Run(() => _followedProjectRepository.GetAllAsync(CancellationToken.None));
         var messageCountTask = Task.Run(() => _messageRepository.GetMessageCountAsync(CancellationToken.None));
         var dataDirectoryTask = Task.Run(WeChatDataDirectoryLocator.Locate);
         var shihuatongReadyTask = Task.Run(() => ShihuatongLocalDatabaseCaptureAdapter.IsProcessRunning);
         await Task.WhenAll(
-            dashboardTask,
+            recentMessagesTask,
             pendingTodosTask,
             managedProjectsTask,
             messageCountTask,
             dataDirectoryTask,
             shihuatongReadyTask);
 
-        var dashboard = dashboardTask.Result;
-        var recentMessages = dashboard.RecentMessages;
+        var recentMessages = recentMessagesTask.Result;
         var pendingTodos = pendingTodosTask.Result;
         var managedProjectNames = managedProjectsTask.Result.ToDictionary(project => project.Id, project => project.ProjectName);
         // 采集源：微信本地数据库（基于 wechat-local-reader 解密）
@@ -970,8 +951,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         PendingTodoCount = pendingTodos.Count;
         HighPriorityTodoCount = pendingTodos.Count(todo => PrioritySettings.Current.IsHighPriority(todo.Priority));
 
-        // 刷新项目看板图表和消息流分页（强制重新计算总数）
-        ApplyDashboardSnapshot(dashboard);
+        // 刷新当前页签的分页文本与汇总数据（强制重新计算总数）
         await RefreshSelectedFeatureAsync();
         SummaryText = $"消息 {messageCountTask.Result} | @我 {MentionCount} | 待办理 {PendingTodoCount} | 高优先级 {HighPriorityTodoCount}";
     }
@@ -983,37 +963,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         8 => ScheduleOverview.RefreshAsync(),
         _ => Task.CompletedTask
     };
-
-    /// <summary>项目看板维度切换：按项目、时间或群名重新统计。</summary>
-    private async void DashboardDimensionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded)
-        {
-            return;
-        }
-
-        await LoadProjectDashboardAsync();
-    }
-    /// <summary>项目看板图表类型切换：柱状、环形占比或趋势折线图。</summary>
-    private async void DashboardChartTypeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        DashboardChartType = ReadSelectedDashboardChartType();
-        if (!IsLoaded)
-        {
-            return;
-        }
-
-        await LoadProjectDashboardAsync();
-    }
-
-
-    /// <summary>加载项目看板统计图，默认统计最近一批入库消息。</summary>
-    private async Task LoadProjectDashboardAsync()
-    {
-        var dimension = ReadSelectedDashboardDimension();
-        var snapshot = await CreateDashboardSnapshotAsync(dimension, DashboardChartType);
-        ApplyDashboardSnapshot(snapshot);
-    }
 
     /// <summary>
     /// 生成项目简报：跨微信、石化通、石化邮按时间窗口取数，
@@ -1650,166 +1599,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return string.IsNullOrWhiteSpace(result) ? "项目" : result;
     }
 
-    private Task<DashboardSnapshot> CreateDashboardSnapshotAsync(string dimension, string chartType) =>
-        Task.Run(async () =>
-        {
-            var messages = await _messageRepository.GetRecentAsync(DashboardMessageSampleLimit, CancellationToken.None);
-            var rows = BuildDashboardRows(messages, dimension);
-            if (dimension == "time" && chartType == "line")
-            {
-                // 时间聚合默认按最近日期优先；折线图需要按时间正序连接数据点。
-                rows = rows.Reverse().ToArray();
-            }
-
-            var dimensionText = dimension switch
-            {
-                "time" => "时间",
-                "chat" => "群名",
-                _ => "项目"
-            };
-            var chartTypeText = chartType switch
-            {
-                "pie" => "环形占比图",
-                "line" => "趋势折线图",
-                _ => "横向柱状图"
-            };
-            var status = rows.Count == 0
-                ? $"暂无可统计消息。当前维度：按{dimensionText}。"
-                : $"按{dimensionText}统计最近 {messages.Count} 条入库消息，使用{chartTypeText}显示前 {rows.Count} 项。";
-            return new DashboardSnapshot(messages.Take(100).ToArray(), rows, status);
-        });
-
-    private void ApplyDashboardSnapshot(DashboardSnapshot snapshot)
-    {
-        Replace(DashboardChartRows, snapshot.Rows);
-        DashboardStatusText = snapshot.StatusText;
-    }
-
-    private string ReadSelectedDashboardDimension()
-    {
-        if (DashboardDimensionComboBox?.SelectedItem is ComboBoxItem item &&
-            item.Tag is string tag)
-        {
-            return tag;
-        }
-
-        return "project";
-    }
-
-    private string ReadSelectedDashboardChartType()
-    {
-        if (DashboardChartTypeComboBox?.SelectedItem is ComboBoxItem item &&
-            item.Tag is string tag)
-        {
-            return tag;
-        }
-
-        return "bar";
-    }
-
-    private IReadOnlyList<DashboardChartRow> BuildDashboardRows(IReadOnlyList<Message> messages, string dimension)
-    {
-        if (messages.Count == 0)
-        {
-            return Array.Empty<DashboardChartRow>();
-        }
-
-        var aggregates = dimension switch
-        {
-            "time" => BuildTimeDashboardAggregates(messages),
-            "chat" => BuildChatDashboardAggregates(messages),
-            _ => BuildProjectDashboardAggregates(messages)
-        };
-
-        var materialized = aggregates.ToList();
-        if (materialized.Count == 0)
-        {
-            return Array.Empty<DashboardChartRow>();
-        }
-
-        var maxCount = Math.Max(1, materialized.Max(row => row.Count));
-        return materialized
-            .Select(row => new DashboardChartRow(
-                row.Label,
-                row.Count,
-                $"{row.Count} 条",
-                row.Detail,
-                Math.Round(row.Count * 100.0 / maxCount, 1)))
-            .ToArray();
-    }
-
-    private IReadOnlyList<DashboardAggregate> BuildProjectDashboardAggregates(IReadOnlyList<Message> messages)
-    {
-        return messages
-            .GroupBy(ResolveDashboardProjectName, StringComparer.OrdinalIgnoreCase)
-            .Select(group =>
-            {
-                var chats = group
-                    .Select(message => message.ChatName)
-                    .Where(chatName => !string.IsNullOrWhiteSpace(chatName))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(chatName => chatName, StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-                var sampleChats = chats.Take(3).ToArray();
-                var detail = chats.Length == 0
-                    ? "未识别群名"
-                    : $"覆盖 {chats.Length} 个群：{string.Join("、", sampleChats)}{(chats.Length > sampleChats.Length ? " 等" : "")}";
-                return new DashboardAggregate(group.Key, group.Count(), detail);
-            })
-            .OrderByDescending(row => row.Count)
-            .ThenBy(row => row.Label, StringComparer.OrdinalIgnoreCase)
-            .Take(20)
-            .ToArray();
-    }
-
-    private IReadOnlyList<DashboardAggregate> BuildTimeDashboardAggregates(IReadOnlyList<Message> messages)
-    {
-        return messages
-            .GroupBy(message => message.SentAt.LocalDateTime.Date)
-            .OrderByDescending(group => group.Key)
-            .Take(14)
-            .Select(group =>
-            {
-                var mentionCount = group.Count(message => message.IsMentionMe);
-                var chatCount = group.Select(message => message.ChatName).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-                return new DashboardAggregate(
-                    group.Key.ToString("MM-dd"),
-                    group.Count(),
-                    $"{group.Key:yyyy-MM-dd}，{chatCount} 个群，@我 {mentionCount} 条");
-            })
-            .ToArray();
-    }
-
-    private IReadOnlyList<DashboardAggregate> BuildChatDashboardAggregates(IReadOnlyList<Message> messages)
-    {
-        return messages
-            .GroupBy(message => string.IsNullOrWhiteSpace(message.ChatName) ? "未命名群聊" : message.ChatName, StringComparer.OrdinalIgnoreCase)
-            .Select(group =>
-            {
-                var projectName = ResolveDashboardProjectName(group.First());
-                var mentionCount = group.Count(message => message.IsMentionMe);
-                return new DashboardAggregate(
-                    group.Key,
-                    group.Count(),
-                    $"项目：{projectName}，@我 {mentionCount} 条");
-            })
-            .OrderByDescending(row => row.Count)
-            .ThenBy(row => row.Label, StringComparer.OrdinalIgnoreCase)
-            .Take(20)
-            .ToArray();
-    }
-
-    private string ResolveDashboardProjectName(Message message)
-    {
-        var followedProjectName = MatchFollowedProject(message);
-        if (!string.IsNullOrWhiteSpace(followedProjectName))
-        {
-            return followedProjectName;
-        }
-
-        return CreateProjectClassifier().Classify(message).ProjectName;
-    }
-
     /// <summary>
     /// 加载当天微信消息分页。
     /// ensureInitialized=true 时若读取器未初始化则仅尝试恢复 DPAPI 密文缓存，
@@ -2272,7 +2061,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _followedProjectKeywordRepository.SaveAsync(project.Id, projectName, CancellationToken.None);
         if (NewFollowedProjectTextBox is not null) NewFollowedProjectTextBox.Text = "";
         await LoadFollowedProjectsAsync();
-        await LoadProjectDashboardAsync();
         SummaryText = $"已添加项目「{projectName}」，可继续为它添加多个关键字。";
     }
 
@@ -2335,7 +2123,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await LoadFollowedProjectsAsync();
         await TodoFeature.Workbench.RefreshAsync();
         await ScheduleOverview.RefreshAsync();
-        await LoadProjectDashboardAsync();
         SummaryText = $"已删除项目「{row.ProjectName}」及其关键字。";
     }
 
@@ -2359,7 +2146,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await _followedProjectKeywordRepository.SaveAsync(project.Id, keyword, CancellationToken.None);
         if (input is not null) input.Text = "";
         await LoadFollowedProjectsAsync();
-        await LoadProjectDashboardAsync();
         SummaryText = $"已为「{project.ProjectName}」添加关键字「{keyword}」。";
     }
 
@@ -2379,7 +2165,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         await _followedProjectKeywordRepository.DeleteAsync(row.Id, CancellationToken.None);
         await LoadFollowedProjectsAsync();
-        await LoadProjectDashboardAsync();
         SummaryText = $"已删除项目「{row.ProjectName}」的关键字「{row.Keyword}」。";
     }
 
@@ -3269,16 +3054,6 @@ internal static class ProjectMemoryDisplay
 
 /// <summary>项目汇总行数据：按项目聚合的待办数量与高优先级数量。</summary>
 public sealed record ProjectSummaryRow(string Project, int PendingTodos, int HighPriorityTodos);
-
-/// <summary>项目看板统计图行数据。</summary>
-public sealed record DashboardChartRow(string Label, int Count, string CountText, string Detail, double Percent);
-
-internal sealed record DashboardAggregate(string Label, int Count, string Detail);
-
-internal sealed record DashboardSnapshot(
-    IReadOnlyList<Message> RecentMessages,
-    IReadOnlyList<DashboardChartRow> Rows,
-    string StatusText);
 
 /// <summary>采集诊断行数据：展示各采集适配器的状态与最近成功时间。</summary>
 public sealed record DiagnosticRow(string Adapter, string Status, string LastSuccessAt, string Detail);
