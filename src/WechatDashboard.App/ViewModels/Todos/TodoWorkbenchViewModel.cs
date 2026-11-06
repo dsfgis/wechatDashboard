@@ -5,6 +5,7 @@ using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.TodoRules;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
@@ -23,6 +24,10 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
     private readonly ITodoDialogService _dialogs;
     private readonly Func<long, Task> _navigateToMessage;
     private readonly Func<Task> _onTodoCreated;
+    // 待办状态变化还会影响消息流与日历（日程概览/桌面日历），详情写操作后必须一起刷新。
+    private readonly Func<Task> _refreshRelatedViews;
+    // 详情页“此类不再建待办”写入的规则与采集管线共用同一份快照；测试可不接入。
+    private readonly TodoRuleStore? _todoRuleStore;
     private string _statusText = "正在加载待办...";
     private int _activeCount;
     // 刷新会重建优先级分组，折叠状态按层级记住，避免每分钟自动刷新把用户折叠的分组重新展开。
@@ -39,7 +44,9 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         IClock clock,
         ITodoDialogService dialogs,
         Func<long, Task> navigateToMessage,
-        Func<Task> onTodoCreated)
+        Func<Task> onTodoCreated,
+        TodoRuleStore? todoRuleStore = null,
+        Func<Task>? refreshRelatedViews = null)
     {
         _todos = todos;
         _messages = messages;
@@ -52,6 +59,8 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         _dialogs = dialogs;
         _navigateToMessage = navigateToMessage;
         _onTodoCreated = onTodoCreated;
+        _todoRuleStore = todoRuleStore;
+        _refreshRelatedViews = refreshRelatedViews ?? (() => Task.CompletedTask);
         AddTodoCommand = new AsyncRelayCommand(_ => AddTodoAsync());
         RefreshCommand = new AsyncRelayCommand(_ => RefreshAsync());
         OpenDetailCommand = new AsyncRelayCommand(OpenDetailAsync, parameter => parameter is TodoListItemViewModel);
@@ -155,6 +164,13 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
         ClearCompletedCommand.RaiseCanExecuteChanged();
     }
 
+    /// <summary>
+    /// 详情里任何写操作（保存、完成、置顶、提醒、状态兜底）之后刷新待办工作台，
+    /// 并通知外部刷新消息流与日历。只刷工作台会让已完成待办改回活动状态后，
+    /// 日程概览和桌面日历仍停留在旧的完成态。
+    /// </summary>
+    private Task RefreshTodoViewsAsync() => Task.WhenAll(RefreshAsync(), _refreshRelatedViews());
+
     public async Task OpenTodoAsync(long todoId)
     {
         var todo = await _todos.GetByIdAsync(todoId, CancellationToken.None);
@@ -186,9 +202,10 @@ public sealed class TodoWorkbenchViewModel : ObservableObject
             _reminderService,
             _reminders,
             _clock,
-            async () => await RefreshAsync(),
+            RefreshTodoViewsAsync,
             _navigateToMessage,
-            _dialogs);
+            _dialogs,
+            _todoRuleStore);
         await viewModel.LoadProjectsAsync();
         await _dialogs.ShowAsync(viewModel);
     }

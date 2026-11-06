@@ -1,5 +1,36 @@
 # Agent Guide
 
+## Todo Status Reopening Refreshes Every View (2026-11-06)
+
+**Symptom / root cause.** “在详情里把已完成状态改成别的状态，应该在待办里和日历组件能重新看到”。诊断测试证明 `UpdateTodoAsync` 已经正确写入 `status`、清空 `completed_at`，`TodoWorkbenchViewModel.RefreshAsync()` 也会把行移回活动分组；**唯一失败的是日历**：详情的 `_refreshWorkbench` 只刷工作台，`DesktopCalendarViewModel`（主窗口日程概览与桌面日历窗口共用同一实例）仍持有旧的 `_todosByDate` 快照，卡片停留在完成态。`MainWindow.RefreshAsync()` 也不是全局刷新——`RefreshSelectedFeatureAsync()` 只刷当前选中的 Tab，不能拿来做跨视图同步。
+
+**Fix — one refresh chain, not ad-hoc calls.** `MainWindow` 注入 `refreshCalendar: () => ScheduleOverview.RefreshAsync()` → `TodoFeatureCoordinator` 把它组成 `refreshRelatedViews`（补齐 `MessageFeed.RefreshAsync()` + 日历）→ `TodoWorkbenchViewModel.RefreshTodoViewsAsync()` = `Task.WhenAll(RefreshAsync(), _refreshRelatedViews())` → 传给 `TodoDetailViewModel` 的 `_refreshWorkbench`。因此详情的保存、完成、置顶、设置提醒、延后都同步刷待办/消息流/日历。`ReminderResolutionHandler` 改用 `RefreshAllViewsAsync()`（提醒卡片的“完成”也改状态），`onTodoCreated` 改为 `Task.WhenAll(RefreshAsync(), ScheduleOverview.RefreshAsync())`（新建待办也要进日历）。新参数全部追加在构造参数末尾且可选，既有位置参数调用保持兼容。
+
+**Close-save fallback.** 用户改了状态但没点“保存待办”直接关窗时，`TodoDetailWindow.Closed` fire-and-forget 调用 `TodoDetailViewModel.SaveStatusIfChangedAsync()`：只提交状态，字段一律取 `_todo` 持久化快照，不把仍在编辑的标题/说明/优先级/截止/项目顺带写库；`_hasUnsavedStatusChange` 由 `Status` setter 与已持久化状态比较维护，`SaveAsync` / `CompleteAsync` 成功后清除；异常在方法内部捕获（窗口已关不能弹框）。**不要把状态做成“选择即保存”**：它会与未保存的其它字段和 `ExpectedUpdatedAt` 并发检查互相干扰。`SaveAsync` 已从 private 改为 public，供回归测试直接驱动真实的保存路径。
+
+**Tests.** `TestReopenedTodoVisibilityAsync`：真实 SQLite + Workbench + 日历 VM + `FakeTodoDialogService.ShownDetails`，Done → InProgress 保存后断言 `status`/`completed_at`、活动与已办分组、日历刷新回调次数、`SelectedTodos[..].IsCompleted == false`；再模拟“改状态 + 改标题但不保存就关窗”，断言只写状态、标题保持原值、日历同步。`TestTodoStatusRefreshWiringAsync` 用源码断言守住协调器/工作台/主窗口/详情窗口四处接线。完整 runner **120 PASS / 0 FAIL**。
+
+## Analyze-All-Messages Scope Switch (2026-11-06)
+
+**Request.** “增加分析所有详细选项，如果勾选的话就不仅仅分析 @ 我的消息，而是所有消息都分析是否需要加入到待办理”。Implemented as a second checkbox **分析所有消息（含未 @ 我 的消息）** on the 模型配置 page. It widens the Agent decision to *every newly ingested chat message*; it does not backfill history.
+
+**Two independent keys, one master gate.** `SqliteModelSettingsRepository` now persists `model_analyze_message_content` (master: are model calls allowed at all) and `model_analyze_all_messages` (scope) in `app_settings` via shared `GetSwitchAsync`/`SetSwitchAsync`. Only the literal `"1"` enables either; missing/corrupt values are off. `MessageCapturePipeline` reads both through `Func<bool>` delegates (`analyzeMessageContent`, new `analyzeAllMessages` appended **last** in the ctor so positional callers such as `managedProjectMatcher` keep working). `ProcessAsync` takes **one snapshot per message** (`analyzeEnabled`, `analyzeAll = analyzeEnabled && _analyzeAllMessages()`) and passes `analyzeEnabled` into `PrepareMentionAnalysisAsync`; do not re-read the delegates later in the same message, or a mid-capture toggle can make “call the model” and “create the Todo” disagree. Turning the master switch off suppresses the scope switch without clearing its saved value; UI disables the second checkbox while the master is off.
+
+**Three creation policies — do not unify them.**
+| Message | Model call | Model failure / invalid response |
+| --- | --- | --- |
+| `@我` / `@所有人` chat | always when master is on | **fail-open**: still create Todo (local priority + default description) |
+| Mail (`MailSourcePolicy.IsMailSource`) | always when master is on | **fail-closed**: no Todo |
+| Other chat, scope switch on | once per new message | **fail-closed**: only `shouldCreate=true` creates |
+
+`needsAgentDecision = ruleHit is null && (isMentionMe || isMailSource || analyzeAll)`; `TodoRuleMatcher` hits still skip the model and the Todo for all three rows. Fail-closed for full-scope chat is deliberate — a busy group chat would otherwise flood 待办理 on every timeout. `@我` keeps its historical fail-open contract, and `TestCapturePipelineMentionAnalysisAsync` still asserts non-mentions are never analyzed with the scope switch off.
+
+**Prompt.** `MentionAnalysisSystemPrompt` now includes an explicit `currentMessage.isMentionMe=false` rule: only a concrete action addressed to the current user may return `shouldCreate=true`; broadcasts, other people’s conversations, progress updates, chit-chat and messages with no clear owner must be false. `ToInput` already sends `isMentionMe`. `TestDeepSeekMentionAnalysisAsync` asserts the marker stays in the system prompt.
+
+**UI wiring.** `MainWindow.xaml` adds `AnalyzeAllMessagesCheckBox` (`IsEnabled="False"` initially); `LoadModelSettingsAsync` loads both keys and sets `IsEnabled = _analyzeMessageContent`; `AnalyzeMessageContentCheckBox_Click` updates it on success and rolls it back on failure; `AnalyzeAllMessagesCheckBox_Click` guards against a programmatic click while the master is off, persists immediately and rolls back on error. `CreateCapturePipeline` passes `analyzeAllMessages: () => _analyzeAllMessages`, so the live loop picks up a toggle without rebuilding or restarting. Cost warning is in the page text and README.
+
+**Tests.** New `TestAnalyzeAllMessagesPipelineAsync` uses real SQLite + a controllable fake model: off → no model/no Todo; on → approved normal message creates a Todo with Agent priority/description; explicit false and model failure persist the message but create nothing; rule hit, duplicate and master-off skip the model; mention failure stays fail-open; toggling either switch takes effect on the next message. `TestModelSettingsRepositoryAsync` covers the second key’s default, round-trip, isolation and corrupt-value fallback; `TestAnalyzeAllMessagesSettingsXamlAsync` guards XAML + code-behind + pipeline wiring. Full runner: **118 PASS / 0 FAIL** (isolated output `tools/result/build-check/tests-all-messages`, because a running `WechatDashboard.App` locks the default `bin`).
+
 ## Project Stage and Color Merged (2026-11-04)
 
 **Request.** In 关注设置 the project node had two side-by-side dropdowns (状态 + 颜色), so one project could be “在建 + 绿色”. They are now one dropdown whose items render as **color dot + stage name**.
@@ -227,6 +258,8 @@ Current implemented behavior:
 
 - The `模型配置` page configures the built-in DeepSeek endpoint and `deepseek-flash` model. The API Key is encrypted with Windows DPAPI `CurrentUser` and stored at `%LocalAppData%\WechatDashboard\Agent\protected-deepseek-api-key.bin`; saving or clearing the Key still requires an application restart.
 - The `分析消息内容` checkbox is independent of Key loading. It persists as `model_analyze_message_content` in SQLite `app_settings` and takes effect immediately for subsequently processed messages.
+- User-taught automatic-Todo rules live in the `模型配置` page and in SQLite `todo_rules` (migration v11). A rule is a keyword list split by `，,、；;/|` and whitespace; keywords shorter than 2 characters are ignored. `TodoRuleMatcher` matches content or chat name, and a hit is enforced inside `MessageCapturePipeline` before any model call, so the message is still persisted and scored but never creates an automatic Todo and never costs a model request. Enabled keywords are also appended to the `AnalyzeMentionAsync` system prompt so the model can skip semantically similar wording. Rules never affect manual `转为待办`, never retro-delete existing Todos, and apply only to newly ingested messages.
+- The same rules can be created from `TodoDetailWindow`: a keyword box plus `记住这类规则` button under the read-only source message (`TodoRuleVisibility` hides the block for Todos without a source). `TodoRuleStore` holds the single in-memory snapshot shared by the settings page, the detail window, the capture pipeline, and the model prompt, so a rule added from either entry point applies immediately without a restart.
 - `MentionDetector` recognizes configured aliases, `@我`, `@你`, and `@所有人`. Automatic Todo creation also covers `@所有人`, including WeChat's U+2005 separator after the mention.
 - Message-feed refresh and automatic capture do not use an LLM to rerank the message list. Automatic message priority continues to come from local `urgency_scores` rules, including when an automatic Todo uses an Agent priority.
 - The former `AI 建议`, review, and clarification workflow has been removed. Manual `转为待办` now reuses `AnalyzeMentionAsync` for any newly converted message, independently of the automatic-analysis switch and mention detection. It sends only the current message, never adjacent messages or clarification answers; an existing Todo opens directly without another model call.

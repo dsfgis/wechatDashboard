@@ -19,6 +19,7 @@ using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.TodoRules;
 using WechatDashboard.Application.Urgency;
 using Microsoft.Data.Sqlite;
 using WechatDashboard.Domain.Entities;
@@ -131,10 +132,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Native WeChat reader matches the frozen Python oracle field by field", TestNativeWeChatReaderMatchesPythonOracleAsync),
     ("Capture pipeline persists messages and creates todos for mentions", TestCapturePipelineAsync),
     ("Capture pipeline applies immediate Agent priorities and summaries with safe fallback", TestCapturePipelineMentionAnalysisAsync),
+    ("Capture pipeline analyzes every new message when the full-scope switch is on", TestAnalyzeAllMessagesPipelineAsync),
+    ("Analyze-all-messages settings are wired through the model page", TestAnalyzeAllMessagesSettingsXamlAsync),
     ("Capture pipeline reports one source failure and continues healthy sources", TestCapturePipelineReportsIndividualSourceFailuresAsync),
     ("Capture pipeline persists live WeChat local export messages", TestLiveWeChatLocalExportCapturePipelineAsync),
     ("Capture source settings repository saves and loads enabled sources", TestCaptureSourceSettingsRepositoryAsync),
     ("Model settings repository persists the message analysis switch", TestModelSettingsRepositoryAsync),
+    ("Todo rules block automatic todos for learned keywords", TestTodoRulesAsync),
     ("Capture pipeline uses saved source settings for adapter construction", TestCapturePipelineWithSavedSettingsAsync),
     ("User alias repository saves, loads and deletes configurable mention aliases", TestUserAliasRepositoryAsync),
     ("Project keyword repository supports multiple keywords per project", TestFollowedProjectKeywordRepositoryAsync),
@@ -147,6 +151,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Weekly report exporter preserves the real template and maps every item", WechatDashboard.Tests.WeeklyReportExporterTests.ExportsAllItemsIntoPreservedTemplateCopyAsync),
     ("Sinopec mail routing accepts only a unique direct recipient", MailCaptureTests.TestMailDirectRoutingAsync),
     ("Project settings merges stage and color into one dotted dropdown", TestProjectColorSettingsXamlAsync),
+    ("Reopened Todos reappear in the workbench and calendar", TestReopenedTodoVisibilityAsync),
+    ("Todo status changes are wired to the calendar and close-save fallback", TestTodoStatusRefreshWiringAsync),
 };
 
 var failures = new List<string>();
@@ -1448,6 +1454,31 @@ static async Task TestDeepSeekMentionAnalysisAsync()
     var skipAnalysis = await skipModel.AnalyzeMentionAsync(message, CancellationToken.None);
     AssertFalse(skipAnalysis.ShouldCreate, "The model's no-Todo decision must survive JSON parsing.");
     AssertEqual(PriorityLevel.P3, skipAnalysis.Priority, "A skipped item should retain its analyzed priority.");
+
+    // 用户规则必须进入系统提示，模型才能对语义相近、用词不同的消息也判为无需建待办。
+    var ruleHandler = new RecordingModelHttpMessageHandler(CreateResponse(
+        "{\"shouldCreate\":false,\"priority\":\"P3\",\"description\":\"对方在索要验证码\"}"));
+    using var ruleHttp = new HttpClient(ruleHandler);
+    var ruleModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment(
+        "sk-analysis-test",
+        ruleHttp,
+        todoRules: () => new[]
+        {
+            new TodoRule(1, "验证码、动态口令", true, DateTimeOffset.Now),
+            new TodoRule(2, "已停用的规则", false, DateTimeOffset.Now)
+        });
+    var ruleAnalysis = await ruleModel.AnalyzeMentionAsync(message, CancellationToken.None);
+    AssertFalse(ruleAnalysis.ShouldCreate, "A rule-guided skip should still parse as no Todo.");
+    using var ruleBody = JsonDocument.Parse(ruleHandler.RequestBody
+        ?? throw new InvalidOperationException("Analysis request body was not recorded."));
+    var systemContent = ruleBody.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()
+        ?? throw new InvalidOperationException("Analysis system prompt was missing.");
+    AssertTrue(systemContent.Contains("验证码") && systemContent.Contains("动态口令"),
+        "Enabled rule keywords must be injected into the system prompt.");
+    AssertFalse(systemContent.Contains("已停用的规则"),
+        "Disabled rules must not leak into the system prompt.");
+    AssertTrue(systemContent.Contains("isMentionMe=false"),
+        "The prompt must explicitly constrain unmentioned messages when full-scope analysis is enabled.");
 }
 
 static async Task TestDeepSeekProjectBriefingModelAsync()
@@ -1502,7 +1533,7 @@ static async Task TestDeepSeekProjectBriefingModelAsync()
 
     using var body = JsonDocument.Parse(handler.RequestBody
         ?? throw new InvalidOperationException("Briefing request body was not recorded."));
-    AssertEqual(2500, body.RootElement.GetProperty("max_tokens").GetInt32(),
+    AssertEqual(4000, body.RootElement.GetProperty("max_tokens").GetInt32(),
         "The briefing output should reserve bounded space for text and structured memory items.");
     AssertEqual("json_object", body.RootElement.GetProperty("response_format").GetProperty("type").GetString(),
         "The briefing should require a JSON object response.");
@@ -1634,6 +1665,8 @@ static async Task TestProjectBriefingServiceAsync()
     AssertEqual(3, outcome.MatchedCount, "Only in-window messages matching the project keywords count.");
     AssertEqual(3, outcome.SentToModelCount, "The bounded request should carry all three matched messages.");
     AssertEqual(1, model.Requests.Count, "The model should be called exactly once per briefing.");
+    AssertTrue(outcome.FallbackReason is null,
+        "A model-generated briefing must not carry a fallback reason.");
 
     var sent = model.Requests[0];
     AssertEqual("智能管线", sent.ProjectName, "The request should carry the project name.");
@@ -1661,6 +1694,16 @@ static async Task TestProjectBriefingServiceAsync()
         "The fallback should surface risk-keyword messages as risks.");
     AssertTrue(fallback.Briefing.Actions.Count > 0,
         "The fallback should surface mention-me messages as actions.");
+    // 回退原因必须透出，界面才能区分超时、截断与校验失败。
+    AssertEqual("模型调用超时，可稍后重试。", fallback.FallbackReason,
+        "A model failure should report its reason to the caller instead of a generic label.");
+
+    // 未接入模型对象（没有密钥）时给出独立原因，与调用失败区分。
+    var unconfigured = new ProjectBriefingService(messageRepository);
+    var unconfiguredOutcome = await unconfigured.GenerateAsync(10, "智能管线", keywords, from, to, CancellationToken.None);
+    AssertFalse(unconfiguredOutcome.FromModel, "A missing model must fall back to the local summary.");
+    AssertEqual("模型未配置", unconfiguredOutcome.FallbackReason,
+        "An unattached model should be reported as unconfigured rather than a call failure.");
 
     // 没有匹配消息：不调用模型，直接给空简报。
     var empty = await service.GenerateAsync(30, "不存在项目", keywords, from, to, CancellationToken.None);
@@ -5659,6 +5702,148 @@ static async Task TestModelSettingsRepositoryAsync()
     await command.ExecuteNonQueryAsync(CancellationToken.None);
     AssertFalse(await repository.GetAnalyzeMessageContentAsync(CancellationToken.None),
         "An invalid persisted value should safely disable message analysis.");
+
+    // 全量分析是独立的第二个开关：空库默认关闭，两个键互不覆盖。
+    AssertFalse(await repository.GetAnalyzeAllMessagesAsync(CancellationToken.None),
+        "A fresh database should disable full-scope message analysis.");
+    await repository.SetAnalyzeAllMessagesAsync(true, CancellationToken.None);
+    AssertTrue(await new SqliteModelSettingsRepository(databasePath)
+        .GetAnalyzeAllMessagesAsync(CancellationToken.None),
+        "The full-scope switch should round-trip through SQLite.");
+    AssertFalse(await repository.GetAnalyzeMessageContentAsync(CancellationToken.None),
+        "Saving the full-scope switch must not turn on the master analysis switch.");
+    await repository.SetAnalyzeAllMessagesAsync(false, CancellationToken.None);
+    AssertFalse(await repository.GetAnalyzeAllMessagesAsync(CancellationToken.None),
+        "Disabling the full-scope switch should overwrite its previous value.");
+
+    command.CommandText = """
+        INSERT INTO app_settings (key, value) VALUES ('model_analyze_all_messages', 'true')
+        ON CONFLICT(key) DO UPDATE SET value = 'true';
+        """;
+    await command.ExecuteNonQueryAsync(CancellationToken.None);
+    AssertFalse(await repository.GetAnalyzeAllMessagesAsync(CancellationToken.None),
+        "An invalid full-scope value should safely disable full-scope analysis.");
+}
+
+/// <summary>
+/// 自动待办规则：匹配语义、SQLite 往返，以及采集管线命中规则后“只入库不建待办”的行为。
+/// 规则是确定性的本地判定，因此不依赖真实模型即可验证。
+/// </summary>
+static async Task TestTodoRulesAsync()
+{
+    // 匹配器：逗号/顿号切分、英文大小写不敏感、单字与停用规则不参与、群名同样命中。
+    var rules = new[]
+    {
+        new TodoRule(1, "验证码、OTP", true, DateTimeOffset.Now),
+        new TodoRule(2, "发布通知", false, DateTimeOffset.Now),
+        new TodoRule(3, "上", true, DateTimeOffset.Now)
+    };
+    AssertEqual(1L, TodoRuleMatcher.Match("请把验证码发我", "客户群", rules)?.Id,
+        "A comma-separated rule should match the second keyword.");
+    AssertEqual(1L, TodoRuleMatcher.Match("send me the OTP code", "客户群", rules)?.Id,
+        "Keyword matching should ignore English case.");
+    AssertTrue(TodoRuleMatcher.Match("今天上线一个新版本", "客户群", rules) is null,
+        "A single-character rule must stay inert to avoid false positives.");
+    AssertTrue(TodoRuleMatcher.Match("发布通知如下", "客户群", rules) is null,
+        "A disabled rule must not match.");
+    AssertEqual(1L, TodoRuleMatcher.Match("在吗", "验证码支持群", rules)?.Id,
+        "The chat name should participate in rule matching.");
+
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var repository = new SqliteTodoRuleRepository(databasePath);
+
+    var ruleId = await repository.AddAsync("  验证码 、 OTP ", CancellationToken.None);
+    var stored = await repository.GetAllAsync(CancellationToken.None);
+    AssertEqual(1, stored.Count, "One saved rule should round-trip through SQLite.");
+    AssertEqual("验证码 、 OTP", stored[0].Text, "Rule text should be normalized but keep its keywords.");
+    AssertEqual(ruleId, await repository.AddAsync("验证码 、 OTP", CancellationToken.None),
+        "Adding the same rule twice must reuse the existing row.");
+    AssertEqual(1, (await repository.GetAllAsync(CancellationToken.None)).Count,
+        "Duplicate rule text must not create a second row.");
+
+    await repository.SetEnabledAsync(ruleId, false, CancellationToken.None);
+    AssertFalse((await repository.GetAllAsync(CancellationToken.None))[0].IsEnabled,
+        "Disabling a rule must persist.");
+    await repository.DeleteAsync(ruleId, CancellationToken.None);
+    AssertEqual(0, (await repository.GetAllAsync(CancellationToken.None)).Count,
+        "Deleting a rule must remove the row.");
+
+    // 单字与空白规则在写入前就被拒绝，避免出现永远无法命中的脏数据。
+    var rejected = false;
+    try
+    {
+        await repository.AddAsync("上", CancellationToken.None);
+    }
+    catch (ArgumentException)
+    {
+        rejected = true;
+    }
+
+    AssertTrue(rejected, "A rule without a usable keyword should be rejected.");
+
+    // 共享快照：任何入口写入后 Current 必须立即更新，采集线程无需重启或重新查询。
+    var store = new TodoRuleStore(repository);
+    AssertEqual(0, store.Current.Count, "A fresh store should start with an empty snapshot.");
+    await store.AddAsync("验证码", CancellationToken.None);
+    AssertEqual(1, store.Current.Count, "Adding a rule through the store should refresh the snapshot.");
+    var storedRule = store.Current.Single();
+    AssertEqual(storedRule.Id, TodoRuleMatcher.Match("把验证码发我", null, store.Current)?.Id,
+        "The refreshed snapshot should be usable for matching immediately.");
+    await store.SetEnabledAsync(storedRule.Id, false, CancellationToken.None);
+    AssertFalse(store.Current.Single().IsEnabled, "Disabling through the store should refresh the snapshot.");
+    await store.DeleteAsync(storedRule.Id, CancellationToken.None);
+    AssertEqual(0, store.Current.Count, "Deleting through the store should refresh the snapshot.");
+
+    // 采集管线：命中规则的 @我 消息不调用模型、不建待办，但消息与评分照常入库。
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+    var analysisCalls = 0;
+    var activeRules = new[] { new TodoRule(1, "验证码", true, DateTimeOffset.Now) };
+    var sentAt = DateTimeOffset.Now;
+    var pipeline = new MessageCapturePipeline(
+        adapters: Array.Empty<IMessageCaptureAdapter>(),
+        messageProcessingUnitOfWork: new SqliteMessageProcessingUnitOfWork(databasePath),
+        offsetRepository: new SqliteProcessingOffsetRepository(databasePath),
+        mentionDetector: new MentionDetector(new[] { "张三" }),
+        projectClassifier: new ProjectClassifier(Array.Empty<ProjectRule>()),
+        urgencyRanker: new UrgencyRanker(),
+        messageRepository: messageRepository,
+        analyzeMessageContent: () => true,
+        analyzeMentionAsync: (message, _) =>
+        {
+            analysisCalls++;
+            return Task.FromResult(new MentionMessageAnalysis(PriorityLevel.P2, "请把验证码发给对方"));
+        },
+        todoRules: () => activeRules);
+
+    CapturedMessage Capture(string key, string content) => new(
+        "WeChat",
+        key,
+        "rule-room",
+        "客户群",
+        "王工",
+        content,
+        sentAt,
+        MessageType.Text);
+
+    var blocked = await pipeline.ProcessAsync(
+        new[] { Capture("rule-otp", "@我 麻烦把验证码发我一下") },
+        CancellationToken.None);
+    AssertEqual(1, blocked.PersistedCount, "A rule-matched message must still be persisted.");
+    AssertEqual(0, blocked.CreatedTodoCount, "A rule-matched message must not create a Todo.");
+    AssertEqual(0, analysisCalls, "A rule-matched message must skip the model call to save cost.");
+    AssertEqual(0, (await todoRepository.GetPendingAsync(CancellationToken.None)).Count,
+        "No pending Todo should exist for a rule-matched message.");
+
+    // 停用规则后同类消息恢复自动建待办，证明规则可在运行时调整。
+    activeRules = new[] { new TodoRule(1, "验证码", false, DateTimeOffset.Now) };
+    var allowed = await pipeline.ProcessAsync(
+        new[] { Capture("rule-otp-2", "@我 麻烦把验证码发我一下") },
+        CancellationToken.None);
+    AssertEqual(1, allowed.CreatedTodoCount, "Disabling the rule should restore automatic Todo creation.");
+    AssertEqual(1, analysisCalls, "A rule-disabled mention should go back to the model.");
 }
 
 static async Task TestCaptureSourceSettingsRepositoryAsync()
@@ -6701,6 +6886,311 @@ static void AssertNotNull<T>(T? value, string message) where T : class
     }
 }
 
+/// <summary>
+/// “分析所有消息”开关：勾选后未 @我 的聊天消息也交给模型判断是否需要建待办。
+/// 只有模型明确 shouldCreate=true 才建（故障 fail-closed），@我 消息保持原有 fail-open；
+/// 主开关仍是总闸，规则命中、重复消息与运行时开关切换都必须保持既有语义。
+/// </summary>
+static async Task TestAnalyzeAllMessagesPipelineAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var messageRepository = new SqliteMessageRepository(databasePath);
+    var todoRepository = new SqliteTodoRepository(databasePath);
+
+    var analyzeMessageContent = true;
+    var analyzeAllMessages = false;
+    var analysisCalls = new List<string>();
+    var activeRules = new[] { new TodoRule(1, "验证码", true, DateTimeOffset.Now) };
+    var sentAt = new DateTimeOffset(
+        DateTimeOffset.Now.Year,
+        DateTimeOffset.Now.Month,
+        DateTimeOffset.Now.Day,
+        13, 30, 0,
+        TimeSpan.FromHours(8));
+
+    CapturedMessage Capture(string key, string content) => new(
+        "WeChat",
+        key,
+        "all-room",
+        "综合群",
+        "王工",
+        content,
+        sentAt,
+        MessageType.Text);
+
+    Task<MentionMessageAnalysis> Analyze(Message message, CancellationToken _)
+    {
+        analysisCalls.Add(message.SourceMessageKey);
+        return message.SourceMessageKey switch
+        {
+            "all-create" => Task.FromResult(new MentionMessageAnalysis(
+                PriorityLevel.P1, "请今天补交巡检记录", ShouldCreate: true)),
+            "all-skip" => Task.FromResult(new MentionMessageAnalysis(
+                PriorityLevel.P3, "仅同步进展", ShouldCreate: false)),
+            _ => Task.FromException<MentionMessageAnalysis>(
+                new InvalidOperationException("模拟模型故障"))
+        };
+    }
+
+    var pipeline = new MessageCapturePipeline(
+        adapters: Array.Empty<IMessageCaptureAdapter>(),
+        messageProcessingUnitOfWork: new SqliteMessageProcessingUnitOfWork(databasePath),
+        offsetRepository: new SqliteProcessingOffsetRepository(databasePath),
+        mentionDetector: new MentionDetector(Array.Empty<string>()),
+        projectClassifier: new ProjectClassifier(Array.Empty<ProjectRule>()),
+        urgencyRanker: new UrgencyRanker(),
+        messageRepository: messageRepository,
+        analyzeMessageContent: () => analyzeMessageContent,
+        analyzeMentionAsync: Analyze,
+        todoRules: () => activeRules,
+        clock: () => sentAt.Date.AddHours(10),
+        analyzeAllMessages: () => analyzeAllMessages);
+
+    // 全量关闭时普通消息既不调用模型，也不建待办。
+    var offResult = await pipeline.ProcessAsync(
+        new[] { Capture("all-off", "今天下午发布版本说明") },
+        CancellationToken.None);
+    AssertEqual(0, offResult.CreatedTodoCount, "Full-scope analysis off must not create a Todo for a normal message.");
+    AssertEqual(0, analysisCalls.Count, "Full-scope analysis off must not call the model for a normal message.");
+
+    // @我 消息的模型故障仍按原规则建待办，不因新开关改变。
+    var mentionFailure = await pipeline.ProcessAsync(
+        new[] { Capture("all-mention-failure", "@我 请确认验收时间") },
+        CancellationToken.None);
+    AssertEqual(1, mentionFailure.CreatedTodoCount, "A mention must keep its fail-open fallback.");
+
+    // 不重建管线，直接打开全量开关验证立即生效。
+    analyzeAllMessages = true;
+    var createResult = await pipeline.ProcessAsync(
+        new[] { Capture("all-create", "巡检记录今天下班前要交给安全组") },
+        CancellationToken.None);
+    AssertEqual(1, createResult.CreatedTodoCount, "A model-approved normal message should create a Todo.");
+
+    var skipResult = await pipeline.ProcessAsync(
+        new[] { Capture("all-skip", "本周版本已按计划发布") },
+        CancellationToken.None);
+    AssertEqual(1, skipResult.PersistedCount, "A rejected message must still be persisted and scored.");
+    AssertEqual(0, skipResult.CreatedTodoCount, "An explicit shouldCreate=false must not create a Todo.");
+
+    var failureResult = await pipeline.ProcessAsync(
+        new[] { Capture("all-failure", "请把巡检记录补齐") },
+        CancellationToken.None);
+    AssertEqual(1, failureResult.PersistedCount, "A model failure must not lose the message.");
+    AssertEqual(0, failureResult.CreatedTodoCount, "A model failure on a normal message must be fail-closed.");
+
+    // 用户规则优先于模型：命中关键词的普通消息不调用模型也不建待办。
+    var callsBeforeRule = analysisCalls.Count;
+    var ruleResult = await pipeline.ProcessAsync(
+        new[] { Capture("all-rule", "请把验证码发我一下") },
+        CancellationToken.None);
+    AssertEqual(1, ruleResult.PersistedCount, "A rule-matched message must still be persisted.");
+    AssertEqual(0, ruleResult.CreatedTodoCount, "A rule-matched message must not create a Todo.");
+    AssertEqual(callsBeforeRule, analysisCalls.Count, "A rule-matched message must skip the model.");
+
+    var callsBeforeDuplicate = analysisCalls.Count;
+    var duplicateResult = await pipeline.ProcessAsync(
+        new[] { Capture("all-create", "巡检记录今天下班前要交给安全组") },
+        CancellationToken.None);
+    AssertEqual(1, duplicateResult.DuplicateCount, "A repeated source key must remain a duplicate.");
+    AssertEqual(callsBeforeDuplicate, analysisCalls.Count, "A duplicate must not invoke the model again.");
+
+    var mentionWithFullScope = await pipeline.ProcessAsync(
+        new[] { Capture("all-mention-failure-2", "@我 请确认周五验收") },
+        CancellationToken.None);
+    AssertEqual(1, mentionWithFullScope.CreatedTodoCount, "Full-scope analysis must not weaken mention fail-open.");
+
+    // 主开关关闭时全量开关不生效：普通消息与 @我 消息都不调用模型，@我 仍按原规则建待办。
+    analyzeMessageContent = false;
+    var callsBeforeMasterOff = analysisCalls.Count;
+    var masterOff = await pipeline.ProcessAsync(
+        new[] { Capture("all-master-off", "请补齐巡检记录") },
+        CancellationToken.None);
+    AssertEqual(0, masterOff.CreatedTodoCount, "A disabled master switch must suppress full-scope Todos.");
+    var masterOffMention = await pipeline.ProcessAsync(
+        new[] { Capture("all-master-off-mention", "@我 请确认周五验收") },
+        CancellationToken.None);
+    AssertEqual(1, masterOffMention.CreatedTodoCount, "A mention must keep local automatic Todo creation.");
+    AssertEqual(callsBeforeMasterOff, analysisCalls.Count, "A disabled master switch must suppress all model calls.");
+
+    // 恢复主开关但关闭全量：普通消息回到不分析、不建待办的状态。
+    analyzeMessageContent = true;
+    analyzeAllMessages = false;
+    var callsBeforeScopeOff = analysisCalls.Count;
+    var scopeOff = await pipeline.ProcessAsync(
+        new[] { Capture("all-scope-off", "巡检记录还差一份") },
+        CancellationToken.None);
+    AssertEqual(0, scopeOff.CreatedTodoCount, "Turning off full scope must restore the mention-only rule.");
+    AssertEqual(callsBeforeScopeOff, analysisCalls.Count, "Turning off full scope must stop normal-message analysis.");
+
+    AssertEqual(
+        "all-mention-failure,all-create,all-skip,all-failure,all-mention-failure-2",
+        string.Join(",", analysisCalls),
+        "Only mention messages and full-scope normal messages should reach the model.");
+
+    var messages = await messageRepository.GetRecentAsync(20, CancellationToken.None);
+    var todos = await todoRepository.GetPendingAsync(CancellationToken.None);
+    AssertEqual(10, messages.Count, "Every distinct message must be persisted exactly once.");
+    AssertEqual(4, todos.Count, "Only the approved normal message and the three mentions should create Todos.");
+
+    var normalMessage = messages.Single(message => message.SourceMessageKey == "all-create");
+    AssertFalse(normalMessage.IsMentionMe, "The approved message must really be a non-mention message.");
+    var normalTodo = todos.Single(todo => todo.SourceMessageId == normalMessage.Id);
+    AssertEqual("请今天补交巡检记录", normalTodo.Description, "A full-scope Todo should use the model description.");
+    AssertEqual(PriorityLevel.P1, normalTodo.Priority, "A full-scope Todo should use the model priority.");
+    AssertTrue(normalTodo.IsAutoCreated, "A full-scope Todo should remain automatically created.");
+
+    foreach (var key in new[] { "all-off", "all-skip", "all-failure", "all-rule", "all-master-off", "all-scope-off" })
+    {
+        var skipped = messages.Single(message => message.SourceMessageKey == key);
+        AssertFalse(todos.Any(todo => todo.SourceMessageId == skipped.Id),
+            $"The {key} message must not have an automatic Todo.");
+    }
+}
+
+/// <summary>模型配置页、后台代码与采集管线必须完整接上全量分析开关。</summary>
+static async Task TestAnalyzeAllMessagesSettingsXamlAsync()
+{
+    var root = ProjectToolPaths.ProjectRoot;
+    var xaml = await File.ReadAllTextAsync(
+        Path.Combine(root, "src", "WechatDashboard.App", "MainWindow.xaml"),
+        CancellationToken.None);
+    AssertTrue(xaml.Contains("x:Name=\"AnalyzeAllMessagesCheckBox\"", StringComparison.Ordinal),
+        "The model settings page must expose the full-scope analysis checkbox.");
+    AssertTrue(xaml.Contains("Click=\"AnalyzeAllMessagesCheckBox_Click\"", StringComparison.Ordinal),
+        "The full-scope checkbox must persist its state on click.");
+
+    var code = await File.ReadAllTextAsync(
+        Path.Combine(root, "src", "WechatDashboard.App", "MainWindow.xaml.cs"),
+        CancellationToken.None);
+    AssertTrue(code.Contains("_analyzeAllMessages", StringComparison.Ordinal),
+        "The main window must hold a live full-scope switch for the capture loop.");
+    AssertTrue(code.Contains("GetAnalyzeAllMessagesAsync", StringComparison.Ordinal)
+        && code.Contains("SetAnalyzeAllMessagesAsync", StringComparison.Ordinal),
+        "Both switches must load from and persist to SQLite.");
+    AssertTrue(code.Contains("analyzeAllMessages: () => _analyzeAllMessages", StringComparison.Ordinal),
+        "The capture pipeline must read the full-scope switch without a restart.");
+}
+
+/// <summary>
+/// 已办理待办在详情里改回活动状态后，数据必须写回，
+/// 并且待办理工作台与日历（日程概览/桌面日历共用同一 VM）都要立即重新看到它。
+/// </summary>
+static async Task TestReopenedTodoVisibilityAsync()
+{
+    var databasePath = Path.Combine(Path.GetTempPath(), "WechatDashboard.Tests", $"{Guid.NewGuid():N}.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+    await new SqliteDatabaseInitializer(databasePath).InitializeAsync(CancellationToken.None);
+    var timeZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
+    var now = new DateTimeOffset(2026, 9, 1, 9, 0, 0, TimeSpan.FromHours(8));
+    var clock = new FixedClock(now);
+    var todos = new SqliteTodoRepository(databasePath);
+    var unitOfWork = new SqliteTodoUnitOfWork(databasePath);
+    var todoService = new TodoApplicationService(unitOfWork, clock);
+    var dialogs = new FakeTodoDialogService();
+    var created = (await todoService.CreateManualAsync(
+        new CreateManualTodoRequest("重新打开的待办", null, PriorityLevel.P1, now.AddHours(3), null, null),
+        CancellationToken.None)).Todo!;
+    await todos.MarkCompletedAsync(created.Id, now, CancellationToken.None);
+
+    var calendar = new DesktopCalendarViewModel(todos, clock, timeZone, _ => Task.CompletedTask);
+    var calendarRefreshCount = 0;
+    var workbench = new TodoWorkbenchViewModel(
+        todos,
+        new SqliteMessageRepository(databasePath),
+        new SqliteReminderRepository(databasePath),
+        todoService,
+        new ReminderApplicationService(unitOfWork, clock),
+        new SqliteFollowedProjectRepository(databasePath),
+        new TodoDueBucketPolicy(timeZone),
+        clock,
+        dialogs,
+        _ => Task.CompletedTask,
+        () => Task.CompletedTask,
+        refreshRelatedViews: async () =>
+        {
+            calendarRefreshCount++;
+            await calendar.RefreshAsync();
+        });
+    await workbench.RefreshAsync();
+    await calendar.RefreshAsync();
+    AssertEqual(1, workbench.Completed.Count, "The completed Todo should start in the completed history.");
+    AssertEqual(0, workbench.ActiveCount, "A completed Todo must not count as active.");
+    AssertTrue(calendar.SelectedTodos.Single(item => item.Id == created.Id).IsCompleted,
+        "The calendar should initially show the Todo as completed.");
+
+    // 从已办理记录打开详情，把状态改回活动并保存（与“保存待办”同一提交路径）。
+    await workbench.OpenTodoAsync(created.Id);
+    var detail = dialogs.ShownDetails.Single();
+    detail.Status = TodoStatus.InProgress;
+    await detail.SaveAsync();
+
+    var reloaded = await todos.GetByIdAsync(created.Id, CancellationToken.None);
+    AssertEqual(TodoStatus.InProgress, reloaded!.Status, "Saving the detail should persist the reopened status.");
+    AssertEqual<DateTimeOffset?>(null, reloaded.CompletedAt, "Reopening a Todo must clear its completion timestamp.");
+    AssertEqual(1, workbench.ActiveCount, "The reopened Todo must reappear in the active workbench groups.");
+    AssertEqual(0, workbench.Completed.Count, "The reopened Todo must leave the completed history.");
+    AssertEqual(1, calendarRefreshCount, "Saving the detail must also refresh the calendar view.");
+    AssertFalse(calendar.SelectedTodos.Single(item => item.Id == created.Id).IsCompleted,
+        "The calendar must immediately show the reopened Todo as active without a manual refresh.");
+
+    // 再次办结后模拟“改完状态直接关闭窗口”：状态仍要落库并刷新，
+    // 但其它正在编辑、尚未点保存的字段不能被顺带提交。
+    await todoService.UpdateAsync(
+        new UpdateTodoRequest(
+            created.Id,
+            created.Title,
+            created.Description,
+            created.ProjectId,
+            created.Priority,
+            created.DueAt,
+            TodoStatus.Done,
+            reloaded.UpdatedAt,
+            GroupId: null,
+            ManagedProjectId: created.ManagedProjectId),
+        CancellationToken.None);
+    dialogs.ShownDetails.Clear();
+    await workbench.OpenTodoAsync(created.Id);
+    var uncommitted = dialogs.ShownDetails.Single();
+    uncommitted.Status = TodoStatus.Pending;
+    uncommitted.Title = "未保存的标题改动";
+    AssertTrue(await uncommitted.SaveStatusIfChangedAsync(),
+        "Closing the detail with an unsaved status change should commit that change.");
+    var afterClose = await todos.GetByIdAsync(created.Id, CancellationToken.None);
+    AssertEqual(TodoStatus.Pending, afterClose!.Status, "The reopened status must survive closing without an explicit save.");
+    AssertEqual(created.Title, afterClose.Title, "The close fallback must not silently commit other unsaved edits.");
+    AssertEqual(2, calendarRefreshCount, "The close fallback must refresh the calendar as well.");
+    AssertFalse(calendar.SelectedTodos.Single(item => item.Id == created.Id).IsCompleted,
+        "The calendar must remain in sync after the close fallback.");
+}
+
+/// <summary>防止状态刷新链路被拆掉：协调器、工作台、主窗口、详情窗口四处接线必须同时存在。</summary>
+static async Task TestTodoStatusRefreshWiringAsync()
+{
+    var root = ProjectToolPaths.ProjectRoot;
+    Task<string> ReadSourceAsync(params string[] segments) =>
+        File.ReadAllTextAsync(Path.Combine([root, .. segments]), CancellationToken.None);
+
+    var coordinator = await ReadSourceAsync("src", "WechatDashboard.App", "Services", "TodoFeatureCoordinator.cs");
+    AssertTrue(coordinator.Contains("refreshCalendar", StringComparison.Ordinal)
+        && coordinator.Contains("MessageFeed.RefreshAsync()", StringComparison.Ordinal),
+        "The coordinator must fan detail saves out to the message feed and the calendar.");
+
+    var workbench = await ReadSourceAsync("src", "WechatDashboard.App", "ViewModels", "Todos", "TodoWorkbenchViewModel.cs");
+    AssertTrue(workbench.Contains("refreshRelatedViews", StringComparison.Ordinal)
+        && workbench.Contains("RefreshTodoViewsAsync", StringComparison.Ordinal),
+        "The workbench must give the detail a refresh callback that covers related views.");
+
+    var mainWindow = await ReadSourceAsync("src", "WechatDashboard.App", "MainWindow.xaml.cs");
+    AssertTrue(mainWindow.Contains("refreshCalendar: () => ScheduleOverview.RefreshAsync()", StringComparison.Ordinal),
+        "The main window must inject the shared calendar view model refresh into the coordinator.");
+
+    var detailWindow = await ReadSourceAsync("src", "WechatDashboard.App", "Views", "Todos", "TodoDetailWindow.xaml.cs");
+    AssertTrue(detailWindow.Contains("SaveStatusIfChangedAsync", StringComparison.Ordinal),
+        "Closing a detail with an unsaved status change must commit that change.");
+}
+
 /// <summary>离屏渲染一块区域后的像素统计，用于断言滚动条是否与主题一致。</summary>
 public sealed record RenderedPixelSample(
     int OpaquePixels,
@@ -6918,7 +7408,14 @@ public sealed class FakeTodoDialogService : ITodoDialogService
 {
     public List<(string Message, string Title)> Errors { get; } = new();
 
-    public Task ShowAsync(TodoDetailViewModel viewModel) => Task.CompletedTask;
+    /// <summary>记录被打开的详情视图模型，供跨视图刷新测试驱动真实的保存流程。</summary>
+    public List<TodoDetailViewModel> ShownDetails { get; } = new();
+
+    public Task ShowAsync(TodoDetailViewModel viewModel)
+    {
+        ShownDetails.Add(viewModel);
+        return Task.CompletedTask;
+    }
 
     public Task ShowCreateAsync(TodoCreateViewModel viewModel) => Task.CompletedTask;
 

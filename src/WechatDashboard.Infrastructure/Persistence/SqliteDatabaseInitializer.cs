@@ -84,6 +84,14 @@ public sealed class SqliteDatabaseInitializer
             checksum: "followed-project-stage-v1",
             sql: FollowedProjectStageMigrationSql,
             cancellationToken);
+        // v11 只追加自动待办规则表，既有消息、待办与旧迁移校验和保持不变。
+        await ApplyMigrationAsync(
+            connection,
+            version: 11,
+            name: "auto-todo-rules",
+            checksum: "auto-todo-rules-v1",
+            sql: TodoRuleMigrationSql,
+            cancellationToken);
     }
 
     /// <summary>
@@ -490,6 +498,16 @@ public sealed class SqliteDatabaseInitializer
             ADD COLUMN stage TEXT NOT NULL DEFAULT 'Construction';
         """;
 
+    /// <summary>v11：自动待办规则表，规则文本唯一，停用后保留以便恢复。</summary>
+    private const string TodoRuleMigrationSql = """
+        CREATE TABLE IF NOT EXISTS todo_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_text TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        """;
+
     private const string TodoProjectAssignmentMigrationSql = """
         CREATE INDEX IF NOT EXISTS idx_todo_items_managed_project_id
             ON todo_items(managed_project_id);
@@ -793,6 +811,14 @@ public sealed class SqliteDatabaseInitializer
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        -- 自动待办规则表：用户教给 Agent 的排除记忆，命中关键词的消息只入库不建待办
+        CREATE TABLE IF NOT EXISTS todo_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_text TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
         );
 
         -- 审计日志表

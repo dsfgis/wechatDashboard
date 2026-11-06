@@ -12,6 +12,7 @@ using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.TodoRules;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.Application.Weekly;
 using WechatDashboard.App.Services;
@@ -46,6 +47,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly SqliteProcessingOffsetRepository _offsetRepository;
     private readonly SqliteCaptureSourceSettingsRepository _settingsRepository;
     private readonly SqliteModelSettingsRepository _modelSettingsRepository;
+    // 用户教给 Agent 的自动待办排除规则（命中即只入库不建待办）；
+    // 采集线程、模型提示词和界面共用同一份内存快照，任一处修改立即全员可见。
+    private readonly TodoRuleStore _todoRuleStore;
     private readonly SqliteUserAliasRepository _aliasRepository;
     private readonly SqliteFollowedChatRepository _followedChatRepository;
     private readonly SqliteFollowedProjectRepository _followedProjectRepository;
@@ -74,8 +78,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // DeepSeek 密钥仅在启动时读取，界面保存后于下次重启生效。
     private readonly ProtectedDeepSeekApiKeyStore _deepSeekApiKeyStore;
     private readonly OpenAiCompatibleMessageActionModel _messageActionModel;
-    // 后台采集直接读取该内存开关，复选框无需等待重启或重建管线。
+    // 后台采集直接读取这两个内存开关，复选框无需等待重启或重建管线。
+    // 总闸决定是否调用模型；范围开关决定是否把未 @我 的聊天消息也交给模型。
     private volatile bool _analyzeMessageContent;
+    private volatile bool _analyzeAllMessages;
     // 采集并发控制信号量，避免实时循环与手动采集重叠
     private readonly SemaphoreSlim _captureSemaphore = new(1, 1);
     // 监听空闲时自动降频；托盘后台只做低频增量检查，恢复窗口时立即唤醒。
@@ -156,6 +162,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _offsetRepository = new SqliteProcessingOffsetRepository(_databasePath);
         _settingsRepository = new SqliteCaptureSourceSettingsRepository(_databasePath);
         _modelSettingsRepository = new SqliteModelSettingsRepository(_databasePath);
+        _todoRuleStore = new TodoRuleStore(new SqliteTodoRuleRepository(_databasePath));
         _aliasRepository = new SqliteUserAliasRepository(_databasePath);
         _followedChatRepository = new SqliteFollowedChatRepository(_databasePath);
         _followedProjectRepository = new SqliteFollowedProjectRepository(_databasePath);
@@ -183,13 +190,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _modelConfigStatusText = $"{exception.Message} 本次将尝试使用环境变量配置。";
         }
 
-        _messageActionModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment(savedDeepSeekApiKey);
+        _messageActionModel = OpenAiCompatibleMessageActionModel.FromSavedApiKeyOrEnvironment(
+            savedDeepSeekApiKey,
+            // 每次分析时读取当前规则快照，界面新增规则后无需重启即可影响提示词。
+            todoRules: () => _todoRuleStore.Current);
         TodoFeature = new TodoFeatureCoordinator(
             _databasePath,
             _messageActionModel,
             () => _currentAliases,
             () => _currentFollowedChats,
             () => _followedChatFilterMode,
+            // 待办详情里的“此类不再建待办”与模型配置页共用同一份规则快照。
+            _todoRuleStore,
             tabIndex =>
             {
                 MainContentTabs.SelectedIndex = tabIndex;
@@ -197,7 +209,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     .OfType<ListBoxItem>()
                     .FirstOrDefault(item => item.Tag?.ToString() == tabIndex.ToString());
             },
-            async () => await RefreshAsync());
+            // 新建待办同样要出现在日历里，不能只刷当前选中的 Tab。
+            async () => await Task.WhenAll(RefreshAsync(), ScheduleOverview.RefreshAsync()),
+            // 详情改状态后同步刷新日程概览与桌面日历；两者共用 ScheduleOverview 实例。
+            refreshCalendar: () => ScheduleOverview.RefreshAsync());
         ScheduleOverview = new DesktopCalendarViewModel(
             _todoRepository,
             SystemClock.Instance,
@@ -399,6 +414,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 用户别名列表（UI 绑定）
     public ObservableCollection<UserAliasRow> Aliases { get; } = new();
 
+    // 自动待办规则列表（UI 绑定）
+    public ObservableCollection<TodoRuleRow> TodoRules { get; } = new();
+
     // 关注群列表（UI 绑定）
     public ObservableCollection<FollowedChatRow> FollowedChats { get; } = new();
 
@@ -449,6 +467,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await InitializeAndRefreshAsync(seedIfEmpty: true);
         // 必须在实时监听启动前恢复开关，避免首批消息使用错误状态。
         await LoadModelSettingsAsync();
+        // 规则同样要在首轮采集前恢复，否则启动瞬间的 @我 消息仍会按旧规则建待办。
+        await LoadTodoRulesAsync();
         await TodoFeature.StartAsync();
         ApplyBootstrapRange();
         await Task.Run(() => _readerService.TryRestoreProtectedKeyAsync(CancellationToken.None));
@@ -1041,14 +1061,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     ? $"时间窗口（近 {days} 天）内没有匹配「{project.ProjectName}」关键词的消息。"
                     : outcome.FromModel
                         ? $"已生成模型简报：匹配 {outcome.MatchedCount} 条消息，送入模型 {outcome.SentToModelCount} 条。"
-                        : $"模型不可用，已回退本地统计摘要（{outcome.MatchedCount} 条消息）。";
+                        // 回退原因来自服务层，便于区分未配置、超时、截断与校验失败。
+                        : $"模型不可用，已回退本地统计摘要（{outcome.MatchedCount} 条消息）。原因：{outcome.FallbackReason ?? "未知"}";
 
                 // 所有建议默认勾选，但这里只更新内存集合，不直接写数据库。
                 Replace(MemoryProposals, outcome.MemoryProposals.Select(proposal => new ProjectMemoryProposalRow(proposal)));
                 _memoryProposalProjectId = project.Id;
                 var newCount = outcome.MemoryProposals.Count(proposal => proposal.ItemId is null);
                 var changeCount = outcome.MemoryProposals.Count - newCount;
-                var proposalSource = outcome.FromModel ? "模型建议" : "本地规则建议（模型不可用或结果未通过校验）";
+                var proposalSource = outcome.FromModel
+                    ? "模型建议"
+                    : $"本地规则建议（{outcome.FallbackReason ?? "模型不可用或结果未通过校验"}）";
                 MemoryProposalStatusText.Text = outcome.MemoryProposals.Count == 0
                     ? $"{proposalSource}：本次没有需要确认的新增事项或状态变化。"
                     : $"{proposalSource}：新增 {newCount} 项，状态建议 {changeCount} 项；已默认勾选，可修改建议状态后应用。";
@@ -2398,19 +2421,144 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             _analyzeMessageContent = await _modelSettingsRepository.GetAnalyzeMessageContentAsync(
                 CancellationToken.None);
+            _analyzeAllMessages = await _modelSettingsRepository.GetAnalyzeAllMessagesAsync(
+                CancellationToken.None);
             AnalyzeMessageContentCheckBox.IsChecked = _analyzeMessageContent;
+            AnalyzeAllMessagesCheckBox.IsChecked = _analyzeAllMessages;
+            // 主开关关闭时全量开关不可点击，但保留已保存的勾选状态，重新开启后立即恢复。
+            AnalyzeAllMessagesCheckBox.IsEnabled = _analyzeMessageContent;
         }
         catch (Exception exception)
         {
             _analyzeMessageContent = false;
+            _analyzeAllMessages = false;
             AnalyzeMessageContentCheckBox.IsChecked = false;
+            AnalyzeAllMessagesCheckBox.IsChecked = false;
+            AnalyzeAllMessagesCheckBox.IsEnabled = false;
             ModelConfigStatusText = "模型分析开关读取失败，本次保持关闭。";
             System.Diagnostics.Debug.WriteLine(
                 $"Model settings load failed: {exception.Message}");
         }
     }
 
-    /// <summary>勾选后立即更新内存开关并异步持久化，保存失败时恢复之前的状态。</summary>
+    /// <summary>
+    /// 切换到“模型配置”页时用内存快照刷新规则列表：
+    /// 详情页新增的规则不会重新读库，但列表必须立刻显示出来。
+    /// </summary>
+    private void MainContentTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.OriginalSource is not TabControl tabs
+            || tabs.SelectedItem is not TabItem selected
+            || selected.Header?.ToString() != "模型配置")
+        {
+            return;
+        }
+
+        ApplyTodoRules(_todoRuleStore.Current);
+    }
+
+    /// <summary>读取自动待办规则：失败时按无规则处理，不影响其他设置与采集。</summary>
+    private async Task LoadTodoRulesAsync()
+    {
+        try
+        {
+            var rules = await _todoRuleStore.LoadAsync(CancellationToken.None);
+            ApplyTodoRules(rules);
+            TodoRuleStatusText.Text = rules.Count == 0
+                ? "尚未设置规则。添加关键词后，命中该关键词的消息只入库、不自动建待办。"
+                : $"已加载 {rules.Count} 条规则，其中 {rules.Count(rule => rule.IsEnabled)} 条启用。";
+        }
+        catch (Exception exception)
+        {
+            // 读取失败时保留内存快照，避免已生效的规则被清空。
+            ApplyTodoRules(_todoRuleStore.Current);
+            TodoRuleStatusText.Text = $"规则读取失败，继续使用上次快照：{exception.Message}";
+            System.Diagnostics.Debug.WriteLine($"Todo rules load failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>把当前规则快照同步到界面列表；快照由 TodoRuleStore 统一维护。</summary>
+    private void ApplyTodoRules(IReadOnlyList<TodoRule> rules)
+    {
+        Replace(TodoRules, rules.Select(rule => new TodoRuleRow(
+            rule.Id,
+            rule.Text,
+            rule.IsEnabled ? "启用" : "已停用")));
+    }
+
+    /// <summary>添加规则：空白、过短或过长的输入由服务层拒绝并回显原因。</summary>
+    private async void AddTodoRuleButton_Click(object sender, RoutedEventArgs e)
+    {
+        var text = NewTodoRuleTextBox.Text;
+        try
+        {
+            var normalized = TodoRuleMatcher.Normalize(text);
+            await _todoRuleStore.AddAsync(normalized, CancellationToken.None);
+            NewTodoRuleTextBox.Text = string.Empty;
+            await LoadTodoRulesAsync();
+            // 整句长文本几乎不会逐字出现在消息里，这里提示改成短关键词，避免规则形同虚设。
+            TodoRuleStatusText.Text = TodoRuleMatcher.Tokenize(normalized).Count == 1 && normalized.Length > 12
+                ? $"已记住「{normalized}」，但整句很难在消息中原样出现；建议改填短关键词（例如“验证码”）。"
+                : $"已记住「{normalized}」：之后命中该关键词的消息只入库，不再自动建待办。";
+        }
+        catch (ArgumentException exception)
+        {
+            // 校验信息直接面向用户，不含内部细节。
+            TodoRuleStatusText.Text = exception.Message;
+        }
+        catch (Exception exception)
+        {
+            TodoRuleStatusText.Text = $"规则保存失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>切换选中规则的启用状态；停用后保留配置，可随时恢复。</summary>
+    private async void ToggleTodoRuleButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (TodoRulesGrid?.SelectedItem is not TodoRuleRow row)
+        {
+            TodoRuleStatusText.Text = "请先选中要启用或停用的规则。";
+            return;
+        }
+
+        var current = _todoRuleStore.Current.FirstOrDefault(rule => rule.Id == row.Id);
+        var enabled = current is null || !current.IsEnabled;
+        try
+        {
+            await _todoRuleStore.SetEnabledAsync(row.Id, enabled, CancellationToken.None);
+            await LoadTodoRulesAsync();
+            TodoRuleStatusText.Text = enabled
+                ? $"已启用规则「{row.Text}」。"
+                : $"已停用规则「{row.Text}」；已建成的待办不受影响。";
+        }
+        catch (Exception exception)
+        {
+            TodoRuleStatusText.Text = $"规则状态保存失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>删除选中规则；已建立的待办不会被删除。</summary>
+    private async void DeleteTodoRuleButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (TodoRulesGrid?.SelectedItem is not TodoRuleRow row)
+        {
+            TodoRuleStatusText.Text = "请先选中要删除的规则。";
+            return;
+        }
+
+        try
+        {
+            await _todoRuleStore.DeleteAsync(row.Id, CancellationToken.None);
+            await LoadTodoRulesAsync();
+            TodoRuleStatusText.Text = $"已删除规则「{row.Text}」；之后同类消息恢复自动建待办。";
+        }
+        catch (Exception exception)
+        {
+            TodoRuleStatusText.Text = $"规则删除失败：{exception.Message}";
+        }
+    }
+
+    /// <summary>勾选总闸后立即更新内存开关并异步持久化，保存失败时恢复之前的状态。</summary>
     private async void AnalyzeMessageContentCheckBox_Click(object sender, RoutedEventArgs e)
     {
         var previousEnabled = _analyzeMessageContent;
@@ -2423,21 +2571,65 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             await _modelSettingsRepository.SetAnalyzeMessageContentAsync(
                 enabled,
                 CancellationToken.None);
+            // 关闭总闸时全量开关保留勾选但不可操作，重新开启后无需再点一次。
+            AnalyzeAllMessagesCheckBox.IsEnabled = enabled;
             ModelConfigStatusText = enabled
-                ? "分析消息内容已开启并保存，立即生效；大模型将筛选之后新入库的 @我 消息并生成待办分析。"
-                : "分析消息内容已关闭并保存，立即生效；@我 消息仍按原逻辑自动创建待办。";
+                ? $"分析消息内容已开启并保存，立即生效；当前分析范围：{(_analyzeAllMessages ? "所有消息" : "@我 / @所有人及邮件")}。"
+                : "分析消息内容已关闭并保存，立即生效；全量分析同时停用，@我 消息仍按原逻辑自动创建待办。";
         }
         catch (Exception exception)
         {
             // UI 与后台采集同时回滚，避免界面状态和实际行为不一致。
             _analyzeMessageContent = previousEnabled;
             AnalyzeMessageContentCheckBox.IsChecked = previousEnabled;
+            AnalyzeAllMessagesCheckBox.IsEnabled = previousEnabled;
             ModelConfigStatusText =
                 $"分析开关保存失败，已恢复原状态：{exception.Message}";
         }
         finally
         {
             AnalyzeMessageContentCheckBox.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// 勾选“分析所有消息”后立即扩大新消息的判定范围并异步持久化。
+    /// 它依赖总闸；未 @我 的消息只有模型明确判定需要行动才建待办，模型故障时不建。
+    /// </summary>
+    private async void AnalyzeAllMessagesCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_analyzeMessageContent)
+        {
+            // 正常情况下控件已禁用；这里防御程序化触发，避免产生“看起来已开启”的错觉。
+            AnalyzeAllMessagesCheckBox.IsChecked = _analyzeAllMessages;
+            AnalyzeAllMessagesCheckBox.IsEnabled = false;
+            ModelConfigStatusText = "请先勾选“分析消息内容”，再开启“分析所有消息”。";
+            return;
+        }
+
+        var previousEnabled = _analyzeAllMessages;
+        var enabled = AnalyzeAllMessagesCheckBox.IsChecked == true;
+        _analyzeAllMessages = enabled;
+        AnalyzeAllMessagesCheckBox.IsEnabled = false;
+        try
+        {
+            await _modelSettingsRepository.SetAnalyzeAllMessagesAsync(
+                enabled,
+                CancellationToken.None);
+            ModelConfigStatusText = enabled
+                ? "分析所有消息已开启并保存，立即生效；之后新采集的每条消息都会由大模型判断是否加入待办理，模型不可用时不会创建待办。API 调用量会明显增加。"
+                : "分析所有消息已关闭并保存，立即生效；仅 @我 / @所有人 及邮件继续按原规则分析。";
+        }
+        catch (Exception exception)
+        {
+            _analyzeAllMessages = previousEnabled;
+            AnalyzeAllMessagesCheckBox.IsChecked = previousEnabled;
+            ModelConfigStatusText =
+                $"全量分析开关保存失败，已恢复原状态：{exception.Message}";
+        }
+        finally
+        {
+            AnalyzeAllMessagesCheckBox.IsEnabled = _analyzeMessageContent;
         }
     }
 
@@ -2631,7 +2823,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             // 单次 Agent 调用同时判断创建必要性并生成优先级和说明，不影响消息流评分。
             analyzeMentionAsync: _messageActionModel.AnalyzeMentionAsync,
             // 跨群去重：第二次提醒同一件事时只追加来源消息，不再新建待办。
-            detectDuplicateAsync: new TodoDuplicateDetector(_todoRepository, _messageActionModel).DetectAsync);
+            detectDuplicateAsync: new TodoDuplicateDetector(_todoRepository, _messageActionModel).DetectAsync,
+            // 用户规则优先于模型结论：命中后消息照常入库，但不进入自动待办。
+            todoRules: () => _todoRuleStore.Current,
+            // 全量分析开关由后台采集循环实时读取，切换后无需重建管线或重启。
+            analyzeAllMessages: () => _analyzeAllMessages);
     }
 
     /// <summary>
@@ -3216,6 +3412,9 @@ public sealed record CaptureSourceSettingRow
 
 /// <summary>用户别名行数据：用于 UI 展示与删除操作。</summary>
 public sealed record UserAliasRow(long Id, string Alias);
+
+/// <summary>自动待办规则行数据：规则原文与当前启用状态。</summary>
+public sealed record TodoRuleRow(long Id, string Text, string State);
 
 /// <summary>关注群行数据：用于 UI 展示与删除操作。</summary>
 public sealed record FollowedChatRow(long Id, string ChatName);

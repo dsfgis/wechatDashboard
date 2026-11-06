@@ -23,6 +23,12 @@ public sealed record ProjectBriefingOutcome(
     /// <summary>待用户批量确认的项目记忆建议；生成简报本身不会写入这些建议。</summary>
     public IReadOnlyList<ProjectMemoryProposal> MemoryProposals { get; init; } =
         Array.Empty<ProjectMemoryProposal>();
+
+    /// <summary>
+    /// 回退本地摘要的具体原因（模型未配置、鉴权失败、超时、输出被截断或结构化校验未通过）。
+    /// FromModel=true 或没有匹配消息时为 null；界面据此说明为什么没有模型结论。
+    /// </summary>
+    public string? FallbackReason { get; init; }
 }
 
 /// <summary>
@@ -125,6 +131,8 @@ public sealed class ProjectBriefingService
                 item.Status)).ToArray()
         };
 
+        // 回退原因在模型调用失败时填充，供界面区分“没配置”“超时”“输出被截断”等情况。
+        string? fallbackReason = null;
         if (_model is not null)
         {
             try
@@ -144,10 +152,16 @@ public sealed class ProjectBriefingService
             }
             catch (Exception exception)
             {
-                // 模型未配置、超时、网络错误或响应无效：回退本地统计摘要，不阻断界面。
-                System.Diagnostics.Debug.WriteLine(
-                    $"Project briefing model failed: {CaptureErrorSanitizer.Sanitize(exception.Message)}");
+                // 模型未配置、超时、网络错误、输出被截断或响应无效：回退本地统计摘要，不阻断界面。
+                // 具体原因保留到结果中，避免界面只能显示笼统的“模型不可用”。
+                fallbackReason = CaptureErrorSanitizer.Sanitize(exception.Message);
+                System.Diagnostics.Debug.WriteLine($"Project briefing model failed: {fallbackReason}");
             }
+        }
+        else
+        {
+            // 未接入模型对象通常意味着没有配置密钥，与调用失败区分开。
+            fallbackReason = "模型未配置";
         }
 
         return new ProjectBriefingOutcome(
@@ -157,7 +171,8 @@ public sealed class ProjectBriefingService
             selected.Count)
         {
             // 本地规则只识别明确风险和 @我 行动，不猜测完成、搁置或废弃。
-            MemoryProposals = BuildFallbackProposals(matched)
+            MemoryProposals = BuildFallbackProposals(matched),
+            FallbackReason = fallbackReason
         };
     }
 

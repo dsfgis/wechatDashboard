@@ -446,6 +446,22 @@ Todo 状态：
 | Done | 已完成 |
 | Ignored | 已忽略 |
 
+#### 4.3.1 全量消息分析范围与待办判定策略（2026-11-06）
+
+“模型配置”页提供两个独立的 `app_settings` 开关：`model_analyze_message_content`（模型调用总闸）与 `model_analyze_all_messages`（把判定范围从 `@我` / `@所有人`、邮件扩大到全部新采集消息）。范围开关依赖总闸：总闸关闭时不可操作但保留已保存取值，重新开启即恢复。两者都只作用于之后新处理的消息，不回溯历史。
+
+`MessageCapturePipeline.ProcessAsync` 对每条消息只取一次开关快照（`analyzeAll = analyzeEnabled && analyzeAllMessages()`），避免采集途中用户切换导致“是否调用模型”与“是否建待办”判定不一致。`needsAgentDecision = ruleHit is null && (isMentionMe || isMailSource || analyzeAll)`；模型调用在数据库事务之前完成，失败返回 `null`，由调用方按来源回退。
+
+| 消息类型 | 是否调用模型 | 模型失败 / 未配置 / 响应无效 |
+| --- | --- | --- |
+| `@我` / `@所有人` 聊天 | 总闸开启时总是调用 | **fail-open**：仍自动创建待办，回退本地优先级与默认说明 |
+| 邮件（`MailSourcePolicy`） | 总闸开启时总是调用 | **fail-closed**：不创建待办 |
+| 其它聊天（范围开关开启） | 每条新消息一次 | **fail-closed**：仅 `shouldCreate=true` 创建 |
+
+三种策略不得统一：全量聊天消息若采用 fail-open，一次模型故障就会把整批群消息灌入待办。`TodoRuleMatcher` 命中、重复消息跳过模型、跨群语义去重对三条路径同样生效。`MentionAnalysisSystemPrompt` 对 `currentMessage.isMentionMe=false` 追加约束：群发通知、他人之间的对话、进展同步、闲聊与无明确责任人的信息一律 `shouldCreate=false`。代价是 API 调用量随消息量线性增长，界面与 README 必须明确提示。
+
+回归证据：`TestAnalyzeAllMessagesPipelineAsync`（关闭/开启、成功/否决/故障、规则、重复、运行时切换）、`TestModelSettingsRepositoryAsync`（默认值、往返、键隔离、损坏值）、`TestAnalyzeAllMessagesSettingsXamlAsync`（界面与管线接线）、`TestDeepSeekMentionAnalysisAsync`（提示词约束）；完整运行器 120 PASS / 0 FAIL。
+
 ### 4.4 项目分类
 
 项目分类采用“规则优先、模型辅助、人工修正闭环”的策略。
@@ -874,6 +890,25 @@ UI 验收：
 定时器只作为兜底，不承担主路径：至少一条钩子安装成功时为 1s 间隔，两条都失败（远程会话、受限桌面）时退回 300ms 轮询，保证能力不退化。`DesktopCalendarDesktopHost` 实现 `IDisposable`，窗口关闭时卸载钩子，避免 Explorer 重启销毁窗口后钩子悬挂。
 
 **验收方法**。`tests/WechatDashboard.Tests/DesktopCalendarNativeAssertions.MeasureLongestIconLayerCoverage` 在注入真实 Win+D（`SendInput`，与用户按键/任务栏按钮同一壳层路径）期间高频采样“图标层是否位于日历之上”，返回最长连续遮盖时长；`TestDesktopCalendarShowDesktopSurvivalAsync` 要求该值 < 60ms（一帧约 16ms），并同时断言窗口未最小化、仍可见、位置尺寸不变、再次切换桌面后仍在图标层之上。
+
+### 5.3 待办状态回流的跨视图刷新（2026-11-06）
+
+**问题与根因**。在详情里把 `Done` 改回活动状态后，待办应重新出现在“待办理”与日历。诊断测试证明 `UpdateTodoAsync` 已正确写回 `status`、清空 `completed_at`，`TodoWorkbenchViewModel.RefreshAsync()` 也会把行移回活动分组；唯一失效的是**日历**：详情的刷新回调只刷工作台，而 `DesktopCalendarViewModel` 持有 `_todosByDate` 缓存，主窗口“日程概览”与桌面日历窗口共用同一实例。`MainWindow.RefreshAsync()` 通过 `RefreshSelectedFeatureAsync()` 只刷当前选中的 Tab，不能当作全局刷新使用。
+
+**单一刷新链路**（禁止在各处手写零散刷新）：
+
+```text
+MainWindow (refreshCalendar: () => ScheduleOverview.RefreshAsync())
+  → TodoFeatureCoordinator.refreshRelatedViews (MessageFeed + 日历)
+  → TodoWorkbenchViewModel.RefreshTodoViewsAsync = Task.WhenAll(RefreshAsync(), refreshRelatedViews())
+  → TodoDetailViewModel._refreshWorkbench
+```
+
+详情的保存、完成、置顶、设置提醒与延后全部复用这条链路；`ReminderResolutionHandler`（提醒卡片“完成”也会改状态）改走 `RefreshAllViewsAsync()`，`onTodoCreated`（新建待办）同样补上日历刷新。新增构造参数一律追加在末尾且可选，保持既有位置参数调用兼容。
+
+**状态改动的两种提交路径**。① 点击“保存待办”：提交全部字段，成功后清除未保存标记并全局刷新；② 只改状态就关闭窗口：`TodoDetailWindow.Closed` 调用 `SaveStatusIfChangedAsync()`，仅提交状态，字段一律取 `_todo` 持久化快照，不误提交仍在编辑的标题 / 说明 / 优先级 / 截止 / 项目。状态不做“选择即保存”，避免与 `ExpectedUpdatedAt` 并发检查及其它未保存字段互相干扰；异常在方法内部捕获，窗口已关闭时不再弹框。把 `Done` 改回 `Pending` / `InProgress` / `Waiting` 后 `completed_at` 清空，待办重新进入活动分组与日历（日历中完成态仅由 `IsCompleted` 区分，排序位置不变）。
+
+回归证据：`TestReopenedTodoVisibilityAsync`（数据回写、活动/已办分组、日历刷新计数、`IsCompleted` 同步、未保存状态关窗只提交状态）、`TestTodoStatusRefreshWiringAsync`（协调器 / 工作台 / 主窗口 / 详情窗口四处接线）；完整运行器 120 PASS / 0 FAIL。
 
 ## 6. SQLite 数据模型
 

@@ -5,6 +5,7 @@ using WechatDashboard.Application.Capture;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.TodoRules;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
@@ -21,6 +22,10 @@ public sealed class TodoDetailViewModel : ObservableObject
     private readonly Func<Task> _refreshWorkbench;
     private readonly Func<long, Task> _navigateToMessage;
     private readonly ITodoDialogService _dialogs;
+    // 规则写入后立即刷新共享快照，采集管线无需重启即可生效；测试可不接入。
+    private readonly TodoRuleStore? _todoRuleStore;
+    private string _todoRuleKeyword = string.Empty;
+    private string? _todoRuleStatusText;
     private TodoItem _todo;
     private TodoReminder? _currentReminder;
     private string _title;
@@ -30,6 +35,8 @@ public sealed class TodoDetailViewModel : ObservableObject
     // 但只要用户没有真的改过下拉，保存时仍写回原值，不因设置变化悄悄改数据。
     private PriorityLevel _originalPriority;
     private TodoStatus _status;
+    // 用户在下拉里改了状态但还没点“保存待办”：窗口关闭时只补交状态，不误提交其它编辑中字段。
+    private bool _hasUnsavedStatusChange;
     private DateTime? _dueDate;
     private int _dueHour = 23;
     private int _dueMinute = 59;
@@ -50,7 +57,8 @@ public sealed class TodoDetailViewModel : ObservableObject
         IClock clock,
         Func<Task> refreshWorkbench,
         Func<long, Task> navigateToMessage,
-        ITodoDialogService dialogs)
+        ITodoDialogService dialogs,
+        TodoRuleStore? todoRuleStore = null)
     {
         _todo = row.Todo;
         _currentReminder = row.Reminder;
@@ -63,6 +71,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         _refreshWorkbench = refreshWorkbench;
         _navigateToMessage = navigateToMessage;
         _dialogs = dialogs;
+        _todoRuleStore = todoRuleStore;
         _title = _todo.Title;
         _description = _todo.Description;
         _originalPriority = _todo.Priority;
@@ -97,6 +106,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         SnoozeOneHourCommand = new AsyncRelayCommand(_ => SnoozeAsync(TimeSpan.FromHours(1)));
         SnoozeTomorrowCommand = new AsyncRelayCommand(_ => SnoozeTomorrowAsync());
         NavigateToSourceCommand = new AsyncRelayCommand(_ => NavigateAsync(), _ => SourceMessageId.HasValue);
+        SaveTodoRuleCommand = new AsyncRelayCommand(_ => SaveTodoRuleAsync(), _ => CanSaveTodoRule);
     }
 
     public event EventHandler? RequestClose;
@@ -120,6 +130,32 @@ public sealed class TodoDetailViewModel : ObservableObject
     public AsyncRelayCommand SnoozeOneHourCommand { get; }
     public AsyncRelayCommand SnoozeTomorrowCommand { get; }
     public AsyncRelayCommand NavigateToSourceCommand { get; }
+    /// <summary>把当前来源消息归纳为“此类不再建待办”的规则。</summary>
+    public AsyncRelayCommand SaveTodoRuleCommand { get; }
+    /// <summary>没有来源消息或未接入规则仓储（例如单元测试）时隐藏整个规则区块。</summary>
+    public System.Windows.Visibility TodoRuleVisibility => _todoRuleStore is not null && OriginalMessages.Count > 0
+        ? System.Windows.Visibility.Visible
+        : System.Windows.Visibility.Collapsed;
+    /// <summary>规则关键词：用户可参考上方原始消息自行填写，例如“验证码”。</summary>
+    public string TodoRuleKeyword
+    {
+        get => _todoRuleKeyword;
+        set
+        {
+            if (SetProperty(ref _todoRuleKeyword, value))
+            {
+                SaveTodoRuleCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool CanSaveTodoRule => _todoRuleStore is not null && !string.IsNullOrWhiteSpace(_todoRuleKeyword);
+    /// <summary>规则保存结果或校验提示，只影响本区块的文案。</summary>
+    public string? TodoRuleStatusText
+    {
+        get => _todoRuleStatusText;
+        private set => SetProperty(ref _todoRuleStatusText, value);
+    }
     public long? SourceMessageId => _todo.SourceMessageId;
     public string Source { get; }
     public string SourceChatName { get; }
@@ -198,8 +234,11 @@ public sealed class TodoDetailViewModel : ObservableObject
         {
             if (SetProperty(ref _status, value))
             {
+                // 与已持久化的状态比较，改回原值时清除未保存标记。
+                _hasUnsavedStatusChange = value != _todo.Status;
                 OnPropertyChanged(nameof(IsProjectEditable));
                 OnPropertyChanged(nameof(CanComplete));
+                OnPropertyChanged(nameof(CanTogglePin));
                 CompleteCommand.RaiseCanExecuteChanged();
                 TogglePinCommand.RaiseCanExecuteChanged();
             }
@@ -336,7 +375,11 @@ public sealed class TodoDetailViewModel : ObservableObject
     /// <summary>只保存“待办说明”字段；与“保存待办”共用同一条保存与并发检查路径。</summary>
     public Task SaveDescriptionAsync() => SaveAsync("待办说明已保存。");
 
-    private async Task SaveAsync(string successMessage = "待办已保存。")
+    /// <summary>
+    /// 提交详情里全部可编辑字段（含状态），成功后刷新待办、消息流与日历。
+    /// 对外公开以便回归测试直接驱动真实的“保存待办”流程。
+    /// </summary>
+    public async Task SaveAsync(string successMessage = "待办已保存。")
     {
         if (!TryGetOptionalDueTime(out var dueAt))
         {
@@ -365,6 +408,7 @@ public sealed class TodoDetailViewModel : ObservableObject
         }
 
         _todo = updated;
+        _hasUnsavedStatusChange = false;
         ProjectName = SelectedProject.Name;
         ProjectColor = SelectedProject.Color;
         OnPropertyChanged(nameof(ProjectName));
@@ -374,6 +418,53 @@ public sealed class TodoDetailViewModel : ObservableObject
         Description = updated.Description;
         StatusText = successMessage;
         await _refreshWorkbench();
+    }
+
+    /// <summary>
+    /// 窗口关闭兜底：只提交尚未保存的状态改动。字段一律取已持久化的快照，
+    /// 不把用户仍在编辑但没点“保存待办”的标题、说明、优先级、截止时间或项目顺带写库。
+    /// </summary>
+    /// <returns>是否确实提交了一次状态变更。</returns>
+    public async Task<bool> SaveStatusIfChangedAsync()
+    {
+        if (!_hasUnsavedStatusChange)
+        {
+            return false;
+        }
+
+        try
+        {
+            var updated = await _todoService.UpdateAsync(
+                new UpdateTodoRequest(
+                    _todo.Id,
+                    _todo.Title,
+                    _todo.Description,
+                    _todo.ProjectId,
+                    _todo.Priority,
+                    _todo.DueAt,
+                    Status,
+                    _todo.UpdatedAt,
+                    GroupId: null,
+                    ManagedProjectId: _todo.ManagedProjectId),
+                CancellationToken.None);
+            if (updated is null)
+            {
+                System.Diagnostics.Debug.WriteLine("Unsaved status change was rejected by the concurrency check.");
+                return false;
+            }
+
+            _todo = updated;
+            _hasUnsavedStatusChange = false;
+            // 状态改回活动后待办、消息流与日历必须一起重读。
+            await _refreshWorkbench();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            // 窗口已关闭，不能再弹对话框；记录诊断信息，下一次刷新会显示当前真实状态。
+            System.Diagnostics.Debug.WriteLine($"Unsaved status change could not be saved: {exception.Message}");
+            return false;
+        }
     }
 
     /// <summary>把空白说明归一为 null，避免把空串写入数据库。</summary>
@@ -502,6 +593,36 @@ public sealed class TodoDetailViewModel : ObservableObject
     {
         var reminders = await _reminders.GetForTodoAsync(_todo.Id, CancellationToken.None);
         _currentReminder = reminders.LastOrDefault(item => item.Status is ReminderStatus.Scheduled or ReminderStatus.Dispatching or ReminderStatus.Delivered);
+    }
+
+    /// <summary>
+    /// 保存“此类不再建待办”的关键词规则。只新增规则，不删除本条待办：
+    /// 规则只影响之后新采集的消息，已有待办仍需用户自行处理。
+    /// </summary>
+    private async Task SaveTodoRuleAsync()
+    {
+        if (_todoRuleStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var normalized = TodoRuleMatcher.Normalize(TodoRuleKeyword);
+            await _todoRuleStore.AddAsync(normalized, CancellationToken.None);
+            // 写入后清空输入，避免连续点击产生重复规则或误解为“已加入多条”。
+            TodoRuleKeyword = string.Empty;
+            TodoRuleStatusText = $"已记住「{normalized}」：之后命中该关键词的消息只入库，不再自动建待办。";
+        }
+        catch (ArgumentException exception)
+        {
+            // 校验信息面向用户，例如“至少包含一个不少于 2 个字符的关键词”。
+            TodoRuleStatusText = exception.Message;
+        }
+        catch (Exception exception)
+        {
+            TodoRuleStatusText = $"规则保存失败：{exception.Message}";
+        }
     }
 
     private async Task NavigateAsync()

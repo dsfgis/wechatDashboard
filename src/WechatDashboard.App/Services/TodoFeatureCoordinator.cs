@@ -6,6 +6,7 @@ using WechatDashboard.Application.Agent;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Reminders;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.TodoRules;
 using WechatDashboard.Infrastructure.Background;
 using WechatDashboard.Infrastructure.Persistence;
 
@@ -18,6 +19,8 @@ public sealed class TodoFeatureCoordinator : IDisposable
     private readonly DispatcherTimer _dueRefreshTimer;
     private readonly ReminderWorker _reminderWorker;
     private readonly ReminderNotificationQueue _reminderQueue;
+    // 主窗口注入的共享日历视图模型刷新：日程概览和桌面日历共用同一实例。
+    private readonly Func<Task>? _refreshCalendar;
     private CancellationTokenSource? _workerCancellation;
     private Task? _workerTask;
 
@@ -27,10 +30,13 @@ public sealed class TodoFeatureCoordinator : IDisposable
         Func<IReadOnlyList<string>> aliases,
         Func<IReadOnlyList<string>> followedChats,
         Func<FollowedChatFilterMode> filterMode,
+        TodoRuleStore todoRuleStore,
         Action<int> selectTab,
-        Func<Task> onTodoCreated)
+        Func<Task> onTodoCreated,
+        Func<Task>? refreshCalendar = null)
     {
         _selectTab = selectTab;
+        _refreshCalendar = refreshCalendar;
         var clock = SystemClock.Instance;
         var todoRepository = new SqliteTodoRepository(databasePath);
         var messageRepository = new SqliteMessageRepository(databasePath);
@@ -51,7 +57,12 @@ public sealed class TodoFeatureCoordinator : IDisposable
             clock,
             dialogs,
             NavigateToMessageAsync,
-            onTodoCreated);
+            onTodoCreated,
+            todoRuleStore,
+            // 工作台自身会刷新；这里补齐消息流与日历，保证状态改回活动后所有视图同步。
+            refreshRelatedViews: () => Task.WhenAll(
+                MessageFeed.RefreshAsync(),
+                RefreshCalendarAsync()));
         MessageFeed = new MessageFeedViewModel(
             messageRepository,
             todoRepository,
@@ -66,7 +77,8 @@ public sealed class TodoFeatureCoordinator : IDisposable
             reminderService,
             todoRepository,
             clock,
-            Workbench.RefreshAsync);
+            // 提醒卡片上的“完成”也会改变待办状态，日历必须一起刷新。
+            () => RefreshAllViewsAsync());
         // 详情按钮复用工作台现有详情流程，根据提醒关联的待办ID直接打开。
         _reminderQueue = new ReminderNotificationQueue(
             resolutionHandler.HandleAsync,
@@ -89,6 +101,12 @@ public sealed class TodoFeatureCoordinator : IDisposable
     }
 
     public Task RefreshAsync() => Task.WhenAll(Workbench.RefreshAsync(), MessageFeed.RefreshAsync());
+
+    /// <summary>刷新共享日历视图模型（主窗口日程概览与桌面日历窗口共用）。</summary>
+    private Task RefreshCalendarAsync() => _refreshCalendar?.Invoke() ?? Task.CompletedTask;
+
+    /// <summary>待办、消息流、日历三处一起刷新，用于会改变待办状态的入口。</summary>
+    private Task RefreshAllViewsAsync() => Task.WhenAll(RefreshAsync(), RefreshCalendarAsync());
 
     public async Task StopAsync()
     {

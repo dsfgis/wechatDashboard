@@ -2,13 +2,14 @@ using WechatDashboard.Application.Classification;
 using WechatDashboard.Application.Common;
 using WechatDashboard.Application.Mentions;
 using WechatDashboard.Application.Todos;
+using WechatDashboard.Application.TodoRules;
 using WechatDashboard.Application.Urgency;
 using WechatDashboard.Domain.Entities;
 using WechatDashboard.Domain.Enums;
 
 namespace WechatDashboard.Application.Capture;
 
-/// <summary>Agent 对 @我 消息的分析结果，控制是否创建并覆盖自动待办的优先级、说明和时间提醒。</summary>
+/// <summary>Agent 对单条消息的分析结果，控制是否创建并覆盖自动待办的优先级、说明和时间提醒。</summary>
 /// <param name="Priority">仅用于自动待办的模型优先级。</param>
 /// <param name="Description">模型生成的待办说明；空白时回退默认说明。</param>
 /// <param name="ShouldCreate">是否值得自动创建待办；默认 true 兼容未启用筛选的调用。</param>
@@ -37,10 +38,14 @@ public sealed class MessageCapturePipeline
     private readonly Func<Message, long?> _managedProjectMatcher;
     // Agent 分析依赖均为可选，未装配时完整保留原自动待办行为。
     private readonly IMessageRepository? _messageRepository;
+    // 总闸：是否允许调用模型；范围开关：是否把未 @我 的聊天消息也交给模型。
     private readonly Func<bool> _analyzeMessageContent;
+    private readonly Func<bool> _analyzeAllMessages;
     private readonly Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? _analyzeMentionAsync;
     // 跨群去重：命中既有待办时把消息合并进去，不再重复建待办。
     private readonly Func<Message, CancellationToken, Task<TodoItem?>>? _detectDuplicateAsync;
+    // 用户教给 Agent 的排除规则：命中后消息只入库，不调用模型也不建待办。
+    private readonly Func<IReadOnlyList<TodoRule>> _todoRules;
     // 待办创建时刻的可注入时钟；默认取系统当前时间，测试可注入固定时刻消除时间敏感性。
     private readonly Func<DateTimeOffset> _clock;
 
@@ -56,7 +61,10 @@ public sealed class MessageCapturePipeline
         Func<bool>? analyzeMessageContent = null,
         Func<Message, CancellationToken, Task<MentionMessageAnalysis>>? analyzeMentionAsync = null,
         Func<Message, CancellationToken, Task<TodoItem?>>? detectDuplicateAsync = null,
-        Func<DateTimeOffset>? clock = null)
+        Func<IReadOnlyList<TodoRule>>? todoRules = null,
+        Func<DateTimeOffset>? clock = null,
+        // 追加在参数列表末尾，保持既有位置参数调用（如 managedProjectMatcher）兼容。
+        Func<bool>? analyzeAllMessages = null)
     {
         _adapters = adapters.ToArray();
         _messageProcessingUnitOfWork = messageProcessingUnitOfWork;
@@ -67,8 +75,10 @@ public sealed class MessageCapturePipeline
         _managedProjectMatcher = managedProjectMatcher ?? (_ => null);
         _messageRepository = messageRepository;
         _analyzeMessageContent = analyzeMessageContent ?? (() => false);
+        _analyzeAllMessages = analyzeAllMessages ?? (() => false);
         _analyzeMentionAsync = analyzeMentionAsync;
         _detectDuplicateAsync = detectDuplicateAsync;
+        _todoRules = todoRules ?? (() => Array.Empty<TodoRule>());
         _clock = clock ?? (() => DateTimeOffset.Now);
     }
 
@@ -144,7 +154,7 @@ public sealed class MessageCapturePipeline
     }
 
     /// <summary>
-    /// 处理一批已采集的消息：去重 -> 持久化 -> 项目分类 -> 紧急度评分 -> @我 自动建待办。
+    /// 处理一批已采集的消息：去重 -> 持久化 -> 项目分类 -> 紧急度评分 -> 自动建待办（@我、邮件，或全量分析判定）。
     /// 该方法与 <see cref="RunOnceAsync"/> 共享同一套单消息处理逻辑，
     /// 亦可供外部入口（如"读取当天微信消息"按钮）直接复用，无需经过适配器采集环节。
     /// 通过 Source+SourceMessageKey 去重，保证同一消息多次读取不会重复入库或重复建待办。
@@ -188,15 +198,37 @@ public sealed class MessageCapturePipeline
             var isMentionMe = _mentionDetector.IsMentioned(capturedMessage.Content);
             message = message with { IsMentionMe = isMentionMe };
             var isMailSource = MailSourcePolicy.IsMailSource(capturedMessage.Source);
+            // 单条消息内只取一次开关快照，避免采集途中用户切换造成“调用模型”与“是否建待办”不一致。
+            var analyzeEnabled = _analyzeMessageContent();
+            var analyzeAll = analyzeEnabled && _analyzeAllMessages();
             // 网络分析必须在数据库事务之前完成，失败时以 null 回退本地优先级和默认说明。
-            // 邮件没有 @提及 语义，一律交给 Agent 判定是否需要行动；聊天消息仍只在 @我 时调用。
-            var needsAgentDecision = isMentionMe || isMailSource;
-            var mentionAnalysis = await PrepareMentionAnalysisAsync(message, needsAgentDecision, cancellationToken);
-            // 聊天消息：仅模型明确判定无需创建时跳过；未启用分析或模型失败(null)仍保留原自动待办。
-            // 邮件：默认不进待办，只有模型明确判定需要行动才创建，否则收件箱会淹没待办列表。
-            var shouldCreateTodo = isMailSource
-                ? mentionAnalysis?.ShouldCreate == true
-                : isMentionMe && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
+            // 邮件没有 @提及 语义，一律交给 Agent 判定是否需要行动；聊天消息默认只在 @我 时调用，
+            // 勾选“分析所有消息”后，未 @我 的聊天消息也进入判定。
+            // 命中用户规则的消息已确定不建待办，这里直接跳过模型调用以省下费用与等待。
+            var ruleHit = TodoRuleMatcher.Match(message, _todoRules());
+            var needsAgentDecision = ruleHit is null && (isMentionMe || isMailSource || analyzeAll);
+            var mentionAnalysis = await PrepareMentionAnalysisAsync(
+                message,
+                needsAgentDecision,
+                analyzeEnabled,
+                cancellationToken);
+            // 用户规则优先级最高：命中后无论来源和模型结论都不建待办。
+            // @我 聊天消息：只有模型明确否决时跳过，未启用分析或模型失败仍保留原自动待办（fail-open）。
+            // 邮件和“分析所有消息”下的普通聊天消息：默认不进待办，只有模型明确判定需要行动才创建
+            // （fail-closed），否则全量消息会淹没待办列表。
+            bool shouldCreateTodo;
+            if (ruleHit is not null)
+            {
+                shouldCreateTodo = false;
+            }
+            else if (isMailSource || (!isMentionMe && analyzeAll))
+            {
+                shouldCreateTodo = mentionAnalysis?.ShouldCreate == true;
+            }
+            else
+            {
+                shouldCreateTodo = isMentionMe && (mentionAnalysis is null || mentionAnalysis.ShouldCreate);
+            }
             // 语义去重同样在事务之前完成：命中既有待办时只追加来源消息，不再新建待办。
             var mergeIntoTodoId = shouldCreateTodo
                 ? await PrepareDuplicateTargetAsync(message, cancellationToken)
@@ -299,16 +331,17 @@ public sealed class MessageCapturePipeline
     }
 
     /// <summary>
-    /// 为需要判定的消息准备 Agent 筛选与内容分析。聊天消息由 @我 触发，邮件由来源触发；
-    /// 任何模型故障都返回 null，由调用方按来源采取各自的回退策略。
+    /// 为需要判定的消息准备 Agent 筛选与内容分析。聊天消息由 @我 或“分析所有消息”触发，
+    /// 邮件由来源触发；任何模型故障都返回 null，由调用方按来源采取各自的回退策略。
     /// </summary>
     private async Task<MentionMessageAnalysis?> PrepareMentionAnalysisAsync(
         Message message,
         bool needsAgentDecision,
+        bool analyzeEnabled,
         CancellationToken cancellationToken)
     {
         if (!needsAgentDecision
-            || !_analyzeMessageContent()
+            || !analyzeEnabled
             || _messageRepository is null
             || _analyzeMentionAsync is null)
         {

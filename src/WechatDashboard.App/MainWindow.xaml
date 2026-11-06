@@ -369,7 +369,8 @@
                 </Border>
             </UniformGrid>
 
-            <TabControl x:Name="MainContentTabs" Grid.Row="2" SelectedIndex="4">
+            <TabControl x:Name="MainContentTabs" Grid.Row="2" SelectedIndex="4"
+                        SelectionChanged="MainContentTabs_SelectionChanged">
                 <TabControl.Template>
                     <ControlTemplate TargetType="TabControl">
                         <ContentPresenter ContentSource="SelectedContent" />
@@ -498,7 +499,7 @@
                                         <Button x:Name="GenerateBriefingButton" Content="生成简报" Click="GenerateProjectBriefingButton_Click" Margin="14,0,0,0" Padding="16,4" />
                                     </StackPanel>
                                     <TextBlock x:Name="BriefingStatusText"
-                                               Text="选择项目后生成跨来源简报；模型不可用时自动回退本地统计摘要。"
+                                               Text="选择项目后生成跨来源简报；模型不可用时自动回退本地统计摘要，并显示回退原因。"
                                                Foreground="#6B7280" TextWrapping="Wrap" Margin="0,0,0,8" />
                                     <TextBox x:Name="BriefingResultTextBox"
                                              IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
@@ -900,7 +901,17 @@
                                       Click="AnalyzeMessageContentCheckBox_Click"
                                       Margin="0,8,0,4" />
                             <!-- 明确说明智能筛选范围与模型故障时的保守回退行为。 -->
-                            <TextBlock Text="开启后由大模型判断之后新入库的 @我 消息是否需要创建待办，并生成优先级和说明；低优先级或与你无关的消息仅入库，模型失败时仍按原逻辑自动创建待办。"
+                            <TextBlock Text="开启后由大模型判断之后新入库的 @我 消息是否需要创建待办，并生成优先级和说明；低优先级或与你无关的消息仅入库，模型失败时仍按原逻辑自动创建待办。它是模型调用的总闸，可再勾选“分析所有消息”扩大范围。"
+                                       Foreground="#6B7280"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,8" />
+                            <!-- 全量范围开关：依赖总闸；初始禁用，加载设置后按总闸状态启用。 -->
+                            <CheckBox x:Name="AnalyzeAllMessagesCheckBox"
+                                      Content="分析所有消息（含未 @我 的消息）"
+                                      Click="AnalyzeAllMessagesCheckBox_Click"
+                                      IsEnabled="False"
+                                      Margin="0,0,0,4" />
+                            <TextBlock Text="需先开启“分析消息内容”。开启后，之后新采集的每条消息都由大模型判断是否需要加入待办理；未 @我 的消息只有模型明确判定需要行动才创建，模型不可用时不会创建，也不回溯历史消息。此开关会明显增加 API 调用量。"
                                        Foreground="#6B7280"
                                        TextWrapping="Wrap"
                                        Margin="0,0,0,8" />
@@ -912,6 +923,42 @@
                             <TextBlock Text="API Key 使用当前 Windows 用户加密保存，不写入 SQLite。保存或清除后需重启应用。"
                                        Foreground="#6B7280"
                                        TextWrapping="Wrap" />
+
+                            <Separator Margin="0,20,0,16" />
+                            <!-- 自动待办规则：用户用关键词教 Agent 哪些消息不该进待办，规则立即生效。 -->
+                            <TextBlock Text="自动待办规则（Agent 记忆）" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,6" />
+                            <TextBlock Text="填写关键词，多个用逗号或顿号分隔，例如：验证码、OTP、动态码。命中关键词的消息仍会存入消息流，但不再自动创建待办；大模型也会按同一规则忽略语义相近的说法。手动“转为待办”不受限制。"
+                                       Foreground="#6B7280"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,10" />
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                <TextBox x:Name="NewTodoRuleTextBox"
+                                         Width="360"
+                                         Margin="0,0,8,0"
+                                         VerticalContentAlignment="Center"
+                                         ToolTip="例如：验证码、OTP、动态码" />
+                                <Button Content="添加到记忆" Click="AddTodoRuleButton_Click" Padding="16,4" Margin="0,0,8,0" />
+                                <Button Content="启用/停用" Click="ToggleTodoRuleButton_Click" Padding="16,4" Margin="0,0,8,0" />
+                                <Button Content="删除" Click="DeleteTodoRuleButton_Click" Padding="16,4" />
+                            </StackPanel>
+                            <DataGrid x:Name="TodoRulesGrid"
+                                      ItemsSource="{Binding TodoRules}"
+                                      Height="150"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      SelectionMode="Single"
+                                      HeadersVisibility="Column"
+                                      Margin="0,0,0,8">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="编号" Binding="{Binding Id}" Width="70" />
+                                    <DataGridTextColumn Header="关键词规则" Binding="{Binding Text}" Width="*" />
+                                    <DataGridTextColumn Header="状态" Binding="{Binding State}" Width="90" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="TodoRuleStatusText"
+                                       Foreground="#2563EB"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,0,4" />
                         </StackPanel>
                     </Border>
                 </TabItem>

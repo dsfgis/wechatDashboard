@@ -77,7 +77,7 @@
                       DisplayMemberPath="Name" SelectedValuePath="Value"
                       SelectedValue="{Binding Status, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                       Margin="0,4,0,0" />
-            <TextBlock Text="选择“完成”并保存后移入已办理；进行中、等待仍留在待办理。"
+            <TextBlock Text="把“完成”改回待办理/进行中/等待并保存后，待办会重新出现在待办理与日历；选“完成”则移入已办理。直接关闭窗口也会保存状态改动，其它未保存的编辑不受影响。"
                        Style="{StaticResource HintText}" Margin="0,4,0,10" />
 
             <!-- 优先级与项目同行，减少纵向占用 -->
@@ -164,6 +164,23 @@
                     <TextBox x:Name="OriginalContentTextBox" Text="{Binding OriginalContent, Mode=OneWay}" Style="{StaticResource ReadOnlyInfoTextBox}"
                              AcceptsReturn="True" MaxHeight="240" VerticalScrollBarVisibility="Auto"
                              Margin="0,6,0,0" />
+
+                    <!-- 从这条消息学一条规则：只影响之后新采集的消息，本条待办保留。 -->
+                    <StackPanel Visibility="{Binding TodoRuleVisibility}" Margin="0,12,0,0">
+                        <TextBlock Text="此类消息不再自动建待办" Style="{StaticResource SectionTitle}" Margin="0,0,0,6" />
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="记住这类规则" Command="{Binding SaveTodoRuleCommand}"
+                                    Style="{StaticResource CompactButton}" Margin="8,0,0,0"
+                                    ToolTip="只新增排除规则，不删除本条待办" />
+                            <TextBox Text="{Binding TodoRuleKeyword, UpdateSourceTrigger=PropertyChanged}"
+                                     Padding="6,4" VerticalContentAlignment="Center"
+                                     ToolTip="填写能代表这类消息的短关键词，多个用逗号分隔，例如：验证码、OTP" />
+                        </DockPanel>
+                        <TextBlock Text="建议填短关键词（如“验证码”）；整句很难在消息中原样出现。规则同样可在“模型配置”页管理。"
+                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                        <TextBlock Text="{Binding TodoRuleStatusText}" Style="{StaticResource HintText}"
+                                   Foreground="#2563EB" TextWrapping="Wrap" Margin="0,2,0,0" />
+                    </StackPanel>
                 </StackPanel>
             </Border>
 
